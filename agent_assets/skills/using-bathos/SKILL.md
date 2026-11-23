@@ -63,6 +63,18 @@ bth run --project-slug <slug> -- uv run --no-sync python3 scripts/foo.py --args
 1. *The wrapped form does bind the script and its adjacent sidecar.* `_find_script_path` (`src/bathos/runner.py:122`) walks `uv run --no-sync python3 scripts/foo.py` and returns `scripts/foo.py`: `run`/`python`/`python3` are passthrough tokens (`runner.py:189`), and a valueless flag such as `--no-sync` advances by exactly one token (`runner.py:197-202`, from commit a5ea72a4, 2026-09-25; test `tests/test_runner.py:1862`). The result feeds `resolve_sidecar` / `parse_sidecar` (`runner.py:847-850`). Behind an `env`/`timeout`/`nice`/`taskset` prefix the script is also found (`runner.py:130-132`, commit 4d7f7823, 2026-10-14, debt #2725); if no script can be bound but a sidecar-governed `.py` is named in argv, `bth run` now prints a stderr `WARNING ... SKIPPED` (`runner.py:816-830`, via `_unbound_enforced_scripts`, `runner.py:211`). A praxia measurement of 260926 recorded the wrapped form attaching no sidecar (`script_path` was `"uv"`, `outcome=unknown`) while `--script-path` evaluated the pre-registered outcome. That is **not reproducible against current source**; the likeliest explanation is an install that predated a5ea72a4, but the installed build was not recorded, so it is unproven. Keep the posture it taught: after any wrapped run, confirm the record's `outcome` is not `unknown` before citing it.
 2. *`--script-path` no longer always uses bathos's own interpreter.* `_bare_script_argv` (`src/bathos/mcp.py:1788`, commit 58813250, 2026-10-14, debt #2236) runs a bare `.py` as `uv run --no-sync python <script>` when the working directory has a `.venv` and `uv` is on PATH (`mcp.py:1801`); only otherwise does it fall back to bathos's interpreter, and it then says so on stderr (`mcp.py:1810`). A `pyproject.toml` without a `.venv` does not count. So the ModuleNotFoundError above applies to builds before 2026-10-14, or to a cwd with no `.venv`.
 
+### Entrypoint must be a `.py` file path — never `x.py::fn` (`#3333`)
+
+`runner.py` (`_find_script_path`) only binds a sidecar when it finds an existing file token ending in `.py` (`candidate.exists() and candidate.suffix == ".py"`), and `run_tool` only invokes `_bare_script_argv` when `script_path.endswith(".py")`. Passing an entrypoint spec like `modal run scripts/train.py::main` or `x.py::fn` fails both checks: the token's suffix is `.py::main` and the literal path does not exist on disk, so **no sidecar attaches (`sidecar_mode=""`, `outcome="unknown"`)** — or execution fails with `FileNotFoundError`.
+
+```bash
+# ✓ Correct — pass the .py file path and dispatch via script flags/subcommands
+bth run --project-slug <slug> -- uv run --no-sync python3 scripts/train.py --fn main
+
+# ✗ Wrong — x.py::fn is not a .py file path; sidecar lookup silently misses
+bth run --project-slug <slug> -- modal run scripts/train.py::main
+```
+
 ### Verify a run by its RECORD, never by exit code or console text
 
 Resolve the returned id and check its `outcome` actually evaluated:
@@ -337,13 +349,18 @@ is_residual = true
 temp_mean = "float"
 temp_std = "float"
 n_steps = "int"
+
+# Nested structs (#3327) are supported as [result_schema.<group>] sub-tables:
+# [result_schema.metrics]
+# loss = "float"         # reference in conditions as metrics.loss < 0.1
 ```
 
 **Key Rules:**
 - Outcome `condition` fields are DuckDB SQL fragments evaluated on result JSON
 - Exactly one outcome must have `is_residual = true`
-- `result_schema` declares all columns referenced by outcome conditions
+- `result_schema` declares all columns referenced by outcome conditions. Nested TOML sub-tables such as `[result_schema.metrics]` map to DuckDB `STRUCT(...)` columns and are referenced with dotted names (`metrics.loss < 0.1`). **Caveat:** on a non-zero-exit run, completeness checking (`_result_schema_complete`) counts only top-level scalar fields and skips nested sub-tables, so declare at least one top-level scalar field if you rely on non-zero-exit outcome evaluation.
 - No Python-style chained comparisons: use `AND` instead of `0.4 <= x < 0.7`
+- **Use `IS NULL` / `IS NOT NULL`, never `= null` / `!= null` / `<> null` (`#3327`):** in SQL, `col = NULL` and `col != NULL` always evaluate to `NULL` (never `TRUE`), so an outcome condition using `= null` silently fails to match; `bth validate-sidecar` explicitly rejects `= NULL` / `!= NULL` / `<> NULL` operators. In result JSON, `null` values for declared `[result_schema]` fields are also rejected by `--result` validation.
 
 **How outcome evaluation actually finds your result JSON** — `bth run` reads it from, in order:
 1. `$BTH_RESULTS_PATH` — an env var `bth run` sets for the subprocess. **This is the
@@ -414,9 +431,10 @@ Creates `scripts/experiments/my_experiment.py` and `scripts/experiments/my_exper
 ```bash
 bth validate-sidecar scripts/experiments/train.bth.toml
 bth validate-sidecar scripts/experiments/train.bth.toml --campaign-id my-campaign-id  # also cross-checks claim_discriminates/claim_isolates against the campaign's registered claim
+bth validate-sidecar scripts/experiments/train.bth.toml --result outputs/result.json  # also validates an emitted result JSON against [result_schema] (incl. nested structs) and [outcomes] (#3327)
 ```
 
-Checks TOML syntax, schema completeness, DuckDB condition validity, and residual outcome presence. Prints `field: message` for each error and exits 1 if invalid; prints `✓ <path> is valid` on success.
+Checks TOML syntax, schema completeness, DuckDB condition validity (including rejecting `= NULL` / `!= NULL`), and residual outcome presence; with `--result`, verifies payload types, rejects `null` values in declared fields, and reports `matched_outcome`. Prints `field: message` for each error and exits 1 if invalid; prints `✓ <path> is valid` on success. (MCP mirror: `validate_sidecar` with optional `campaign_id` and `result`.)
 
 Note: `bth check` (see **Query and Inspect** below) is a *different* command — it checks already-recorded runs for git-drift against current HEAD, it does not validate sidecars.
 
@@ -767,10 +785,11 @@ Shows table of recent runs (project, command, outcome, duration, timestamp). By 
 
 ```bash
 bth show abc123-uuid
+bth show abc12345                               # unambiguous UUID prefix lookup (#3333)
 bth show abc123-uuid --include-superseded
 ```
 
-Full run metadata, git state, outcome, sidecar hash, postmortem status, validity state, and distance-from-present calculation. Refuses to display a hidden run by default with a resolution hint (`RESULT_HIDDEN`); pass `--include-superseded` to inspect details of a void or superseded run.
+Full run metadata, git state, outcome, sidecar hash, postmortem status, validity state, and distance-from-present calculation. Accepts a full run UUID or an unambiguous UUID prefix (exact match preferred; raises an explicit ambiguity error if multiple runs share the prefix; returns a clear not-found error if zero runs match). Refuses to display a hidden run by default with a resolution hint (`RESULT_HIDDEN`); pass `--include-superseded` to inspect details of a void or superseded run.
 
 ### The Seven Validity States & Distance-From-Present (D6)
 
@@ -953,6 +972,8 @@ path = "~/projects/myproject"
 ## Key Rules
 
 - **Always use `uv run python`** in sbatch scripts, never bare `python` (cluster nodes have no global python)
+- **Pass a `.py` file path, never `x.py::fn`** — `runner.py` only binds a sidecar to an existing `.py` file token (`#3333`)
+- **Use `IS NULL` / `IS NOT NULL`, never `= null`** in outcome conditions, and validate nested `[result_schema.*]` structs + JSON payloads with `bth validate-sidecar --result <json>` (`#3327`)
 - **Verify sidecar before submission** — run `bth validate-sidecar <path>` to validate outcome conditions; `bth check` checks *recorded runs* against current git HEAD, it does not validate sidecars
 - **Result schema must include all outcome columns** — if `condition = "metric >= 0.9"`, declare `metric = "float"` in `[result_schema]`
 - **Exactly one residual outcome** — one outcome must have `is_residual = true` for gate evaluation
@@ -1064,6 +1085,38 @@ Rotate raw diagnostic JSONL logs in `~/.bth/catalog/logs/` into `.jsonl.zst`:
 bth telemetry rotate --max-size-mb 10 --max-age-days 30
 ```
 MCP mirror: `telemetry_rotate`.
+
+## Literature-Review Cross-Checks, `claims JSONL` & Coverage Probes (`#2346`)
+
+When grounding hypotheses, thresholds (`source = "lit:<ref>"`), or baseline comparisons in prior literature, treat extracted claims as unverified until cross-checked against primary sources and probed for coverage gaps:
+
+1. **Maintain a `claims.jsonl` audit ledger** — Record one JSON object per extracted claim with stable `claim_id`, primary `ref` (DOI, arXiv ID, or run UUID), `quoted_claim` (or verbatim figure/table location), `scope_conditions` (system, metric definition, replica/independence unit, regime limits), `bears_on` (hypothesis/confound ID), and `disposition` (`supports` | `contradicts` | `scope-differs`). Never cite a summary number or abstract headline without verifying scope and units in the primary paper.
+2. **Cross-check sidecar `[review]` entries** — Declare targeted `[[review.literature]]` (`ref`, `claim`, `bears_on`, `disposition`, `checked`) and `[[review.implementation]]` (`source`, `commit`, `what_was_checked`, `bears_on`, `disposition`) blocks in your sidecar (see **bathos-rigor-gates**). Remember that sidecar `[review]` reaches tier `C1` only (`C2` requires the 5-phase **bathos-literature-parity** audit), and a `supports` entry whose hypothesis is disfavored at conclude time opens a `citation_contradicted` obligation.
+3. **Run coverage probes before concluding or citing** —
+   - Check claim-entity coverage via `bth claim validate` and the Review Coverage Gate: every `[[hypotheses]]` and `[[confounds]]` ID must have at least one `C1` `covering_id` across the campaign's sidecars (`empty_slate` is never treated as covered).
+   - Probe your `claims.jsonl` against the active hypotheses/confounds to flag uncovered IDs, unverified `lit:<ref>` thresholds missing `scope_conditions`, and single-source claims with no contradicting check.
+   - Use the `capability_probe` MCP tool to verify runtime support (`seed_live`, `stats_battery_live`) before relying on statistical or seed-floor rigor gates.
+
+## Code & Port Parity Verification (`#2323`)
+
+When porting an algorithm, kernel, or baseline across languages or frameworks (e.g. PyTorch → JAX, reference repo → custom implementation), do not rely on a single ad-hoc smoke value. Structure parity verification around four explicit dimensions:
+
+1. **Declare `comparison_kind` upfront** — State which equivalence relation the test asserts so tolerances and pass criteria are falsifiable:
+   - `exact_bitwise` / `exact_deterministic`: identical outputs under fixed inputs and pinned RNG/seed (e.g. `repro_floor` attestation).
+   - `numeric_tolerance`: outputs agree within explicit `equivalence_bound` / `rtol` + `atol` bounds (e.g. floating-point kernel/port parity, `oracle_match` attestation).
+   - `distributional` / `statistical`: stochastic methods where single draws diverge; compare pooled/multi-seed ensemble distributions and effect sizes rather than single-seed trajectories.
+   - `behavioral` / `structural`: rank ordering, symmetries, or qualitative regime transitions hold when raw scales differ.
+2. **Oracle coverage** — Compare against a frozen, independent reference oracle (hashed inputs/outputs, `oracle_match` attestation via `bth attestation scaffold oracle_match`, or **bathos-literature-parity** for published methods), never against expectations derived solely from the port itself.
+3. **RNG & seed coverage** — Reconcile PRNG algorithms, draw order, seed-splitting semantics (`torch.Generator` vs `numpy.random` vs `jax.random.PRNGKey`), and dtype/broadcasting rules before asserting deterministic parity; pass `--bth-seed` (`$BTH_SEED`) explicitly when pinning seeds.
+4. **Knob & branch coverage** — Sweep every configuration knob, optional regularizer, boundary condition, and normalization mode (pairing load-bearing knobs with `[differential]` pre-flight checks) so an inert or dead-wired flag cannot pass parity under default settings.
+
+## PyTorch / ML Device-Placement Sanity Checks (`#2177`)
+
+Device mismatches and silent CPU fallbacks invalidate benchmarks and cause hard-to-diagnose cluster failures. Check device placement explicitly in every ML experiment or benchmark script:
+
+1. **Always pass explicit `map_location` in `torch.load`** — Never call `torch.load(path)` without `map_location` (use `torch.load(path, map_location="cpu", weights_only=True)` or `map_location=device`). Loading a CUDA-saved checkpoint without `map_location` crashes on CPU-only nodes (`Attempting to deserialize object on a CUDA device`) or silently allocates onto `cuda:0` on multi-GPU/SLURM nodes.
+2. **Run a CPU-vs-GPU sanity check before scaling up** — Before submitting large GPU jobs (`bth submit --preset gpu`), compare forward outputs, loss values, and gradients on a small synthetic batch between CPU and GPU (within expected fp32/bf16 tolerance) and assert every parameter, buffer, and batch tensor resides on the target device (`next(model.parameters()).device == batch.device`).
+3. **Fail fast on unexpected device fallback and record device provenance** — If a run requires GPU, assert `torch.cuda.is_available()` explicitly instead of silently falling back to CPU, and record the resolved device, dtype, and AMP precision in `[result_schema]` so a CPU-fallback run cannot be misread as a GPU benchmark.
 
 ## Related
 

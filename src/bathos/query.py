@@ -472,11 +472,17 @@ def _fold_once(catalog_dir: Path, ingest_state: dict | None) -> bool:
 
 
 def _cool_get_run(run_id: str, catalog_dir: Path) -> Run | None:
-    """Get a single run by ID using cool tier (PyArrow)."""
+    """Get a single run by exact ID or unambiguous prefix using cool tier (PyArrow)."""
     runs = read_runs(catalog_dir)
     for r in runs:
         if r.id == run_id:
             return r
+    prefix_matches = [r for r in runs if r.id.startswith(run_id)]
+    unique_ids = sorted({r.id for r in prefix_matches})
+    if len(unique_ids) > 1:
+        raise AmbiguousRunId(run_id, unique_ids)
+    if len(unique_ids) == 1:
+        return prefix_matches[0]
     return None
 
 
@@ -486,8 +492,14 @@ def get_run(
     *,
     allow_cool_fallback: bool = False,
     include_superseded: bool = False,
+    raise_if_not_found: bool = False,
 ) -> Run | None:
-    """Get a single run by ID, or None if not found.
+    """Get a single run by ID or unambiguous prefix, or None if not found.
+
+    Exact ID match is preferred when both an exact ID and longer IDs sharing that
+    prefix exist. Raises ``AmbiguousRunId`` if ``run_id`` matches multiple distinct
+    runs as a prefix. When 0 matches exist, returns ``None`` by default (or raises
+    ``CatalogError`` if ``raise_if_not_found=True``).
 
     Dispatches to the index, warm, or cool backend based on catalog state.
 
@@ -499,15 +511,25 @@ def get_run(
     that act on outputs or outcomes (blast radius, outputs, pin resolution)
     must keep the default and see None.
     """
+    if not run_id:
+        if raise_if_not_found:
+            raise CatalogError("Run not found: empty run_id")
+        return None
+
     backend = _resolve_backend(catalog_dir)
     if backend == "index":
-        run = _index_get_run(run_id, catalog_dir)
+        run = _index_resolve_run(run_id, catalog_dir)
     elif backend == "warm":
         run = _warm_get_run(run_id, catalog_dir, allow_cool_fallback=allow_cool_fallback)
     else:
         run = _cool_get_run(run_id, catalog_dir)
 
-    if run is not None and not include_superseded:
+    if run is None:
+        if raise_if_not_found:
+            raise CatalogError(f"Run not found: {run_id!r} in catalog {catalog_dir}")
+        return None
+
+    if not include_superseded:
         from bathos.errors import HIDDEN_STATE_TO_EXCEPTION, ResultHiddenError
         from bathos.validity import resolve_validity
 
@@ -528,9 +550,37 @@ def get_run(
 
 
 def _index_get_run(run_id: str, catalog_dir: Path) -> Run | None:
-    """Get a single run by ID from the folded index (flag on; spec AC-3)."""
+    """Get a single run by exact ID from the folded index (flag on; spec AC-3)."""
     runs = _index_query_runs(catalog_dir, "SELECT * FROM runs WHERE id = ?", [run_id])
     return runs[0] if runs else None
+
+
+def _index_resolve_run(run_id: str, catalog_dir: Path) -> Run | None:
+    """Get a single run by exact ID or unambiguous prefix from the folded index."""
+    con = connect_read(catalog_dir)
+    try:
+        cur = con.execute("SELECT * FROM runs WHERE id = ?", [run_id])
+        col_names = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        if rows:
+            return _run_from_index_row(dict(zip(col_names, rows[0], strict=True)))
+
+        prefix_rows = con.execute(
+            "SELECT DISTINCT id FROM runs WHERE id LIKE ? || '%' ESCAPE '\\'",
+            [_escape_like(run_id)],
+        ).fetchall()
+        ids = sorted({r[0] for r in prefix_rows})
+        if len(ids) > 1:
+            raise AmbiguousRunId(run_id, ids)
+        if not ids:
+            return None
+
+        cur = con.execute("SELECT * FROM runs WHERE id = ?", [ids[0]])
+        col_names = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        return _run_from_index_row(dict(zip(col_names, rows[0], strict=True))) if rows else None
+    finally:
+        con.close()
 
 
 COOL_UNINDEXED_SOURCE = "cool_unindexed"
@@ -547,6 +597,33 @@ def run_source(run: Run) -> str | None:
     return meta.get(_SOURCE_KEY) if isinstance(meta, dict) else None
 
 
+def _cool_fallback_exact_paths(run_id: str, catalog_dir: Path) -> list[Path] | None:
+    """Return exact-match cool fragment paths for `run_id`, or None if `run_id` is unsafe."""
+    if not _SAFE_RUN_ID.fullmatch(run_id or ""):
+        return None
+    return sorted(
+        p
+        for p in (catalog_dir / "runs").glob(f"*/run_{run_id}.parquet")
+        if not p.name.endswith(".tmp.parquet")
+    )
+
+
+def _cool_fallback_prefix_ids(prefix: str, catalog_dir: Path) -> set[str]:
+    """Return distinct cool-fragment run IDs starting with `prefix`."""
+    if not _SAFE_RUN_ID.fullmatch(prefix or ""):
+        return set()
+    ids: set[str] = set()
+    for p in (catalog_dir / "runs").glob(f"*/run_{prefix}*.parquet"):
+        if p.name.endswith(".tmp.parquet"):
+            continue
+        name = p.name
+        if name.startswith("run_") and name.endswith(".parquet"):
+            cand = name[len("run_") : -len(".parquet")]
+            if cand.startswith(prefix):
+                ids.add(cand)
+    return ids
+
+
 def _cool_fallback_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     """Look up a run that exists only as a cool fragment (written after the last compact).
 
@@ -554,15 +631,8 @@ def _cool_fallback_get_run(run_id: str, catalog_dir: Path) -> Run | None:
     `_source = "cool_unindexed"` so callers can tell it has not been compacted.
     run_id is restricted to a safe charset before any glob is built.
     """
-    if not _SAFE_RUN_ID.fullmatch(run_id or ""):
-        return None
-
     t_start = time.monotonic()
-    matches = sorted(
-        p
-        for p in (catalog_dir / "runs").glob(f"*/run_{run_id}.parquet")
-        if not p.name.endswith(".tmp.parquet")
-    )
+    matches = _cool_fallback_exact_paths(run_id, catalog_dir)
     if not matches:
         return None
     if len(matches) > 1:
@@ -597,34 +667,60 @@ def _cool_fallback_get_run(run_id: str, catalog_dir: Path) -> Run | None:
 
 
 def _warm_get_run(run_id: str, catalog_dir: Path, *, allow_cool_fallback: bool = False) -> Run | None:
-    """Get a single run by ID using warm tier (DuckDB), falling back to cool fragments."""
+    """Get a single run by exact ID or unambiguous prefix using warm tier (DuckDB)."""
     t_start = time.monotonic()
 
     con = connect_read(catalog_dir)
-    con.execute("SET TimeZone='UTC'")
+    try:
+        con.execute("SET TimeZone='UTC'")
 
-    cur = con.execute("SELECT * FROM runs WHERE id = ?", [run_id])
-    rows = cur.fetchall()
-    columns = [d[0] for d in cur.description]
+        cur = con.execute("SELECT * FROM runs WHERE id = ?", [run_id])
+        rows = cur.fetchall()
+        columns = [d[0] for d in cur.description]
 
-    if not rows:
-        con.close()
-        # Emit telemetry event (0 rows found)
-        duration_ms = (time.monotonic() - t_start) * 1000
-        event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=0)
-        # A run finished after the last `bth compact` lives only as a cool fragment.
+        if rows:
+            run = _row_to_run(rows[0], columns)
+            duration_ms = (time.monotonic() - t_start) * 1000
+            event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=len(rows))
+            return run
+
+        prefix_rows = con.execute(
+            "SELECT DISTINCT id FROM runs WHERE id LIKE ? || '%' ESCAPE '\\'",
+            [_escape_like(run_id)],
+        ).fetchall()
+        warm_ids = {r[0] for r in prefix_rows}
+
+        cool_ids: set[str] = set()
         if allow_cool_fallback:
-            return _cool_fallback_get_run(run_id, catalog_dir)
-        return None
+            exact_cool = _cool_fallback_exact_paths(run_id, catalog_dir)
+            if exact_cool:
+                # Exact match (or exact-ID multi-slug ambiguity) in cool tier takes precedence.
+                con.close()
+                return _cool_fallback_get_run(run_id, catalog_dir)
+            cool_ids = _cool_fallback_prefix_ids(run_id, catalog_dir)
 
-    run = _row_to_run(rows[0], columns)
-    con.close()
+        all_ids = sorted(warm_ids | cool_ids)
+        if len(all_ids) > 1:
+            raise AmbiguousRunId(run_id, all_ids)
 
-    # Emit telemetry event
-    duration_ms = (time.monotonic() - t_start) * 1000
-    event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=len(rows))
+        if not all_ids:
+            duration_ms = (time.monotonic() - t_start) * 1000
+            event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=0)
+            return None
 
-    return run
+        resolved_id = all_ids[0]
+        if resolved_id in warm_ids:
+            cur = con.execute("SELECT * FROM runs WHERE id = ?", [resolved_id])
+            rows = cur.fetchall()
+            columns = [d[0] for d in cur.description]
+            run = _row_to_run(rows[0], columns) if rows else None
+            duration_ms = (time.monotonic() - t_start) * 1000
+            event("catalog.query", query_kind="get", duration_ms=int(duration_ms), rows=len(rows))
+            return run
+    finally:
+        con.close()
+
+    return _cool_fallback_get_run(resolved_id, catalog_dir)
 
 
 def _cool_find_runs(

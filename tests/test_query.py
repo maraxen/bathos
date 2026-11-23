@@ -555,3 +555,195 @@ def test_warm_get_and_list_return_all_columns_past_index_36(tmp_catalog: Path):
     assert listed[0].epistemic_class == "exploratory"
     assert listed[0].tentative_outcome == "pass"
     assert listed[0].agent_session == "s1"
+
+
+def _make_run(run_id: str, slug: str = "testproj") -> Run:
+    return Run(
+        id=run_id,
+        project_slug=slug,
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        timestamp=datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC),
+        status="completed",
+        exit_code=0,
+    )
+
+
+@pytest.mark.parametrize("backend_mode", ["cool", "warm", "index"])
+def test_get_run_uuid_prefix_exact_ambiguous_and_not_found(tmp_path: Path, backend_mode: str):
+    """#3333: get_run supports unambiguous prefix lookup, prefers exact matches, raises AmbiguousRunId, and handles 0 matches."""
+    import json
+
+    from bathos.compact import compact
+    from bathos.init import init_project
+    from bathos.query import AmbiguousRunId, CatalogError
+    from bathos.runlog.envelope import build_envelope
+    from bathos.runlog.ingest import run_ingest
+    from bathos.runlog.mode import cutover_marker_path
+    from bathos.runlog.project_id import assign_project_id, read_project_id, register_main_root
+
+    cat = tmp_path / f"cat_{backend_mode}"
+    init_catalog(cat)
+
+    id_exact = "abcd1111"
+    id_longer = "abcd1111-9999-0001"
+    id_other = "abcd2222-0000-0002"
+    id_unique = "beef9999-0000-0003"
+    id_wild = "abc_def-0004"
+
+    if backend_mode == "index":
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@t.com"], cwd=repo, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
+        )
+        init_project(repo, slug="testproj", catalog_dir=cat)
+        assign_project_id(repo)
+        pid = read_project_id(repo / ".bth.toml")
+        register_main_root(repo)
+        cutover_marker_path(cat).write_text(
+            json.dumps({"at": "2026-01-01T00:00:00Z", "bathos": "test", "attempt": "1", "segments": []}),
+            encoding="utf-8",
+        )
+        log_dir = repo / ".bth" / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        seq = 1
+        for rid in (id_exact, id_longer, id_other, id_unique, id_wild):
+            for kind, data in (
+                (
+                    "run.started",
+                    {
+                        "id": rid,
+                        "project_slug": "testproj",
+                        "command": "python run.py",
+                        "argv": ["python", "run.py"],
+                        "git_hash": "abc123",
+                        "git_branch": "main",
+                        "git_dirty": False,
+                        "timestamp": "2026-05-10T12:00:00Z",
+                    },
+                ),
+                (
+                    "run.finished",
+                    {
+                        "id": rid,
+                        "status": "completed",
+                        "exit_code": 0,
+                        "duration_s": 1.0,
+                        "output_paths": [],
+                        "outcome": "pass",
+                        "outcome_error_reason": "",
+                        "outcome_is_residual": False,
+                        "adversarial_check_status": "",
+                        "timestamp": "2026-05-10T12:01:00Z",
+                    },
+                ),
+            ):
+                env = build_envelope(
+                    kind=kind,
+                    entity=[rid],
+                    data=data,
+                    seq=seq,
+                    ts="2026-05-10T12:00:00.000000Z",
+                    eid=f"e-{seq}",
+                    main_root=repo,
+                    worktree_root=repo,
+                    project="testproj",
+                    project_id=pid,
+                    writer="w1",
+                )
+                lines.append(json.dumps(env, sort_keys=True) + "\n")
+                seq += 1
+        (log_dir / "seg1.jsonl").write_text("".join(lines), encoding="utf-8")
+        run_ingest(cat)
+    else:
+        for rid in (id_exact, id_longer, id_other, id_unique, id_wild):
+            write_run(_make_run(rid), cat)
+        if backend_mode == "warm":
+            compact(cat)
+
+    # 1. Unambiguous prefix resolves full run
+    got_unique = get_run("beef9999", cat)
+    assert got_unique is not None
+    assert got_unique.id == id_unique
+
+    # 2. Exact match is preferred even when another ID shares it as a prefix
+    got_exact = get_run(id_exact, cat)
+    assert got_exact is not None
+    assert got_exact.id == id_exact
+
+    # 3. Multiple matches raise AmbiguousRunId with candidate IDs
+    with pytest.raises(AmbiguousRunId) as exc_info:
+        get_run("abcd", cat)
+    assert exc_info.value.prefix == "abcd"
+    assert exc_info.value.candidates == sorted([id_exact, id_longer, id_other])
+
+    # 4. LIKE wildcards are matched literally, never as wildcards
+    got_wild = get_run("abc_", cat)
+    assert got_wild is not None and got_wild.id == id_wild
+    assert get_run("abc%", cat) is None
+    assert get_run("abc_d%f", cat) is None
+
+    # 5. 0 matches: None by default, clear CatalogError when raise_if_not_found=True
+    assert get_run("deadbeef", cat) is None
+    with pytest.raises(CatalogError, match="Run not found: 'deadbeef'"):
+        get_run("deadbeef", cat, raise_if_not_found=True)
+
+    # Empty run_id
+    assert get_run("", cat) is None
+    with pytest.raises(CatalogError, match="Run not found"):
+        get_run("", cat, raise_if_not_found=True)
+
+
+def test_get_run_warm_with_cool_fallback_prefix_and_ambiguity(tmp_path: Path):
+    """Warm + cool fallback resolves cool-only prefixes and detects cross-tier prefix ambiguity without false-positives on compacted runs."""
+    from bathos.compact import compact
+    from bathos.query import COOL_UNINDEXED_SOURCE, AmbiguousRunId, run_source
+
+    cat = tmp_path / "cat"
+    init_catalog(cat)
+
+    warm_id = "aaaa1111-0000-0001"
+    compacted_unique = "cccc3333-0000-0002"
+    write_run(_make_run(warm_id), cat)
+    write_run(_make_run(compacted_unique), cat)
+    compact(cat)
+
+    # Cool-only run added after compact
+    cool_id = "aaaa2222-0000-0003"
+    cool_only_unique = "dddd4444-0000-0004"
+    write_run(_make_run(cool_id), cat)
+    write_run(_make_run(cool_only_unique), cat)
+
+    # Compacted run (present in warm AND cool fragment) is NOT ambiguous
+    got_compacted = get_run("cccc3333", cat, allow_cool_fallback=True)
+    assert got_compacted is not None
+    assert got_compacted.id == compacted_unique
+    assert run_source(got_compacted) is None
+
+    # Cool-only run is found by prefix when allow_cool_fallback=True
+    got_cool = get_run("dddd4444", cat, allow_cool_fallback=True)
+    assert got_cool is not None
+    assert got_cool.id == cool_only_unique
+    assert run_source(got_cool) == COOL_UNINDEXED_SOURCE
+
+    # Without allow_cool_fallback, cool-only prefix is not visible
+    assert get_run("dddd4444", cat, allow_cool_fallback=False) is None
+
+    # Prefix shared across warm + cool raises AmbiguousRunId when allow_cool_fallback=True
+    with pytest.raises(AmbiguousRunId) as exc_info:
+        get_run("aaaa", cat, allow_cool_fallback=True)
+    assert exc_info.value.candidates == [warm_id, cool_id]
+
+    # Without cool fallback, only warm_id is visible so "aaaa" resolves to warm_id
+    got_warm_only = get_run("aaaa", cat, allow_cool_fallback=False)
+    assert got_warm_only is not None
+    assert got_warm_only.id == warm_id
