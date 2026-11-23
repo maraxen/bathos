@@ -410,3 +410,25 @@ class TestTechDebt3563UnverifiableAndDbErrors:
         (corrupt_cat / "bathos.db").write_bytes(b"not a valid duckdb database")
         with pytest.raises(duckdb.Error):
             fold_blast_radius_state(corrupt_cat, "run", "r1")
+
+    def test_in_process_mixed_config_fallback_uses_connect_read(self, catalog_dir):
+        import duckdb
+
+        append_ledger_record(
+            BlastRadiusRecord(
+                entity_type="campaign",
+                entity_id="camp-mixed-cfg",
+                to_state="unverifiable",
+                reason="dirty member run",
+            ),
+            catalog_dir,
+        )
+
+        # Hold bathos.db open read-write in the same process so connect_read(..., read_only=True)
+        # raises DuckDB's "different configuration" ConnectionException and falls back to
+        # connect_read(..., read_only=False, wire_validity=False).
+        rw_con = duckdb.connect(str(catalog_dir / "bathos.db"), read_only=False)
+        try:
+            assert fold_blast_radius_state(catalog_dir, "campaign", "camp-mixed-cfg") == "unverifiable"
+        finally:
+            rw_con.close()

@@ -434,7 +434,7 @@ def latest_ledger_record(
         # DuckDB forbids mixing read_only configs on the same file.
         if "different configuration" not in str(exc).lower():
             raise
-        con = duckdb.connect(str(db_path), read_only=False)
+        con = connect_read(cat, read_only=False, wire_validity=False)
     try:
         return _fetch_latest_record(con, entity_type, entity_id)
     except duckdb.Error as exc:
