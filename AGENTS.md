@@ -10,13 +10,16 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-06-23)
+## Current Status (as of 2026-11-13)
 
-**Latest: v0.12.0 — 918 tests passing.**
+**Latest: v0.15.0 (2026-11-13) — 4,991 tests collected on `ddcb3456`.**
 
-Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of current version:
+Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of recent versions:
 
-- **Claim-tier rigor** — `bth claim scaffold/register/validate`, Union Gate at `bth campaign conclude`, `claim_coverage_<id>.json` sidecar (with `clause_labels`), AC-04/05/06 discriminability advisories, AC-13 `[baseline_parity]` confound lint, Signal 12 in sprint-audit, descriptive-label lint (`bth lint` on `.bth/claims/`), schema v8 (`claim_discriminates`, `claim_isolates`)
+- **Bearings v1 (`v0.15.0`)** — multi-scale goal awareness (observe-only), human-confirmed project charters (`bth charter confirm`), deterministic blind packets and reading records (`PacketLeakError`), AC-9 `[charter] purpose` labels, and shadow mode (`cisternal>=0.1.7`, `shadow.label`, `bth sync` shadow support)
+- **Result Validity, Supersession & Archive (`v0.14.0`)** — `.bth/instruments/*.toml` defect & estimand-change registries, `version_resolver.py`, `validity_cache.db`, `--include-invalid`, `.bth/findings/*.toml` lifecycle (`bth finding create/list/show/settle/supersede/reopen`), `bth-session-start-hook`, `bth archive-sweep`, doc store archival, and `bth telemetry-rotate`
+- **Runlog, Provenance & Preflight (`v0.13.x`)** — `bth lock` (`materialize`/`relocate`/`untrack`/`push`/`fetch`), `[breakdown]` distributional discipline & `near_bound` obligations, postmortem `format = 2` (`[fork]`/`[[amendments]]`), `bth backfill-declarations`, `[provenance] track_packages`, `[requires]`/`[budget]` `bth preflight`, strict unaffiliated project refusal & non-git checkout binding
+- **Claim-tier rigor (`v0.12.0`)** — `bth claim scaffold/register/validate`, Union Gate at `bth campaign conclude`, `claim_coverage_<id>.json` sidecar (with `clause_labels`), AC-04/05/06 discriminability advisories, AC-13 `[baseline_parity]` confound lint, Signal 12 in sprint-audit, descriptive-label lint (`bth lint` on `.bth/claims/`), schema v8 (`claim_discriminates`, `claim_isolates`)
 - **Literature-parity v1** — `parity_validate.py`, `attest_parity()` / `bth campaign attest-parity`, F2 conclude-gate + F3 submit-gate, `parity_confound_check()`, Signal 13, schema v9 (`parity_run_type` COOL column), skill protocol in `/using-bathos`
 - **AC-20 SHA-drift** — `check_output_sha_drift()`; `bth check --check-outputs` flags drift; parity confound downgrades on artifact mutation
 - **Experimental controls discipline** — `stage_name` write path, `[reproduction]`/`[controls]` sidecar blocks, reproduction prerequisite gate at `bth submit`, `control_arm_rate` Signal 9, `baseline_ref` Tier-2 lint, novel/reproduces Tier-1 lint, submit-provenance Parquet, bypass-rate Signal 10
