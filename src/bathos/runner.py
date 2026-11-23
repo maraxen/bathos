@@ -1322,7 +1322,7 @@ def _run_script_impl(
             return 1
     elif script_path is not None:
         bundle = resolve_sidecar(script_path)
-        if bundle.found:
+        if bundle.found and bundle.path is not None:
             try:
                 sidecar = parse_sidecar(bundle.path)
             except SidecarError as e:

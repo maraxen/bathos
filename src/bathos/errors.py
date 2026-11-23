@@ -506,6 +506,14 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "Ac9LabelError": BathosErrorCode.BEARINGS_AC9_LABEL_INVALID,
     "ShadowConfigError": BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID,
     "CitationVerificationError": BathosErrorCode.CITATION_INVALID,
+    # Observations & appraisals (spec 261015 S3)
+    "ObservationError": BathosErrorCode.INVALID_PARAM,
+    "ObservationValidationError": BathosErrorCode.INVALID_PARAM,
+    "ObservationNotFoundError": BathosErrorCode.INVALID_PARAM,
+    "ObservationRunNotFoundError": BathosErrorCode.RUN_NOT_FOUND,
+    "AppraisalError": BathosErrorCode.INVALID_PARAM,
+    "AppraisalValidationError": BathosErrorCode.DOCUMENT_INVALID,
+    "AppraisalNotFoundError": BathosErrorCode.INVALID_PARAM,
 }
 
 

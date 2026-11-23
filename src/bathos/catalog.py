@@ -300,7 +300,7 @@ def compact_submit_provenance(
             if pa.types.is_timestamp(ts_col.type):
                 ts_utc = pc.cast(ts_col, pa.timestamp("us", tz="UTC"))
                 cutoff_scalar = pa.scalar(cutoff, type=pa.timestamp("us", tz="UTC"))
-                mask = pc.fill_null(pc.greater_equal(ts_utc, cutoff_scalar), True)
+                mask = pc.fill_null(getattr(pc, "greater_equal")(ts_utc, cutoff_scalar), True)
                 kept = combined.filter(mask)
                 pruned_here = combined.num_rows - kept.num_rows
 
@@ -313,7 +313,7 @@ def compact_submit_provenance(
             continue
 
         if kept.num_rows > 0 and "submitted_at" in kept.column_names:
-            order = pc.sort_indices(kept, sort_keys=[("submitted_at", "ascending")])
+            order = getattr(pc, "sort_indices")(kept, sort_keys=[("submitted_at", "ascending")])
             kept = kept.take(order)
 
         corrupt_count = len(files) - len(readable_files)

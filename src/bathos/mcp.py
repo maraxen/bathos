@@ -3086,7 +3086,6 @@ def run_tool(
             catalog_dir=cat_dir,
             output_paths=output_paths,
             tags=tags,
-            cwd=Path.cwd(),
             agent_mode=agent_mode or None,
             no_sidecar=no_sidecar,
             sidecar_path=sidecar or None,
