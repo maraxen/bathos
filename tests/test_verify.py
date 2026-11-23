@@ -216,3 +216,26 @@ class TestVerifyArchive:
         result = verify_archive(archive_root)
         assert result.ok is True  # Not an error, just warning
         assert any("checksum" in w.lower() or "schema" in w.lower() for w in result.warnings)
+
+
+def test_verify_warm_flags_orphaned_campaign_runs(tmp_path):
+    """Negative test (#3051): verify_warm rejects orphaned campaign_runs rows."""
+    import duckdb
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    db_path = catalog_dir / "bathos.db"
+    con = duckdb.connect(str(db_path))
+    con.execute("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
+    con.execute("CREATE TABLE campaigns (id TEXT PRIMARY KEY, mode TEXT)")
+    con.execute(
+        "CREATE TABLE campaign_runs (campaign_id TEXT, run_id TEXT, PRIMARY KEY (campaign_id, run_id))"
+    )
+    con.execute("INSERT INTO campaign_runs VALUES ('missing-camp', 'run-1')")
+    con.close()
+
+    result = verify_warm(catalog_dir)
+    assert result.ok is False
+    assert result.stats["orphaned_campaign_runs"] == 1
+    assert any("Orphaned campaign_runs" in e for e in result.errors)

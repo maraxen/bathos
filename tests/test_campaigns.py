@@ -383,12 +383,18 @@ def test_review_campaign_works_with_read_only_connection(populated_warm_catalog:
 
 
 def test_compact_populates_campaign_runs(tmp_catalog: Path):
-    """Test that compact() populates campaign_runs from runs with campaign_id."""
+    """Test that compact() populates campaign_runs from runs with a valid campaign_id."""
     init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        camp = create_campaign(db, name="Test", project_slug="testproj", mode="exploration")
+        campaign_id = camp.id
+    finally:
+        db.close()
 
     # Create runs with campaign_id
     base = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
-    campaign_id = "test_campaign_123"
     for i in range(2):
         r = Run(
             project_slug="testproj",
@@ -1513,3 +1519,133 @@ hypothesis_ids = ["H_primary", "H_null"]
     finally:
         db.close()
         reset_writers_for_test()
+
+
+def test_link_cool_runs_resolves_prefix_and_skips_orphans(tmp_catalog: Path):
+    """tech_debt #3051: 8-char prefix stamps resolve onto full campaign UUID; orphan stamps are skipped."""
+    from bathos.campaigns import (
+        create_campaign,
+        link_cool_runs_to_campaigns,
+        union_campaign_member_ids,
+    )
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        camp = create_campaign(db, name="prefix-camp", project_slug="prolix", mode="exploration")
+        prefix_run = Run(
+            project_slug="prolix",
+            command="python p.py",
+            argv=["python", "p.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            campaign_id=camp.id[:8],
+        )
+        orphan_run = Run(
+            project_slug="prolix",
+            command="python o.py",
+            argv=["python", "o.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+            exit_code=0,
+            campaign_id="deadbeef-0000-0000-0000-000000000000",
+        )
+        write_run(prefix_run, tmp_catalog)
+        write_run(orphan_run, tmp_catalog)
+
+        # union_campaign_member_ids matches cool run stamped with 8-char prefix
+        assert prefix_run.id in union_campaign_member_ids(db, camp.id, tmp_catalog)
+
+        link_cool_runs_to_campaigns(db, [prefix_run, orphan_run], catalog_dir=tmp_catalog)
+        rows = db.execute("SELECT campaign_id, run_id FROM campaign_runs").fetchall()
+        assert rows == [(camp.id, prefix_run.id)]
+    finally:
+        db.close()
+
+
+def test_campaign_member_sidecar_survives_disappeared_tmp_worktree(tmp_catalog: Path, tmp_path: Path):
+    """tech_debt #3118: sidecar snapshotted at run/add time survives /tmp worktree removal."""
+    import hashlib
+    import shutil
+
+    from bathos.campaigns import (
+        add_run_to_campaign,
+        create_campaign,
+        link_cool_runs_to_campaigns,
+    )
+    from bathos.prereg import gate_check, resolve_sidecar
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+
+    wt_dir = tmp_path / "tmp_worktree"
+    exp_dir = wt_dir / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    script = exp_dir / "popper_test.py"
+    script.write_text("print('ok')\n")
+    sidecar_file = exp_dir / "popper_test.bth.toml"
+    sidecar_file.write_text(
+        '[experiment]\nhypothesis = "h"\n'
+        '[outcomes.pass]\ncondition = "x > 0"\ndecision = "go"\nreasoning = "r1"\n'
+        '[outcomes.fail]\ncondition = "x <= 0"\ndecision = "stop"\nreasoning = "r2"\nis_residual = true\n'
+        '[result_schema]\nx = "float"\n'
+        "[popper]\nnull_pass_rate = 0.1\nalt_pass_rate = 0.9\nstopping_threshold = 20.0\n"
+    )
+    sha = hashlib.sha256(sidecar_file.read_bytes()).hexdigest()
+
+    bundle = resolve_sidecar(script)
+    gate = gate_check(script, bundle, "collaborative", catalog_dir=tmp_catalog)
+    assert gate.ok is True
+
+    run = Run(
+        project_slug="prolix",
+        command=f"python {script}",
+        argv=["python", str(script)],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        exit_code=0,
+        outcome="pass",
+        sidecar_path=str(sidecar_file),
+        sidecar_sha256=sha,
+    )
+    write_run(run, tmp_catalog)
+    compact(tmp_catalog)
+
+    # Delete the temporary worktree BEFORE campaign add & link_cool_runs_to_campaigns
+    shutil.rmtree(wt_dir)
+    assert not sidecar_file.exists()
+
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        camp = create_campaign(
+            db, name="seq-tmp", project_slug="prolix", mode="sequential", catalog_dir=tmp_catalog
+        )
+        add_run_to_campaign(db, camp.id, run.id, catalog_dir=tmp_catalog)
+        cr = db.execute(
+            "SELECT evalue, seq_position FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+            [camp.id, run.id],
+        ).fetchone()
+        assert cr == (9.0, 1)
+        threshold = db.execute(
+            "SELECT stopping_threshold FROM campaigns WHERE id = ?", [camp.id]
+        ).fetchone()[0]
+        assert threshold == 20.0
+
+        # Reset evalue and verify link_cool_runs_to_campaigns also recovers from frozen snapshot
+        db.execute("UPDATE campaign_runs SET evalue = NULL, seq_position = NULL")
+        link_cool_runs_to_campaigns(db, [run], catalog_dir=tmp_catalog, campaign_id=camp.id)
+        cr2 = db.execute(
+            "SELECT evalue, seq_position FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+            [camp.id, run.id],
+        ).fetchone()
+        assert cr2 == (9.0, 1)
+    finally:
+        db.close()

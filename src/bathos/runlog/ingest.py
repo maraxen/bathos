@@ -46,8 +46,10 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import errno
 import fcntl
 import json
+import logging
 import os
 import shutil
 import time
@@ -106,8 +108,10 @@ from bathos.runlog.index import (
     index_db_path,
     init_index_schema,
 )
-from bathos.runlog.mode import RunLogError, is_log_mode
+from bathos.runlog.mode import RunLogError, is_log_mode, lock_holders
 from bathos.runlog.project_id import list_registered_roots
+
+logger = logging.getLogger(__name__)
 
 _REQUIRED_ENVELOPE_KEYS = ("v", "eid", "kind", "entity", "ts", "data")
 
@@ -141,6 +145,7 @@ _CAMPAIGN_DIRECT_KINDS = frozenset(
         "campaign.imported",
     }
 )
+_CAMPAIGN_CREATED_KINDS = frozenset({"campaign.created", "campaign.imported"})
 # Campaign-membership kinds: entity == [campaign_id, run_id, ...].
 _CAMPAIGN_MEMBER_KINDS = frozenset({"campaign.run_added", "campaign_run.imported"})
 _RUN_STARTED_KINDS = frozenset({"run.started", "run.imported"})
@@ -183,6 +188,18 @@ class IngestLockTimeout(TimeoutError):
     """`ingest_lock(timeout_s=...)` could not take the lock in time."""
 
 
+def _format_lock_holders(path: Path) -> str:
+    holders = lock_holders(path)
+    if not holders:
+        return ""
+    desc = ", ".join(
+        f"pid {pid}" + (f" ({cmd[:60]})" if cmd else "") for pid, cmd in holders[:3]
+    )
+    if len(holders) > 3:
+        desc += f", ... (+{len(holders) - 3} more)"
+    return f" (held by {desc})"
+
+
 @contextlib.contextmanager
 def ingest_lock(catalog_dir: Path | None = None, *, timeout_s: float | None = None):
     """Exclusive ingest lock. `timeout_s=None` blocks until acquired;
@@ -192,17 +209,28 @@ def ingest_lock(catalog_dir: Path | None = None, *, timeout_s: float | None = No
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         if timeout_s is None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EINTR:
+                        raise
         else:
-            deadline = time.monotonic() + timeout_s
+            deadline = time.monotonic() + max(0.0, timeout_s)
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
-                except BlockingIOError:
+                except OSError as exc:
+                    if exc.errno == errno.EINTR:
+                        continue
+                    if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                        raise
                     if time.monotonic() >= deadline:
+                        holder_note = _format_lock_holders(path)
                         raise IngestLockTimeout(
-                            f"ingest lock {path} still held after {timeout_s:g}s"
+                            f"ingest lock {path} still held after {timeout_s:g}s{holder_note}"
                         ) from None
                     time.sleep(0.05)
         try:
@@ -621,6 +649,7 @@ class _FoldLookup:
         self._kinds: dict[frozenset[str], list[dict]] = {}
         self._keys: dict[str, list[dict]] = {}
         self._built = False
+        self._known_campaigns: set[str] | None = None
         self._member_campaigns_by_run: dict[str, set[str]] = {}
         self._started_campaigns_by_run: dict[str, set[str]] = {}
         self._member_runs_by_campaign: dict[str, set[str]] = {}
@@ -628,6 +657,28 @@ class _FoldLookup:
         self._run_added_by_run: dict[str, list[dict]] = {}
         self._run_added_by_campaign: dict[object, list[dict]] = {}
         self._imported_by_campaign: dict[object, list[dict]] = {}
+
+    def known_campaign_ids(self) -> set[str]:
+        if self._known_campaigns is None:
+            known: set[str] = set()
+            for e in self.by_kinds(_CAMPAIGN_CREATED_KINDS):
+                entity = e.get("entity") or []
+                if entity and entity[0]:
+                    known.add(entity[0])
+            self._known_campaigns = known
+        return self._known_campaigns
+
+    def resolve_campaign_id(self, cid: str | None) -> str | None:
+        if not cid:
+            return None
+        known = self.known_campaign_ids()
+        if cid in known:
+            return cid
+        if len(cid) >= 4:
+            matches = [k for k in known if k.startswith(cid)]
+            if len(matches) == 1:
+                return matches[0]
+        return cid
 
     def by_kinds(self, kinds: frozenset[str]) -> list[dict]:
         if kinds not in self._kinds:
@@ -669,13 +720,16 @@ class _FoldLookup:
         for e in self.by_kinds(_CAMPAIGN_MEMBER_KINDS):
             entity = e.get("entity") or []
             if len(entity) >= 2:
-                self._member_campaigns_by_run.setdefault(entity[1], set()).add(entity[0])
-                self._member_runs_by_campaign.setdefault(entity[0], set()).add(entity[1])
+                cid = self.resolve_campaign_id(entity[0])
+                if cid:
+                    self._member_campaigns_by_run.setdefault(entity[1], set()).add(cid)
+                    self._member_runs_by_campaign.setdefault(cid, set()).add(entity[1])
         for e in self.by_kinds(_RUN_STARTED_KINDS):
             entity = e.get("entity") or []
             if not entity:
                 continue
-            cid = (e.get("data") or {}).get("campaign_id")
+            raw_cid = (e.get("data") or {}).get("campaign_id")
+            cid = self.resolve_campaign_id(raw_cid) if raw_cid else None
             if cid:
                 self._started_campaigns_by_run.setdefault(entity[0], set()).add(cid)
             self._started_runs_by_campaign.setdefault(cid, set()).add(entity[0])
@@ -683,9 +737,13 @@ class _FoldLookup:
             entity = e.get("entity") or []
             if len(entity) >= 2:
                 self._run_added_by_run.setdefault(entity[1], []).append(e)
-            self._run_added_by_campaign.setdefault((e["entity"] or [None])[0], []).append(e)
+            raw_cid = (entity or [None])[0]
+            cid = self.resolve_campaign_id(raw_cid) if raw_cid else None
+            self._run_added_by_campaign.setdefault(cid, []).append(e)
         for e in self.by_kinds(frozenset({"campaign_run.imported"})):
-            self._imported_by_campaign.setdefault((e["entity"] or [None])[0], []).append(e)
+            raw_cid = (e.get("entity") or [None])[0]
+            cid = self.resolve_campaign_id(raw_cid) if raw_cid else None
+            self._imported_by_campaign.setdefault(cid, []).append(e)
         self._built = True
 
     def campaign_ids_for_run(self, run_id: str) -> set[str]:
@@ -871,7 +929,11 @@ def _refold_run(
     if not events:
         return
     row = fold_run(events)
-    row["campaign_id"] = resolve_run_campaign_id(events, lk.run_added_events_for_run(run_id))
+    row["campaign_id"] = resolve_run_campaign_id(
+        events,
+        lk.run_added_events_for_run(run_id),
+        known_campaign_ids=lk.known_campaign_ids(),
+    )
     campaign_id = row.get("campaign_id")
     if campaign_id:
         with _fold_lookup_scope(lk):
@@ -899,10 +961,10 @@ def _refold_campaign(
         row, campaign_runs_rows = _cached_campaign_fold(con, campaign_id, campaign_fold_cache)
     con.execute("DELETE FROM campaigns WHERE id = ?", [campaign_id])
     con.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [campaign_id])
-    if not row.get("mode") and not campaign_runs_rows:
-        # No campaign.created and no membership at all -- nothing to persist
-        # (a stray reference to a campaign id that was never actually
-        # created).
+    if not row.get("mode"):
+        # No campaign.created and no campaign.imported -- never insert a
+        # phantom campaign (mode IS NULL) or orphaned campaign_runs rows
+        # (tech_debt #3051).
         return
     _insert_row(con, "campaigns", CAMPAIGNS_COLUMNS, row)
     for cr in campaign_runs_rows:
@@ -1115,6 +1177,8 @@ def run_ingest(
     if require_log_mode and not is_log_mode(cd):
         return IngestReport(ran=False)
     with ingest_lock(cd, timeout_s=lock_timeout_s):
+        if require_log_mode and not is_log_mode(cd):
+            return IngestReport(ran=False)
         return _ingest_locked(cd, extra_roots=extra_roots)
 
 
@@ -1137,6 +1201,11 @@ def ingest_after_write(
     try:
         report = run_ingest(catalog_dir, lock_timeout_s=lock_timeout_s)
     except Exception as exc:  # noqa: BLE001 -- best-effort by contract
+        logger.warning(
+            "runlog: post-write index refresh skipped (%s: %s); run `bth compact` to refresh",
+            type(exc).__name__,
+            exc,
+        )
         event(
             "ingest.after_write_failed",
             exc_type=type(exc).__name__,
@@ -1237,6 +1306,12 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                 prev_offset = watermarks.get(wm_key, 0)
                 size = seg.stat().st_size
                 if size < prev_offset:
+                    logger.warning(
+                        "runlog: skipping shrunk segment %s (size=%d < watermark=%d)",
+                        seg,
+                        size,
+                        prev_offset,
+                    )
                     continue
                 lines, new_offset = _read_new_lines(seg, prev_offset)
                 for byte_offset, raw in lines:
@@ -1309,6 +1384,9 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
         # writes derived tables, so one lookup cache is valid for all of it.
         _bulk_insert_events(con, pending_event_rows)
         lookup = _FoldLookup(con)
+        affected_campaign_ids = {
+            lookup.resolve_campaign_id(c) or c for c in affected_campaign_ids
+        }
 
         # "Any event on a member run marks its campaign(s) as affected" --
         # and symmetrically, any campaign-side change must refold every
@@ -1373,6 +1451,9 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                 _refold_charter(con, project, lookup=lookup)
             for b_project, b_reading_id in affected_bearings_keys:
                 _refold_bearings(con, b_project, b_reading_id, lookup=lookup)
+            reconcile_campaign_runs(
+                con, lookup=lookup, campaign_fold_cache=campaign_fold_cache
+            )
 
         con.execute("COMMIT")
         in_txn = False
@@ -1426,6 +1507,122 @@ def read_folded_tables(db_path: Path, tables: dict[str, list[str]]) -> dict[str,
         con.close()
 
 
+def reconcile_campaign_runs(
+    con: duckdb.DuckDBPyConnection,
+    lookup: _FoldLookup | None = None,
+    campaign_fold_cache: dict[str, tuple[dict, list[dict]]] | None = None,
+) -> dict[str, int]:
+    """Repair orphaned and prefix-mismatched `campaign_runs` / phantom `campaigns` rows.
+
+    Reassigns unambiguous prefix `campaign_id`s onto their canonical `campaigns.id` by
+    refolding the target campaign and its member runs, and removes any remaining orphaned
+    `campaign_runs` rows (or `campaigns` rows with `mode IS NULL`) that have no backing
+    `campaign.created`/`campaign.imported` event.
+    """
+    orphan_rows = con.execute(
+        "SELECT cr.campaign_id, cr.run_id FROM campaign_runs cr "
+        "LEFT JOIN campaigns c ON cr.campaign_id = c.id "
+        "WHERE c.id IS NULL OR c.mode IS NULL"
+    ).fetchall()
+    phantom_cids = [
+        r[0]
+        for r in con.execute("SELECT id FROM campaigns WHERE mode IS NULL").fetchall()
+        if r[0]
+    ]
+    bad_run_cids = con.execute(
+        "SELECT r.id, r.campaign_id FROM runs r "
+        "LEFT JOIN campaigns c ON r.campaign_id = c.id "
+        "WHERE COALESCE(r.campaign_id, '') <> '' AND (c.id IS NULL OR c.mode IS NULL)"
+    ).fetchall()
+    if not orphan_rows and not phantom_cids and not bad_run_cids:
+        return {"reassigned": 0, "deleted_orphans": 0, "deleted_phantom_campaigns": 0}
+
+    lk = _resolve_lookup(con, lookup)
+    if campaign_fold_cache is None:
+        campaign_fold_cache = {}
+
+    known = lk.known_campaign_ids()
+    reassigned = 0
+    deleted_orphans = 0
+    deleted_phantoms = 0
+    refold_campaigns: set[str] = set()
+    refold_runs: set[str] = set()
+
+    bad_cids = {cid for cid, _rid in orphan_rows if cid} | set(phantom_cids)
+    for bad_cid, run_id in orphan_rows:
+        resolved = lk.resolve_campaign_id(bad_cid) if bad_cid else None
+        if resolved and resolved in known and resolved != bad_cid:
+            reassigned += 1
+            refold_campaigns.add(resolved)
+            if run_id:
+                refold_runs.add(run_id)
+        else:
+            deleted_orphans += 1
+
+    for bad_cid in bad_cids:
+        con.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [bad_cid])
+        res = con.execute("DELETE FROM campaigns WHERE id = ? AND mode IS NULL", [bad_cid])
+        if res.rowcount and res.rowcount > 0:
+            deleted_phantoms += int(res.rowcount)
+
+    for run_id, raw_cid in bad_run_cids:
+        resolved = lk.resolve_campaign_id(raw_cid)
+        if resolved and resolved in known and resolved != raw_cid:
+            refold_campaigns.add(resolved)
+            refold_runs.add(run_id)
+
+    with _fold_lookup_scope(lk):
+        for cid in refold_campaigns:
+            refold_runs |= _campaign_member_run_ids(con, cid, lookup=lk)
+            _refold_campaign(con, cid, campaign_fold_cache=campaign_fold_cache, lookup=lk)
+        for rid in refold_runs:
+            _refold_run(con, rid, campaign_fold_cache=campaign_fold_cache, lookup=lk)
+
+    return {
+        "reassigned": reassigned,
+        "deleted_orphans": deleted_orphans,
+        "deleted_phantom_campaigns": deleted_phantoms,
+    }
+
+
+def reconcile_index_campaign_runs(
+    catalog_dir: Path | None = None, *, lock_timeout_s: float | None = 60.0
+) -> dict[str, int]:
+    """Safely reconcile orphaned/prefix-mismatched `campaign_runs` in `index.db` via generation swap."""
+    cd = catalog_dir or default_catalog_dir()
+    real_path = index_db_path(cd)
+    if not real_path.exists():
+        return {"reassigned": 0, "deleted_orphans": 0, "deleted_phantom_campaigns": 0}
+    with ingest_lock(cd, timeout_s=lock_timeout_s):
+        tmp_path = cd / f"index.db.{uuid.uuid4().hex[:12]}.tmp"
+        shutil.copy2(real_path, tmp_path)
+        try:
+            con = duckdb.connect(str(tmp_path))
+            in_txn = False
+            try:
+                init_index_schema(con)
+                con.execute("BEGIN")
+                in_txn = True
+                counts = reconcile_campaign_runs(con)
+                con.execute("COMMIT")
+                in_txn = False
+                con.execute("CHECKPOINT")
+            except BaseException:
+                if in_txn:
+                    with contextlib.suppress(duckdb.Error):
+                        con.execute("ROLLBACK")
+                raise
+            finally:
+                con.close()
+            _check_no_wal(tmp_path)
+            os.replace(tmp_path, real_path)
+            return counts
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            Path(f"{tmp_path}.wal").unlink(missing_ok=True)
+            raise
+
+
 def delete_staging_watermarks(catalog_dir: Path, attempt: str) -> None:
     """Delete the `staging` root kind's `ingest_watermarks` rows for one
     migration attempt from the real `index.db` (Migration step 4(e): "delete
@@ -1456,6 +1653,8 @@ __all__ = [
     "ingest_lock",
     "ingest_lock_path",
     "read_folded_tables",
+    "reconcile_campaign_runs",
+    "reconcile_index_campaign_runs",
     "remote_root_id",
     "run_ingest",
     "staging_roots_for_attempt",

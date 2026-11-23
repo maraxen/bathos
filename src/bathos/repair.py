@@ -7,8 +7,10 @@ scanned from verify.py findings and executed with dry-run safety gates.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import shutil
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -27,7 +29,8 @@ class RepairAction:
 
     Attributes:
         action: Action type: "delete_tmp", "quarantine_bak", "quarantine_corrupt",
-                "backup_warm", "rebuild_warm", "reexport_from_warm"
+                "backup_warm", "rebuild_warm", "reexport_from_warm",
+                "quarantine_archive", "reconcile_campaign_runs"
         path: Source path of the file/database affected
         detail: Human-readable description of the action
         dry_run: Always True for scan(); can be False for repair()
@@ -99,6 +102,34 @@ def scan(
         warm_actions, warm_warnings = _actions_from_warm_verify(warm_result, catalog_dir)
         actions.extend(warm_actions)
         warnings.extend(warm_warnings)
+
+        from bathos.runlog.mode import is_log_mode
+
+        if is_log_mode(catalog_dir):
+            from bathos.index import index_db_path
+            from bathos.verify import _orphaned_campaign_run_findings
+
+            orphan_findings = _orphaned_campaign_run_findings(catalog_dir)
+            if orphan_findings:
+                actions.append(
+                    RepairAction(
+                        action="reconcile_campaign_runs",
+                        path=str(index_db_path(catalog_dir)),
+                        detail=(
+                            f"Reconcile {len(orphan_findings)} orphaned/prefix-mismatched "
+                            "campaign_runs row(s) in index.db"
+                        ),
+                    )
+                )
+        elif warm_result.stats.get("orphaned_campaign_runs", 0) > 0:
+            n_orphans = warm_result.stats["orphaned_campaign_runs"]
+            actions.append(
+                RepairAction(
+                    action="reconcile_campaign_runs",
+                    path=str(catalog_dir / "bathos.db"),
+                    detail=f"Reconcile {n_orphans} orphaned campaign_runs row(s) in bathos.db",
+                )
+            )
 
     if tier == "archive" or tier == "all":
         if archive_root is None:
@@ -698,8 +729,6 @@ def _execute_repair_action(
 ) -> None:
     """Execute a single repair action.
 
-    Raises NotImplementedError for actions not yet implemented in tracks B/C/D.
-
     Args:
         action: The repair action to execute
         catalog_dir: Catalog directory
@@ -719,9 +748,7 @@ def _execute_repair_action(
         _handle_quarantine_corrupt(action, catalog_dir)
 
     elif action.action == "backup_warm":
-        raise NotImplementedError(
-            "TODO: implemented in downstream track D — backup_warm action handler"
-        )
+        _handle_backup_warm(action, catalog_dir, manifest)
 
     elif action.action == "rebuild_warm":
         _handle_rebuild_warm(action, catalog_dir)
@@ -732,8 +759,129 @@ def _execute_repair_action(
     elif action.action == "reexport_from_warm":
         _handle_reexport_from_warm(action, catalog_dir, manifest)
 
+    elif action.action == "reconcile_campaign_runs":
+        _handle_reconcile_campaign_runs(action, catalog_dir)
+
     else:
         raise ValueError(f"Unknown repair action: {action.action}")
+
+
+def _handle_backup_warm(
+    action: RepairAction,
+    catalog_dir: Path,
+    manifest: RepairManifest | None = None,
+) -> None:
+    """Create a timestamped backup of the warm database and rotate old backups (max 3)."""
+    db_path = Path(action.path) if action.path else (catalog_dir / "bathos.db")
+    if not db_path.exists():
+        msg = f"Warm database not found, skipped backup: {db_path}"
+        logger.warning(msg)
+        action.detail = msg
+        if manifest is not None:
+            manifest.warnings.append(msg)
+        return
+
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    backup_path = db_path.parent / f"{db_path.name}.bak-{timestamp}"
+    suffix = 1
+    while backup_path.exists():
+        backup_path = db_path.parent / f"{db_path.name}.bak-{timestamp}-{suffix}"
+        suffix += 1
+
+    tmp_path = db_path.parent / f".{backup_path.name}.tmp"
+    try:
+        shutil.copy2(db_path, tmp_path)
+        tmp_path.replace(backup_path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+    bak_files = sorted(
+        db_path.parent.glob(f"{db_path.name}.bak-*"),
+        key=lambda p: (p.stat().st_mtime, p.name),
+    )
+    max_warm_backups = 3
+    if len(bak_files) > max_warm_backups:
+        for old_backup in bak_files[:-max_warm_backups]:
+            old_backup.unlink()
+            logger.info(f"Rotated out old backup: {old_backup}")
+
+    action.detail = f"Backed up warm database to {backup_path}"
+    logger.info(action.detail)
+
+
+def _handle_reconcile_campaign_runs(action: RepairAction, catalog_dir: Path) -> None:
+    """Reconcile orphaned and prefix-mismatched `campaign_runs` rows."""
+    from bathos.runlog.mode import is_log_mode
+
+    if is_log_mode(catalog_dir):
+        from bathos.runlog.ingest import reconcile_index_campaign_runs
+
+        counts = reconcile_index_campaign_runs(catalog_dir)
+        action.detail = (
+            f"Reconciled index.db campaign_runs: {counts['reassigned']} reassigned, "
+            f"{counts['deleted_orphans']} orphan(s) removed, "
+            f"{counts['deleted_phantom_campaigns']} phantom campaign(s) removed"
+        )
+        logger.info(action.detail)
+        return
+
+    from bathos.campaigns import connect_catalog_db
+
+    db_path = Path(action.path) if action.path else (catalog_dir / "bathos.db")
+    if not db_path.exists():
+        action.detail = f"Warm database not found: {db_path}"
+        return
+
+    con = connect_catalog_db(db_path.parent, read_only=False)
+    if con is None:
+        action.detail = f"Warm database not found: {db_path}"
+        return
+    try:
+        valid_cids = {
+            r[0] for r in con.execute("SELECT id FROM campaigns").fetchall() if r[0]
+        }
+        orphans = con.execute(
+            "SELECT cr.campaign_id, cr.run_id, cr.evalue, cr.seq_position "
+            "FROM campaign_runs cr "
+            "LEFT JOIN campaigns c ON cr.campaign_id = c.id "
+            "WHERE c.id IS NULL"
+        ).fetchall()
+        reassigned = 0
+        deleted = 0
+        con.execute("BEGIN")
+        for bad_cid, run_id, evalue, seq_pos in orphans:
+            matches = (
+                [c for c in valid_cids if c.startswith(bad_cid)]
+                if bad_cid and len(bad_cid) >= 4
+                else []
+            )
+            con.execute(
+                "DELETE FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+                [bad_cid, run_id],
+            )
+            if len(matches) == 1:
+                con.execute(
+                    "INSERT INTO campaign_runs (campaign_id, run_id, evalue, seq_position) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    [matches[0], run_id, evalue, seq_pos],
+                )
+                reassigned += 1
+            else:
+                deleted += 1
+        con.execute("COMMIT")
+    except Exception:
+        with contextlib.suppress(Exception):
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+    action.detail = (
+        f"Reconciled bathos.db campaign_runs: {reassigned} reassigned, {deleted} orphan(s) removed"
+    )
+    logger.info(action.detail)
 
 
 def _handle_rebuild_warm(action: RepairAction, catalog_dir: Path) -> None:

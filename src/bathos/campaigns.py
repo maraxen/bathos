@@ -279,6 +279,31 @@ def _fold_pending_events(catalog_dir: Path) -> None:
         ) from e
 
 
+def _resolve_existing_campaign_id(known_ids: set[str] | list[str], candidate: str) -> str | None:
+    """Resolve an exact or unambiguous (>=4 char) prefix campaign ID against `known_ids`."""
+    if not candidate:
+        return None
+    if candidate in known_ids:
+        return candidate
+    if len(candidate) < 4:
+        return None
+    matches = [cid for cid in known_ids if cid.startswith(candidate)]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _known_campaign_ids(db, catalog_dir: Path | None = None) -> set[str]:
+    """Collect known campaign IDs from `campaigns` table and optional cool JSON."""
+    ids: set[str] = set()
+    if db is not None:
+        with suppress(duckdb.Error):
+            ids.update(r[0] for r in db.execute("SELECT id FROM campaigns").fetchall() if r[0])
+    if catalog_dir is not None:
+        ids.update(c.id for c in read_cool_campaigns(catalog_dir) if c.id)
+    return ids
+
+
 def union_campaign_member_ids(
     db, campaign_id: str, catalog_dir: Path | None, *, cool_runs=None
 ) -> list[str]:
@@ -299,9 +324,19 @@ def union_campaign_member_ids(
     if catalog_dir is not None:
         from bathos.catalog import read_runs
 
+        known_ids: set[str] | None = None
         for run in cool_runs if cool_runs is not None else read_runs(catalog_dir):
+            if not run.campaign_id:
+                continue
             if run.campaign_id == campaign_id:
                 ids.add(run.id)
+                continue
+            if campaign_id.startswith(run.campaign_id) and len(run.campaign_id) >= 4:
+                if known_ids is None:
+                    known_ids = _known_campaign_ids(db, catalog_dir)
+                    known_ids.add(campaign_id)
+                if _resolve_existing_campaign_id(known_ids, run.campaign_id) == campaign_id:
+                    ids.add(run.id)
     return sorted(ids)
 
 
@@ -370,6 +405,12 @@ def create_campaign(
 
     if mode not in CAMPAIGN_MODES:
         raise CampaignError(f"mode must be {_modes_phrase()}, got {mode!r}")
+    if parent_campaign_id:
+        resolved_parent = _resolve_existing_campaign_id(
+            _known_campaign_ids(db, catalog_dir), parent_campaign_id
+        )
+        if resolved_parent is not None:
+            parent_campaign_id = resolved_parent
     campaign_id = str(uuid4())
     started_at = datetime.now(UTC).isoformat()
     campaign = Campaign(
@@ -528,9 +569,19 @@ def _add_run_to_campaign_impl(
         claim_row = None
     campaign_claim_path = claim_row[0] if claim_row else None
 
-    run_rows = db.execute(
-        "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
-    ).fetchall()
+    run_sidecar_sha256 = ""
+    try:
+        run_rows = db.execute(
+            "SELECT timestamp, outcome, sidecar_path, sidecar_sha256 FROM runs WHERE id = ?",
+            [run_id],
+        ).fetchall()
+    except duckdb.BinderException:
+        run_rows = [
+            (*r, "")
+            for r in db.execute(
+                "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
+            ).fetchall()
+        ]
     if not run_rows:
         if log_mode and _unimported_legacy_run(catalog_dir, run_id):
             raise CampaignError(
@@ -539,14 +590,34 @@ def _add_run_to_campaign_impl(
                 "older bathos); run `bth migrate --import-legacy`, then retry."
             )
         raise CampaignError(f"Run not found: {run_id}")
-    run_timestamp, run_outcome, run_sidecar_path = run_rows[0]
+    run_timestamp, run_outcome, run_sidecar_path, raw_sha = run_rows[0]
+    run_sidecar_sha256 = raw_sha or ""
 
     from pathlib import Path as _P
+
+    from bathos.sidecar import SidecarError, resolve_sidecar_for_run, snapshot_sidecar_declaration
+
+    cat_path = _P(catalog_dir) if catalog_dir else None
+    resolved_sidecar = None
+    if run_sidecar_path or run_sidecar_sha256 or log_mode:
+        try:
+            resolved_sidecar = resolve_sidecar_for_run(
+                run_sidecar_path,
+                catalog_dir=cat_path,
+                sidecar_sha256=run_sidecar_sha256,
+                run_id=run_id,
+                db=db,
+            )
+        except SidecarError:
+            resolved_sidecar = None
+    if resolved_sidecar is not None and cat_path is not None:
+        snapshot_sidecar_declaration(
+            resolved_sidecar, cat_path, run_id=run_id, sha256=run_sidecar_sha256
+        )
 
     from bathos.errors import HIDDEN_STATE_TO_EXCEPTION, ResultHiddenError
     from bathos.validity import resolve_validity
 
-    cat_path = _P(catalog_dir) if catalog_dir else None
     v_map = resolve_validity([run_id], cat_path or _P.cwd(), db=db)
     v = v_map.get(run_id)
     if v and v.is_hidden:
@@ -601,18 +672,16 @@ def _add_run_to_campaign_impl(
                 "true",
                 "yes",
             )
-            if not enforce and run_sidecar_path:
-                with suppress(Exception):
-                    from pathlib import Path as _P
-
-                    from bathos.sidecar import parse_sidecar
-
-                    sc = parse_sidecar(_P(run_sidecar_path))
-                    stepback_cfg = getattr(sc, "stepback", {})
-                    if isinstance(stepback_cfg, dict):
-                        enf_val = stepback_cfg.get("enforce")
-                        if (isinstance(enf_val, bool) and enf_val) or str(enf_val).strip().lower() in ("1", "true", "yes"):
-                            enforce = True
+            if not enforce and resolved_sidecar is not None:
+                stepback_cfg = getattr(resolved_sidecar, "stepback", {})
+                if isinstance(stepback_cfg, dict):
+                    enf_val = stepback_cfg.get("enforce")
+                    if (isinstance(enf_val, bool) and enf_val) or str(enf_val).strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    ):
+                        enforce = True
 
             if enforce and esc_state.current_level >= 2:
                 raise CampaignError(
@@ -669,25 +738,16 @@ def _add_run_to_campaign_impl(
             )
 
     if campaign_mode == "sequential":
-        # Compute e-value from sidecar
+        # Compute e-value from sidecar (preferring live file, falling back to frozen snapshot)
         evalue = 1.0
         sidecar_stopping_threshold = None
-        if run_sidecar_path:
-            from bathos.sidecar import SidecarError, parse_sidecar
-
-            try:
-                sidecar_path_obj = _P(run_sidecar_path)
-                if sidecar_path_obj.exists():
-                    sidecar = parse_sidecar(sidecar_path_obj)
-                    # invalid_measurement is a non-verdict (spec §3.2): neutral, like observed.
-                    evalue = (
-                        1.0
-                        if run_outcome == "invalid_measurement"
-                        else compute_evalue(sidecar, run_outcome or "unknown")
-                    )
-                    sidecar_stopping_threshold = sidecar.popper_stopping_threshold
-            except SidecarError:
-                evalue = 1.0
+        if resolved_sidecar is not None:
+            evalue = (
+                1.0
+                if run_outcome == "invalid_measurement"
+                else compute_evalue(resolved_sidecar, run_outcome or "unknown")
+            )
+            sidecar_stopping_threshold = resolved_sidecar.popper_stopping_threshold
 
         # Assign seq_position (1-based, monotonically increasing per campaign)
         pos_row = db.execute(
@@ -765,15 +825,19 @@ def _add_run_to_campaign_impl(
                     write_run(run, catalog_dir)
                     break
 
+    run_added_data: dict[str, object] = {
+        "campaign_id": campaign_id,
+        "run_id": run_id,
+        "evalue": evalue,
+        "seq_position": seq_position,
+    }
+    if resolved_sidecar is not None:
+        run_added_data["sidecar"] = resolved_sidecar.to_declaration()
+
     emit_or_legacy(
         kind="campaign.run_added",
         entity=[campaign_id, run_id],
-        data={
-            "campaign_id": campaign_id,
-            "run_id": run_id,
-            "evalue": evalue,
-            "seq_position": seq_position,
-        },
+        data=run_added_data,
         legacy_write=_run_added_legacy_write,
         cwd=cwd,
     )
@@ -787,14 +851,36 @@ def link_cool_runs_to_campaigns(
     Does not enforce confirmation temporal ordering — cool fragments already stamped membership.
     Sequential rank is the union of parquet campaign_id stamps and warm campaign_runs.
     Catalog-wide compact skips a campaign on threshold mismatch instead of aborting.
+    Resolves unique prefix campaign IDs and skips orphaned references with no campaign row.
     """
     from types import SimpleNamespace
+    from typing import Any
 
-    from bathos.sidecar import SidecarError, parse_sidecar
+    from bathos.sidecar import SidecarError, resolve_sidecar_for_run
 
-    members = [r for r in cool_runs if r.campaign_id]
-    if campaign_id is not None:
-        members = [r for r in members if r.campaign_id == campaign_id]
+    logger = logging.getLogger(__name__)
+    known_campaign_ids = {
+        r[0] for r in db.execute("SELECT id FROM campaigns").fetchall() if r[0]
+    }
+
+    members = []
+    resolved_cids: dict[str, str] = {}
+    for r in cool_runs:
+        if not r.campaign_id:
+            continue
+        target_cid = _resolve_existing_campaign_id(known_campaign_ids, r.campaign_id)
+        if target_cid is None:
+            logger.warning(
+                "Skipping cool run %s referencing missing/ambiguous campaign_id %r",
+                r.id,
+                r.campaign_id,
+            )
+            continue
+        if campaign_id is not None and target_cid != campaign_id:
+            continue
+        resolved_cids[r.id] = target_cid
+        members.append(r)
+
     for run in members:
         db.execute(
             """
@@ -802,7 +888,7 @@ def link_cool_runs_to_campaigns(
             VALUES (?, ?)
             ON CONFLICT DO NOTHING
             """,
-            [run.campaign_id, run.id],
+            [resolved_cids[run.id], run.id],
         )
 
     def _run_sort_key(r):
@@ -813,10 +899,10 @@ def link_cool_runs_to_campaigns(
             ts = ts.replace(tzinfo=UTC)
         return (ts, r.id)
 
-    cids: set[str] = {r.campaign_id for r in members if r.campaign_id}
+    cids: set[str] = set(resolved_cids.values())
     try:
         for row in db.execute("SELECT DISTINCT campaign_id FROM campaign_runs").fetchall():
-            if row[0]:
+            if row[0] and row[0] in known_campaign_ids:
                 cids.add(row[0])
     except duckdb.Error:
         pass
@@ -825,7 +911,7 @@ def link_cool_runs_to_campaigns(
 
     parquet_by_cid: dict[str, list] = defaultdict(list)
     for run in members:
-        parquet_by_cid[run.campaign_id].append(run)
+        parquet_by_cid[resolved_cids[run.id]].append(run)
 
     for cid in cids:
         mode_row = db.execute(
@@ -833,24 +919,40 @@ def link_cool_runs_to_campaigns(
         ).fetchone()
         if not mode_row or mode_row[0] != "sequential":
             continue
-        by_id: dict[str, object] = {}
+        by_id: dict[str, Any] = {}
         for run in parquet_by_cid.get(cid, []):
             by_id[run.id] = run
         try:
-            for run_id, ts, sidecar_path, outcome in db.execute(
-                """
-                SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome
-                FROM campaign_runs cr
-                INNER JOIN runs r ON cr.run_id = r.id
-                WHERE cr.campaign_id = ?
-                """,
-                [cid],
-            ).fetchall():
+            try:
+                cr_rows = db.execute(
+                    """
+                    SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome, r.sidecar_sha256
+                    FROM campaign_runs cr
+                    INNER JOIN runs r ON cr.run_id = r.id
+                    WHERE cr.campaign_id = ?
+                    """,
+                    [cid],
+                ).fetchall()
+            except duckdb.BinderException:
+                cr_rows = [
+                    (*row, "")
+                    for row in db.execute(
+                        """
+                        SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome
+                        FROM campaign_runs cr
+                        INNER JOIN runs r ON cr.run_id = r.id
+                        WHERE cr.campaign_id = ?
+                        """,
+                        [cid],
+                    ).fetchall()
+                ]
+            for run_id, ts, sidecar_path, outcome, sidecar_sha256 in cr_rows:
                 if run_id not in by_id:
                     by_id[run_id] = SimpleNamespace(
                         id=run_id,
                         timestamp=ts,
                         sidecar_path=sidecar_path,
+                        sidecar_sha256=sidecar_sha256 or "",
                         outcome=outcome,
                         campaign_id=cid,
                     )
@@ -862,12 +964,17 @@ def link_cool_runs_to_campaigns(
         mismatch: CampaignError | None = None
         pending_threshold = campaign_threshold
         for i, run in enumerate(ordered, start=1):
-            sidecar_path_obj = Path(run.sidecar_path) if run.sidecar_path else None
             sidecar_stopping_threshold = None
             evalue = None
-            if sidecar_path_obj is not None and sidecar_path_obj.exists():
-                try:
-                    sidecar = parse_sidecar(sidecar_path_obj)
+            try:
+                sidecar = resolve_sidecar_for_run(
+                    run.sidecar_path,
+                    catalog_dir=catalog_dir,
+                    sidecar_sha256=getattr(run, "sidecar_sha256", "") or "",
+                    run_id=run.id,
+                    db=db,
+                )
+                if sidecar is not None:
                     # invalid_measurement is a non-verdict (spec §3.2): neutral, like observed.
                     evalue = (
                         1.0
@@ -875,8 +982,8 @@ def link_cool_runs_to_campaigns(
                         else compute_evalue(sidecar, run.outcome or "unknown")
                     )
                     sidecar_stopping_threshold = sidecar.popper_stopping_threshold
-                except SidecarError:
-                    evalue = None
+            except SidecarError:
+                evalue = None
             is_neutral_outcome = run.outcome in (
                 "error",
                 "unknown",

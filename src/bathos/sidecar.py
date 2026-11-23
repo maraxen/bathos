@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -460,6 +461,14 @@ class Sidecar:
     # experiment-only physical stoichiometry and reagent pack amortization (spec 261113)
     stoichiometry: StoichiometryBlock | None = None
     reagents: dict[str, ReagentSpec] = field(default_factory=dict)
+
+    def to_declaration(self) -> dict[str, typing.Any]:
+        """Serialize this Sidecar to a JSON-safe declaration dict (symmetric with `from_declaration`)."""
+        data = dataclasses.asdict(self)
+        kind_val = data.get("kind")
+        if isinstance(kind_val, Enum):
+            data["kind"] = kind_val.value
+        return data
 
     @classmethod
     def from_declaration(cls, decl: dict) -> Sidecar:
@@ -2422,6 +2431,208 @@ def find_sidecar(script_path: Path) -> Path | None:
     """Return the .bth.toml adjacent to script_path, or None if absent."""
     candidate = script_path.parent / f"{script_path.stem}.bth.toml"
     return candidate if candidate.exists() else None
+
+
+def _safe_snapshot_key(value: str) -> str:
+    """Validate an identifier (sha256 or run_id) used as a snapshot filename stem."""
+    if not value or "/" in value or "\\" in value or ".." in value or value in (".", ".."):
+        raise ValueError(f"Unsafe sidecar snapshot key: {value!r}")
+    return value
+
+
+def sidecar_snapshot_dir(catalog_dir: Path) -> Path:
+    """Catalog directory holding frozen sidecar snapshots (`<catalog>/sidecars/snapshots/`)."""
+    return Path(catalog_dir) / "sidecars" / "snapshots"
+
+
+def sidecar_snapshot_path(catalog_dir: Path, sha256: str) -> Path:
+    """Content-addressed frozen TOML path for a sidecar sha256."""
+    return sidecar_snapshot_dir(catalog_dir) / f"{_safe_snapshot_key(sha256)}.bth.toml"
+
+
+def run_sidecar_snapshot_path(catalog_dir: Path, run_id: str) -> Path:
+    """Per-run frozen sidecar declaration JSON path (fallback when sha256 is absent)."""
+    return sidecar_snapshot_dir(catalog_dir) / "by_run" / f"{_safe_snapshot_key(run_id)}.json"
+
+
+def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def snapshot_sidecar_file(
+    sidecar_path: Path,
+    catalog_dir: Path,
+    *,
+    sha256: str = "",
+    run_id: str = "",
+) -> Path | None:
+    """Freeze a sidecar TOML file into `<catalog>/sidecars/snapshots/` (best-effort).
+
+    Writes `<sha256>.bth.toml` (content-addressed) and, when `run_id` is given and
+    `sha256` was empty, also records a per-run declaration snapshot so a disappearing
+    `/tmp` worktree never loses the sidecar even for runs lacking `sidecar_sha256`.
+    """
+    try:
+        raw = Path(sidecar_path).read_bytes()
+    except OSError as e:
+        logger.debug("Could not read sidecar for snapshot %s: %s", sidecar_path, e)
+        return None
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    target_sha = actual_sha
+    if sha256 and sha256 != actual_sha:
+        # Preserve the exact bytes we read under their actual hash rather than mislabeling.
+        logger.debug(
+            "Sidecar %s sha256 %s differs from expected %s; snapshotting under actual hash",
+            sidecar_path,
+            actual_sha,
+            sha256,
+        )
+    dest: Path | None = None
+    try:
+        dest = sidecar_snapshot_path(catalog_dir, target_sha)
+        if not dest.is_file():
+            _atomic_write_bytes(dest, raw)
+    except (OSError, ValueError) as e:
+        logger.warning("Failed to snapshot sidecar %s into %s: %s", sidecar_path, catalog_dir, e)
+        dest = None
+
+    if run_id:
+        try:
+            parsed = parse_sidecar(Path(sidecar_path))
+            snapshot_sidecar_declaration(
+                parsed, catalog_dir, run_id=run_id, sha256=target_sha
+            )
+        except Exception as e:  # noqa: BLE001 -- best-effort supplementary per-run pointer
+            logger.debug("Could not write per-run sidecar snapshot for %s: %s", run_id, e)
+    return dest
+
+
+def snapshot_sidecar_declaration(
+    sidecar: Sidecar,
+    catalog_dir: Path,
+    *,
+    run_id: str,
+    sha256: str = "",
+) -> Path | None:
+    """Freeze a parsed Sidecar's declaration payload under `<catalog>/sidecars/snapshots/by_run/`."""
+    if not run_id:
+        return None
+    try:
+        dest = run_sidecar_snapshot_path(catalog_dir, run_id)
+        if dest.is_file():
+            return dest
+        payload = {
+            "run_id": run_id,
+            "sidecar_sha256": sha256,
+            "declaration": sidecar.to_declaration(),
+        }
+        _atomic_write_bytes(dest, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode())
+        return dest
+    except (OSError, ValueError, TypeError) as e:
+        logger.warning("Failed to snapshot sidecar declaration for %s: %s", run_id, e)
+        return None
+
+
+def _event_sidecar_declaration(db, run_id: str) -> dict | None:
+    """Look up a frozen `sidecar` declaration from the run's events (`run.started`/`run.imported`)."""
+    if db is None or not run_id:
+        return None
+    try:
+        from bathos.runlog.fold_campaigns import member_sidecar_declaration
+
+        rows = db.execute(
+            "SELECT kind, ts, eid, data FROM events WHERE entity_key = ?",
+            [json.dumps([run_id])],
+        ).fetchall()
+    except Exception:  # noqa: BLE001 -- legacy DBs have no events table
+        return None
+    if not rows:
+        return None
+    events = []
+    for kind, ts, eid, raw_data in rows:
+        try:
+            data = json.loads(raw_data) if isinstance(raw_data, str) else (raw_data or {})
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        events.append({"kind": kind, "ts": ts or "", "eid": eid or "", "data": data})
+    return member_sidecar_declaration(events)
+
+
+def load_frozen_sidecar(
+    catalog_dir: Path | None,
+    *,
+    sidecar_sha256: str = "",
+    run_id: str = "",
+    db=None,
+) -> Sidecar | None:
+    """Load a frozen Sidecar from catalog snapshots or runlog events when the source path is gone."""
+    if catalog_dir is not None and sidecar_sha256:
+        try:
+            snap = sidecar_snapshot_path(catalog_dir, sidecar_sha256)
+            if snap.is_file():
+                return parse_sidecar(snap)
+        except (OSError, ValueError, SidecarError) as e:
+            logger.debug("Frozen sha256 snapshot unreadable for %s: %s", sidecar_sha256, e)
+
+    if catalog_dir is not None and run_id:
+        try:
+            run_snap = run_sidecar_snapshot_path(catalog_dir, run_id)
+            if run_snap.is_file():
+                payload = json.loads(run_snap.read_text())
+                snap_sha = payload.get("sidecar_sha256") or ""
+                if snap_sha:
+                    toml_snap = sidecar_snapshot_path(catalog_dir, snap_sha)
+                    if toml_snap.is_file():
+                        return parse_sidecar(toml_snap)
+                decl = payload.get("declaration")
+                if isinstance(decl, dict) and decl:
+                    return Sidecar.from_declaration(decl)
+        except (OSError, ValueError, json.JSONDecodeError, SidecarError) as e:
+            logger.debug("Frozen per-run snapshot unreadable for %s: %s", run_id, e)
+
+    decl = _event_sidecar_declaration(db, run_id)
+    if decl:
+        try:
+            return Sidecar.from_declaration(decl)
+        except SidecarError as e:
+            logger.debug("Frozen event declaration unreadable for %s: %s", run_id, e)
+    return None
+
+
+def resolve_sidecar_for_run(
+    sidecar_path: str | Path | None,
+    *,
+    catalog_dir: Path | None = None,
+    sidecar_sha256: str = "",
+    run_id: str = "",
+    db=None,
+) -> Sidecar | None:
+    """Parse a run's sidecar from disk (snapshotting it if possible), or fall back to frozen state.
+
+    When `sidecar_path` points to a file inside a disappeared `/tmp` worktree, this falls back
+    to the frozen snapshot in `<catalog>/sidecars/snapshots/` or the `run.started` declaration.
+    Raises `SidecarError` if the on-disk file exists at `sidecar_path` but is malformed.
+    """
+    if sidecar_path:
+        path_obj = Path(sidecar_path)
+        if path_obj.is_file():
+            sidecar = parse_sidecar(path_obj)
+            if catalog_dir is not None:
+                snapshot_sidecar_file(
+                    path_obj, catalog_dir, sha256=sidecar_sha256, run_id=run_id
+                )
+            return sidecar
+    return load_frozen_sidecar(
+        catalog_dir, sidecar_sha256=sidecar_sha256, run_id=run_id, db=db
+    )
 
 
 def is_in_enforced_dir(script_path: Path) -> bool:

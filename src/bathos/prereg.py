@@ -9,7 +9,7 @@ from typing import Literal
 
 from bathos.index import catalog_readable, connect_read
 from bathos.schema import Run
-from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar
+from bathos.sidecar import Sidecar, find_sidecar, parse_sidecar, snapshot_sidecar_file
 from bathos.telemetry import event
 from bathos.validate import ValidationResult, validate_sidecar
 
@@ -549,6 +549,8 @@ def gate_check(
         return GateResult(ok=False, mode=mode, bundle=bundle, error_payload=payload)
 
     sidecar = parse_sidecar(bundle.path)
+    if catalog_dir is not None and bundle.path is not None:
+        snapshot_sidecar_file(bundle.path, catalog_dir, sha256=bundle.sha256)
     # The prior-run lookup only decides exploration/calibration stages (see resolve_epistemic_class).
     needs_lookup = sidecar.stage_name_raw in ("exploration", "calibration")
     validation = validate_sidecar(

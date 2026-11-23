@@ -873,3 +873,47 @@ def test_check_component_sidecar_drift_empty_component_id_never_drifts(tmp_path)
 
     result = check_component_sidecar_drift("", catalog_dir, "current_sha_abc123")
     assert result is False
+
+
+def test_gate_check_snapshots_sidecar_and_survives_worktree_removal(tmp_path):
+    """tech_debt #3118: gate_check freezes sidecar in catalog; negative control without snapshot returns None."""
+    import shutil
+
+    from bathos.prereg import gate_check, resolve_sidecar
+    from bathos.sidecar import resolve_sidecar_for_run, sidecar_snapshot_path
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    wt = tmp_path / "tmp_wt"
+    exp_dir = wt / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    script = exp_dir / "ephemeral_exp.py"
+    script.write_text("print(1)\n")
+    sidecar = exp_dir / "ephemeral_exp.bth.toml"
+    sidecar.write_text(
+        '[experiment]\nhypothesis = "h"\n'
+        '[outcomes.pass]\ncondition = "x > 0"\ndecision = "go"\nreasoning = "r1"\n'
+        '[outcomes.fallback]\ncondition = "TRUE"\ndecision = "stop"\nreasoning = "r2"\nis_residual = true\n'
+        '[result_schema]\nx = "float"\n'
+    )
+    bundle = resolve_sidecar(script)
+    res = gate_check(script, bundle, "collaborative", catalog_dir=catalog_dir)
+    assert res.ok is True
+    assert sidecar_snapshot_path(catalog_dir, bundle.sha256).is_file()
+
+    shutil.rmtree(wt)
+    recovered = resolve_sidecar_for_run(
+        sidecar, catalog_dir=catalog_dir, sidecar_sha256=bundle.sha256, run_id="run-tmp"
+    )
+    assert recovered is not None
+    assert recovered.hypothesis == "h"
+
+    # Negative control: missing path + no snapshot in an empty catalog yields None
+    empty_catalog = tmp_path / "empty_catalog"
+    empty_catalog.mkdir()
+    assert (
+        resolve_sidecar_for_run(
+            sidecar, catalog_dir=empty_catalog, sidecar_sha256=bundle.sha256, run_id="run-tmp"
+        )
+        is None
+    )

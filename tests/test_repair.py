@@ -483,6 +483,7 @@ class TestIntegration:
                 del os.environ["BTH_CATALOG_DIR"]
 
 
+
 # =============================================================================
 # TESTS: WARM->COOL RE-EXPORT (P2 Feature)
 # =============================================================================
@@ -630,6 +631,7 @@ class TestReexportFromWarm:
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
+
 
     def test_reexport_from_warm_executes(self, tmp_path: Path):
         """Repair with reexport_from_warm action writes missing runs back to cool.
@@ -780,6 +782,7 @@ class TestReexportFromWarm:
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
+
 
     def test_reexport_compact_preserves_run_count(self, tmp_path: Path):
         """Spec check 3: After repair(from_warm=True), compact() must produce the same run count as original warm DB.
@@ -952,6 +955,7 @@ class TestReexportFromWarm:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
 
+
     def test_reexport_idempotent(self, tmp_path: Path):
         """Spec check 4: Re-running repair(from_warm=True) must be a no-op.
 
@@ -1104,6 +1108,7 @@ class TestReexportFromWarm:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
 
+
     def test_reexport_null_metadata_warning(self, tmp_path: Path):
         """Spec check 5: Runs with NULL metadata should be skipped and added to manifest.warnings.
 
@@ -1243,6 +1248,7 @@ class TestReexportFromWarm:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
 
+
     def test_reexport_dry_run_no_files_created(self, tmp_path: Path):
         """Spec: dry_run=True for reexport does not create cool fragments.
 
@@ -1357,3 +1363,81 @@ class TestReexportFromWarm:
         finally:
             if "BTH_CATALOG_DIR" in os.environ:
                 del os.environ["BTH_CATALOG_DIR"]
+
+
+class TestBackupWarmAndCampaignRunsReconcile:
+    """Regression tests for tech_debt #2819 (`backup_warm`) and #3051 (`reconcile_campaign_runs`)."""
+
+    def test_backup_warm_creates_and_rotates_backups(self, tmp_path: Path):
+        import time
+
+        from bathos.repair import RepairAction, _execute_repair_action
+
+        catalog = tmp_path / "catalog"
+        catalog.mkdir()
+        db_path = catalog / "bathos.db"
+        con = duckdb.connect(str(db_path))
+        con.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
+        con.close()
+
+        for i in range(4):
+            action = RepairAction(action="backup_warm", path=str(db_path), detail="backup")
+            _execute_repair_action(action, catalog)
+            assert "Backed up warm database" in action.detail
+            if i < 3:
+                time.sleep(0.02)
+
+        backups = sorted(catalog.glob("bathos.db.bak-*"))
+        assert len(backups) == 3
+
+    def test_backup_warm_missing_db_warns_without_raising(self, tmp_path: Path):
+        from bathos.repair import RepairAction, RepairManifest, _execute_repair_action
+
+        catalog = tmp_path / "catalog"
+        catalog.mkdir()
+        db_path = catalog / "bathos.db"
+        manifest = RepairManifest(
+            run_ts="2026-11-23T00:00:00Z",
+            catalog_dir=str(catalog),
+            dry_run=False,
+            tier="warm",
+        )
+        action = RepairAction(action="backup_warm", path=str(db_path), detail="backup")
+        _execute_repair_action(action, catalog, manifest=manifest)
+        assert "skipped backup" in action.detail
+        assert any("skipped backup" in w for w in manifest.warnings)
+
+    def test_repair_reconciles_orphaned_and_prefix_campaign_runs_in_bathos_db(self, tmp_path: Path):
+        from bathos.repair import repair
+        from bathos.verify import verify_warm
+
+        catalog = tmp_path / "catalog"
+        catalog.mkdir()
+        db_path = catalog / "bathos.db"
+        full_cid = "abcd1234-1111-2222-3333-444444444444"
+        con = duckdb.connect(str(db_path))
+        con.execute("CREATE TABLE _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
+        con.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
+        con.execute("CREATE TABLE campaigns (id TEXT PRIMARY KEY, mode TEXT)")
+        con.execute(
+            "CREATE TABLE campaign_runs (campaign_id TEXT, run_id TEXT, evalue REAL, seq_position INTEGER, PRIMARY KEY (campaign_id, run_id))"
+        )
+        con.execute("INSERT INTO campaigns VALUES (?, 'exploration')", [full_cid])
+        # 8-char prefix mismatch + true orphan referencing missing campaign
+        con.execute("INSERT INTO campaign_runs VALUES ('abcd1234', 'run-prefix', 1.0, 1)")
+        con.execute("INSERT INTO campaign_runs VALUES ('deadbeef-9999', 'run-orphan', NULL, NULL)")
+        con.close()
+
+        assert verify_warm(catalog).ok is False
+        dry = repair(catalog, tier="warm", dry_run=True)
+        assert any(a.action == "reconcile_campaign_runs" for a in dry.actions)
+        assert verify_warm(catalog).ok is False  # dry_run mutated nothing
+
+        applied = repair(catalog, tier="warm", dry_run=False)
+        assert any(a.action == "reconcile_campaign_runs" and not a.dry_run for a in applied.actions)
+        assert verify_warm(catalog).ok is True
+
+        con = duckdb.connect(str(db_path), read_only=True)
+        rows = con.execute("SELECT campaign_id, run_id FROM campaign_runs").fetchall()
+        con.close()
+        assert rows == [(full_cid, "run-prefix")]

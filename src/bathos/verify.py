@@ -115,8 +115,23 @@ def verify_warm(catalog_dir: Path) -> VerifyResult:
         con = _open_db(db_path)
         stats["db_valid"] = True
         try:
-            row_count = con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            row_count_row = con.execute("SELECT COUNT(*) FROM runs").fetchone()
+            row_count = int(row_count_row[0]) if row_count_row else 0
             stats["runs_count"] = row_count
+            tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+            if "campaign_runs" in tables and "campaigns" in tables:
+                orphan_row = con.execute(
+                    "SELECT COUNT(*) FROM campaign_runs cr "
+                    "LEFT JOIN campaigns c ON cr.campaign_id = c.id "
+                    "WHERE c.id IS NULL"
+                ).fetchone()
+                orphan_count = int(orphan_row[0]) if orphan_row else 0
+                stats["orphaned_campaign_runs"] = int(orphan_count)
+                if orphan_count:
+                    errors.append(
+                        f"Orphaned campaign_runs rows in bathos.db: {orphan_count} row(s) "
+                        "reference missing campaigns"
+                    )
         except Exception as e:
             errors.append(f"Could not query runs table: {e}")
             logger.error(f"Could not query runs table: {e}")
@@ -592,6 +607,78 @@ def _campaign_findings(catalog_dir: Path) -> list[dict]:
     return findings
 
 
+def _orphaned_campaign_run_findings(catalog_dir: Path) -> list[dict]:
+    """Detect orphaned and prefix-mismatched `campaign_runs` / phantom `campaigns` rows in `index.db`."""
+    from bathos.index import connect_read, index_db_path
+
+    if not index_db_path(catalog_dir).exists():
+        return []
+
+    con = connect_read(catalog_dir)
+    try:
+        valid_cids = [
+            r[0]
+            for r in con.execute(
+                "SELECT id FROM campaigns WHERE mode IS NOT NULL"
+            ).fetchall()
+            if r[0]
+        ]
+        orphans = con.execute(
+            "SELECT cr.campaign_id, cr.run_id FROM campaign_runs cr "
+            "LEFT JOIN campaigns c ON cr.campaign_id = c.id "
+            "WHERE c.id IS NULL OR c.mode IS NULL "
+            "ORDER BY cr.campaign_id, cr.run_id"
+        ).fetchall()
+        phantom_cids = [
+            r[0]
+            for r in con.execute(
+                "SELECT id FROM campaigns WHERE mode IS NULL ORDER BY id"
+            ).fetchall()
+            if r[0]
+        ]
+    finally:
+        con.close()
+
+    findings: list[dict] = []
+    seen_cids: set[str] = set()
+    for bad_cid, run_id in orphans:
+        if bad_cid:
+            seen_cids.add(bad_cid)
+        matches = (
+            [c for c in valid_cids if c.startswith(bad_cid)]
+            if bad_cid and len(bad_cid) >= 4
+            else []
+        )
+        if len(matches) == 1:
+            findings.append(
+                {
+                    "type": "campaign_run_prefix_mismatch",
+                    "campaign_id": bad_cid,
+                    "resolved_campaign_id": matches[0],
+                    "run_id": run_id,
+                }
+            )
+        else:
+            findings.append(
+                {
+                    "type": "orphaned_campaign_run",
+                    "campaign_id": bad_cid,
+                    "run_id": run_id,
+                }
+            )
+
+    for phantom_cid in phantom_cids:
+        if phantom_cid not in seen_cids:
+            findings.append(
+                {
+                    "type": "orphaned_campaign_run",
+                    "campaign_id": phantom_cid,
+                    "run_id": None,
+                }
+            )
+    return findings
+
+
 def _output_copy_findings(catalog_dir: Path) -> list[dict]:
     """Fold parity for ``output_copies`` (output tiering spec 261023, section 5.3, "Index wiring"): refold every
     ``output_copy.*`` event in memory with the same fold ingest uses and compare with the table. A row missing
@@ -816,6 +903,7 @@ def verify_runlog(catalog_dir: Path) -> VerifyResult:
         findings.extend(_watermark_findings(catalog_dir))
         findings.extend(_unterminated_tail_findings(catalog_dir))
         findings.extend(_campaign_findings(catalog_dir))
+        findings.extend(_orphaned_campaign_run_findings(catalog_dir))
         findings.extend(_output_copy_findings(catalog_dir))
         findings.extend(_legacy_findings(catalog_dir))
 

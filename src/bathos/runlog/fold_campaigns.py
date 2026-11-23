@@ -157,8 +157,23 @@ def member_sidecar_declaration(run_events: list[dict]) -> dict | None:
     return decl
 
 
+def _resolve_prefix_campaign_id(cid: str | None, known_campaign_ids: set[str] | None) -> str | None:
+    if not cid or not known_campaign_ids:
+        return cid
+    if cid in known_campaign_ids:
+        return cid
+    if len(cid) >= 4:
+        matches = [k for k in known_campaign_ids if k.startswith(cid)]
+        if len(matches) == 1:
+            return matches[0]
+    return cid
+
+
 def resolve_run_campaign_id(
-    run_events: list[dict], run_added_events_for_run: list[dict]
+    run_events: list[dict],
+    run_added_events_for_run: list[dict],
+    *,
+    known_campaign_ids: set[str] | None = None,
 ) -> str:
     """The single campaign a run currently belongs to, for the denormalized
     `runs.campaign_id` column (review finding, HIGH -- spec BC-6, lines
@@ -198,7 +213,8 @@ def resolve_run_campaign_id(
         # left `runs.campaign_id` NULL for every unaffiliated run, diverging
         # from that default representation.
         return ""
-    return max(candidates, key=lambda c: (c[0], c[1]))[2]
+    chosen = max(candidates, key=lambda c: (c[0], c[1]))[2]
+    return _resolve_prefix_campaign_id(chosen, known_campaign_ids) or ""
 
 
 def _run_sort_key(folded_run: dict) -> tuple[str, str]:
@@ -299,6 +315,12 @@ def fold_campaign(
 
     from bathos.sidecar import compute_evalue
 
+    run_added_by_run: dict[str, list[dict]] = {}
+    for ev in run_added_events:
+        entity = ev.get("entity") or []
+        if len(entity) >= 2:
+            run_added_by_run.setdefault(entity[1], []).append(ev)
+
     pending_threshold: float | None = None
     mismatch = False
     planned: dict[str, dict[str, Any]] = {}
@@ -306,6 +328,11 @@ def fold_campaign(
         folded = folded_members[run_id]
         outcome = folded.get("outcome")
         decl = member_sidecar_declaration(member_run_events.get(run_id, []))
+        if not decl and run_id in run_added_by_run:
+            latest_ra = max(run_added_by_run[run_id], key=_tie_key)
+            ra_decl = (latest_ra.get("data") or {}).get("sidecar")
+            if isinstance(ra_decl, dict) and ra_decl:
+                decl = ra_decl
         sidecar_obj = _sidecar_from_declaration(decl)
         if sidecar_obj is not None:
             evalue = compute_evalue(sidecar_obj, outcome or "unknown")

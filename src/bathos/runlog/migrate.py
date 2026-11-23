@@ -61,6 +61,7 @@ from bathos.runlog.ingest import (
     delete_staging_watermarks,
     discover_roots,
     fold_roots_into,
+    ingest_lock,
     read_folded_tables,
     staging_roots_for_attempt,
 )
@@ -656,15 +657,16 @@ def _cleanup_prior_attempt_state(catalog_dir: Path) -> None:
     staging_base = Path.home() / ".bth" / "log" / "import-staging"
     if staging_base.is_dir():
         shutil.rmtree(staging_base, ignore_errors=True)
-    idx_path = index_db_path(catalog_dir)
-    idx_path.unlink(missing_ok=True)
-    with contextlib.suppress(OSError):
-        idx_path.with_name(idx_path.name + ".wal").unlink()
-    for tmp in catalog_dir.glob("index.db.*.tmp"):
+    with ingest_lock(catalog_dir):
+        idx_path = index_db_path(catalog_dir)
+        idx_path.unlink(missing_ok=True)
         with contextlib.suppress(OSError):
-            tmp.unlink()
-        with contextlib.suppress(OSError):
-            tmp.with_name(tmp.name + ".wal").unlink()
+            idx_path.with_name(idx_path.name + ".wal").unlink()
+        for tmp in catalog_dir.glob("index.db.*.tmp"):
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            with contextlib.suppress(OSError):
+                tmp.with_name(tmp.name + ".wal").unlink()
 
     search_dirs = [Path.home() / ".bth" / "log" / "unaffiliated", mirror_dir_for(None, None)]
     for root, _cfg in _registered_roots_with_config():
@@ -1586,17 +1588,24 @@ def _step4e_delete_staging(catalog_dir: Path, attempt: str, staging_root: Path) 
 def _do_switch(catalog_dir: Path, attempt: str) -> None:
     """Migration step 4, actions (a)-(e), each independently idempotent so a
     marker-present re-run can safely repeat whichever remain (spec: "the
-    cut-over marker is the single commit point")."""
+    cut-over marker is the single commit point").
+
+    Takes `ingest_lock` inside the caller's `writers_lock(exclusive=True)` so
+    a concurrent `run_ingest` / `bth compact` / `ingest_after_write` cannot
+    race with step 4(a)'s `os.replace(..., index.db)` or step 4(e)'s
+    `delete_staging_watermarks` and staging removal (debt #2819).
+    """
     marker_path = cutover_marker_path(catalog_dir)
     staging_root = _attempt_staging_root(attempt)
 
-    if not marker_path.exists():
-        _step4a_build_index(catalog_dir, attempt)
-        _step4b_write_marker(catalog_dir, attempt, staging_root)
+    with ingest_lock(catalog_dir):
+        if not marker_path.exists():
+            _step4a_build_index(catalog_dir, attempt)
+            _step4b_write_marker(catalog_dir, attempt, staging_root)
 
-    _step4c_move_staged_segments(staging_root)
-    _step4d_rename_warm(catalog_dir)
-    _step4e_delete_staging(catalog_dir, attempt, staging_root)
+        _step4c_move_staged_segments(staging_root)
+        _step4d_rename_warm(catalog_dir)
+        _step4e_delete_staging(catalog_dir, attempt, staging_root)
 
 
 def _finish_remainder(catalog_dir: Path, attempt: str) -> MigrateToLogResult:
