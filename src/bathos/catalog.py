@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -118,6 +118,32 @@ def read_runs_report(catalog_dir: Path) -> tuple[list[Run], list[CorruptFragment
     return runs, corrupt
 
 
+SUBMIT_SCHEMA = pa.schema(
+    [
+        pa.field("project_slug", pa.string()),
+        pa.field("command", pa.string()),
+        pa.field("sidecar_sha256", pa.string()),
+        pa.field("bth_submit_version", pa.string()),
+        pa.field("submitted_at", pa.timestamp("us", tz="UTC")),
+        pa.field("myxcel_job_id", pa.string()),
+        pa.field("stage_name", pa.string()),
+    ]
+)
+
+
+@dataclass
+class SubmitCompactionResult:
+    """Summary of a submit-provenance prune/compaction pass."""
+
+    projects_processed: int = 0
+    files_before: int = 0
+    files_after: int = 0
+    rows_kept: int = 0
+    rows_pruned: int = 0
+    corrupt_skipped: int = 0
+    dry_run: bool = False
+
+
 def write_submit_provenance(
     project_slug: str,
     command: str,
@@ -155,18 +181,6 @@ def write_submit_provenance(
     with unit_of_work(catalog_dir):
 
         def _legacy_write() -> None:
-            submit_schema = pa.schema(
-                [
-                    pa.field("project_slug", pa.string()),
-                    pa.field("command", pa.string()),
-                    pa.field("sidecar_sha256", pa.string()),
-                    pa.field("bth_submit_version", pa.string()),
-                    pa.field("submitted_at", pa.timestamp("us", tz="UTC")),
-                    pa.field("myxcel_job_id", pa.string()),
-                    pa.field("stage_name", pa.string()),
-                ]
-            )
-
             submit_dir = catalog_dir / "submits" / project_slug
             submit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,7 +200,7 @@ def write_submit_provenance(
                     "myxcel_job_id": [myxcel_job_id or ""],
                     "stage_name": [stage_name or "exploration"],
                 },
-                schema=submit_schema,
+                schema=SUBMIT_SCHEMA,
             )
             pq.write_table(table, str(tmp_path))
             tmp_path.rename(final_path)  # atomic on POSIX
@@ -217,3 +231,122 @@ def write_submit_provenance(
             legacy_write=_legacy_write,
             cwd=cwd,
         )
+
+
+def _iter_submit_fragments(proj_dir: Path) -> list[Path]:
+    return sorted(
+        f
+        for f in proj_dir.glob("**/*.parquet")
+        if not f.name.endswith(".tmp") and not f.name.endswith(".tmp.parquet")
+    )
+
+
+def compact_submit_provenance(
+    catalog_dir: Path,
+    *,
+    project_slug: str | None = None,
+    max_age_days: int | None = None,
+    dry_run: bool = False,
+) -> SubmitCompactionResult:
+    """Compact and optionally prune per-submit Parquet fragments under `submits/<slug>/`.
+
+    Merges many single-row `*_submit.parquet` files per project into one
+    `<ts>_compacted_submit.parquet` file written atomically, and optionally
+    prunes records older than `max_age_days` (based on `submitted_at`).
+    Corrupt fragments are logged and left untouched.
+    """
+    if max_age_days is not None and max_age_days < 0:
+        raise ValueError("max_age_days must be >= 0")
+
+    result = SubmitCompactionResult(dry_run=dry_run)
+    submits_dir = catalog_dir / "submits"
+    if not submits_dir.is_dir():
+        return result
+
+    if project_slug is not None:
+        candidate = submits_dir / project_slug
+        proj_dirs = [candidate] if candidate.is_dir() else []
+    else:
+        proj_dirs = sorted(d for d in submits_dir.iterdir() if d.is_dir())
+
+    cutoff = datetime.now(UTC) - timedelta(days=max_age_days) if max_age_days is not None else None
+
+    for proj_dir in proj_dirs:
+        files = _iter_submit_fragments(proj_dir)
+        if not files:
+            continue
+        result.projects_processed += 1
+        result.files_before += len(files)
+
+        tables: list[pa.Table] = []
+        readable_files: list[Path] = []
+        for f in files:
+            try:
+                tables.append(pq.read_table(str(f)))
+                readable_files.append(f)
+            except Exception as exc:
+                logger.warning("Skipping corrupt submit fragment %s: %s", f, exc)
+                result.corrupt_skipped += 1
+
+        if not tables:
+            result.files_after += len(files)
+            continue
+
+        combined = pa.concat_tables(tables, promote_options="permissive")
+        kept = combined
+        pruned_here = 0
+        if cutoff is not None and "submitted_at" in combined.column_names and combined.num_rows > 0:
+            ts_col = combined.column("submitted_at")
+            if pa.types.is_timestamp(ts_col.type):
+                ts_utc = pc.cast(ts_col, pa.timestamp("us", tz="UTC"))
+                cutoff_scalar = pa.scalar(cutoff, type=pa.timestamp("us", tz="UTC"))
+                mask = pc.fill_null(pc.greater_equal(ts_utc, cutoff_scalar), True)
+                kept = combined.filter(mask)
+                pruned_here = combined.num_rows - kept.num_rows
+
+        result.rows_kept += kept.num_rows
+        result.rows_pruned += pruned_here
+
+        # Already compacted (1 readable file) and nothing pruned: leave untouched.
+        if len(readable_files) == 1 and pruned_here == 0:
+            result.files_after += len(files)
+            continue
+
+        if kept.num_rows > 0 and "submitted_at" in kept.column_names:
+            order = pc.sort_indices(kept, sort_keys=[("submitted_at", "ascending")])
+            kept = kept.take(order)
+
+        corrupt_count = len(files) - len(readable_files)
+        if dry_run:
+            result.files_after += corrupt_count + (1 if kept.num_rows > 0 else 0)
+            continue
+
+        new_path: Path | None = None
+        if kept.num_rows > 0:
+            ts_str = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+            tmp_path = proj_dir / f"{ts_str}_compacted_submit.parquet.tmp"
+            new_path = proj_dir / f"{ts_str}_compacted_submit.parquet"
+            pq.write_table(kept, str(tmp_path))
+            tmp_path.rename(new_path)
+            result.files_after += corrupt_count + 1
+        else:
+            result.files_after += corrupt_count
+
+        for old_file in readable_files:
+            if new_path is not None and old_file == new_path:
+                continue
+            old_file.unlink(missing_ok=True)
+
+    if not dry_run and result.projects_processed > 0 and (
+        result.files_before != result.files_after or result.rows_pruned > 0
+    ):
+        event(
+            "catalog.compact_submit_provenance",
+            projects=result.projects_processed,
+            files_before=result.files_before,
+            files_after=result.files_after,
+            rows_kept=result.rows_kept,
+            rows_pruned=result.rows_pruned,
+        )
+
+    return result

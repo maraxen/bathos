@@ -1756,6 +1756,172 @@ class TestSubmitBypassRateSignal:
         assert result.level == "INFO"
         assert "warm DB not available" in result.message
 
+    def test_submit_bypass_rate_log_mode_queries_index_without_parquet_glob(
+        self, tmp_path, monkeypatch
+    ):
+        """#1182: In log mode, signal_submit_bypass_rate queries index.db's submits
+        table directly without globbing submits/<slug>/**/*.parquet."""
+        import json as _json
+
+        import bathos.sprint_audit as sprint_audit_mod
+        from bathos.runlog.envelope import build_envelope
+        from bathos.runlog.ingest import run_ingest
+        from bathos.runlog.mode import cutover_marker_path
+        from bathos.runlog.project_id import assign_project_id, read_project_id, register_main_root
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".bth.toml").write_text(
+            f'[project]\nname = "test_project"\nslug = "test_project"\n'
+            f'created_at = "{datetime.now(UTC).isoformat()}"\n'
+        )
+        assign_project_id(repo)
+        pid = read_project_id(repo / ".bth.toml")
+        register_main_root(repo)
+
+        catalog_dir = tmp_path / "catalog"
+        catalog_dir.mkdir()
+        cutover_marker_path(catalog_dir).write_text(
+            _json.dumps({"at": "2026-01-01T00:00:00Z", "bathos": "test", "attempt": "1", "segments": []})
+        )
+
+        common = dict(
+            main_root=repo,
+            worktree_root=repo,
+            project="test_project",
+            project_id=pid,
+            writer="w1",
+        )
+        lines = [
+            _json.dumps(
+                build_envelope(
+                    kind="run.started",
+                    entity=["run-1"],
+                    data={
+                        "project_slug": "test_project",
+                        "command": "python a.py",
+                        "argv": [],
+                        "git_hash": "a",
+                        "git_branch": "main",
+                        "git_dirty": False,
+                        "timestamp": "2026-01-01T00:01:00Z",
+                        "stage_name": "validation",
+                        "slurm_job_id": "55501",
+                    },
+                    seq=1,
+                    ts="2026-01-01T00:01:00Z",
+                    eid="e-r1-s",
+                    **common,
+                )
+            ),
+            _json.dumps(
+                build_envelope(
+                    kind="run.started",
+                    entity=["run-2"],
+                    data={
+                        "project_slug": "test_project",
+                        "command": "python b.py",
+                        "argv": [],
+                        "git_hash": "a",
+                        "git_branch": "main",
+                        "git_dirty": False,
+                        "timestamp": "2026-01-01T00:02:00Z",
+                        "stage_name": "production",
+                        "slurm_job_id": "55502",
+                    },
+                    seq=2,
+                    ts="2026-01-01T00:02:00Z",
+                    eid="e-r2-s",
+                    **common,
+                )
+            ),
+            _json.dumps(
+                build_envelope(
+                    kind="submit.recorded",
+                    entity=["sub-1"],
+                    data={
+                        "project_slug": "test_project",
+                        "command": "python a.py",
+                        "sidecar_sha256": "abc",
+                        "bth_submit_version": "0.16.0",
+                        "myxcel_job_id": "55501",
+                        "slurm_job_id": "55501",
+                        "stage_name": "validation",
+                    },
+                    seq=3,
+                    ts="2026-01-01T00:00:30Z",
+                    eid="e-sub-1",
+                    **common,
+                )
+            ),
+        ]
+        log_dir = repo / ".bth" / "log"
+        log_dir.mkdir(parents=True)
+        (log_dir / "seg1.jsonl").write_text("\n".join(lines) + "\n")
+        run_ingest(catalog_dir)
+
+        def _forbid_parquet(*_a, **_kw):
+            raise AssertionError("log mode must query index.db submits, not Parquet glob")
+
+        monkeypatch.setattr(sprint_audit_mod, "_load_submitted_job_ids_from_parquet", _forbid_parquet)
+
+        # 1 of 2 cluster runs had a matching submit.recorded row -> 50% bypassed
+        result = signal_submit_bypass_rate("test_project", catalog_dir / "bathos.db", catalog_dir)
+        assert result.signal == "submit_bypass_rate"
+        assert result.value == pytest.approx(0.5)
+        assert result.level == "WARNING"
+        assert "1/2" in result.message
+
+    def test_submit_bypass_rate_legacy_reads_compacted_parquet(self, monkeypatch_registry, tmp_path):  # noqa: ARG002
+        """#1182: Legacy catalogs still read compacted submit-provenance Parquet files."""
+        from bathos.catalog import compact_submit_provenance
+        from bathos.sprint_audit import signal_submit_bypass_rate
+
+        catalog_dir = tmp_path / "test_catalog"
+        catalog_dir.mkdir()
+        init_catalog(catalog_dir)
+
+        base_time = datetime.now(UTC)
+        for i in range(3):
+            write_run(
+                Run(
+                    project_slug="test_project",
+                    command=f"python test.py --i {i}",
+                    argv=["python", "test.py", "--i", str(i)],
+                    git_hash="abc123",
+                    git_branch="main",
+                    git_dirty=False,
+                    timestamp=base_time + timedelta(seconds=i),
+                    status="completed",
+                    exit_code=0,
+                    outcome="pass",
+                    sidecar_mode="normal",
+                    outcome_is_residual=False,
+                    stage_name="validation",
+                    slurm_job_id=f"9000{i}",
+                ),
+                catalog_dir,
+            )
+            write_submit_provenance(
+                project_slug="test_project",
+                command=f"python test.py --i {i}",
+                sidecar_sha256="hash123",
+                myxcel_job_id=f"9000{i}",
+                stage_name="validation",
+                catalog_dir=catalog_dir,
+            )
+        compact(catalog_dir)
+
+        comp = compact_submit_provenance(catalog_dir, project_slug="test_project")
+        assert comp.files_before == 3
+        assert comp.files_after == 1
+
+        result = signal_submit_bypass_rate("test_project", catalog_dir / "bathos.db", catalog_dir)
+        assert result.value == pytest.approx(0.0)
+        assert result.level == "OK"
+        assert "0/3" in result.message
+
 
 def test_signal_12_confirmation_campaign_without_claim(tmp_path):
     """AC-10: Signal 12 fires for confirmation campaigns with null claim_path."""

@@ -8,10 +8,14 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pyarrow.parquet as pq
 
 from bathos.catalog import iter_run_fragments
+
+if TYPE_CHECKING:
+    from bathos.runlog.importer import ImportCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +514,7 @@ def _unterminated_tail_findings(catalog_dir: Path) -> list[dict]:
         (kind, root_id): log_dir for kind, root_id, log_dir in discover_roots(catalog_dir)
     }
     now = datetime.now(UTC)
+    siblings_by_dir: dict[Path, list[tuple[str, tuple[str, int, int] | None]]] = {}
 
     findings: list[dict] = []
     for root_kind, root_id, path, _size, byte_offset in rows:
@@ -525,10 +530,14 @@ def _unterminated_tail_findings(catalog_dir: Path) -> list[dict]:
         parsed = _parse_segment_name(path)
         if parsed is not None and base is not None:
             host, pid, start_ns = parsed
-            for sibling in base.glob("*.jsonl"):
-                if sibling.name == path:
+            if base not in siblings_by_dir:
+                siblings_by_dir[base] = [
+                    (sib.name, _parse_segment_name(sib.name))
+                    for sib in base.glob("*.jsonl")
+                ]
+            for sib_name, sib_parsed in siblings_by_dir[base]:
+                if sib_name == path:
                     continue
-                sib_parsed = _parse_segment_name(sibling.name)
                 if (
                     sib_parsed
                     and sib_parsed[0] == host
@@ -556,6 +565,31 @@ def _unterminated_tail_findings(catalog_dir: Path) -> list[dict]:
     return findings
 
 
+def _prefetch_lookup_entity_keys(con, lookup, keys: list[list[str]]) -> None:
+    """Batch-populate `lookup._keys` in ONE query over `events` (works on
+    `connect_read`'s `events` view, which does not expose `rowid`)."""
+    from bathos.runlog.ingest import _row_to_event
+
+    wanted: dict[str, None] = {}
+    for key in keys:
+        k = json.dumps(key)
+        if k not in lookup._keys:
+            wanted[k] = None
+    if not wanted:
+        return
+    wanted_list = list(wanted)
+    rows = con.execute(
+        "SELECT entity_key, eid, kind, entity, ts, project, project_id, writer, seq, "
+        "main_root, worktree_root, origin, data FROM events "
+        "WHERE entity_key IN (SELECT unnest(?::VARCHAR[]))",
+        [wanted_list],
+    ).fetchall()
+    for k in wanted_list:
+        lookup._keys[k] = []
+    for r in rows:
+        lookup._keys[r[0]].append(_row_to_event(r[1:]))
+
+
 def _campaign_findings(catalog_dir: Path) -> list[dict]:
     """AC-24: "threshold mismatch" (BC-12) and "`evalue_changed_after_
     conclusion`" (spec "Fold rules": a member whose folded end time is later
@@ -565,46 +599,67 @@ def _campaign_findings(catalog_dir: Path) -> list[dict]:
     real mismatch" from "no sequential members yet" (both leave
     `stopping_threshold` NULL), so this reads the one source of truth
     (`fold_campaign`'s own `_threshold_mismatch` flag) rather than
-    re-deriving the condition a second, possibly-diverging way."""
+    re-deriving the condition a second, possibly-diverging way.
+
+    Uses a single `connect_read` connection and a shared `_FoldLookup` with
+    one batched entity-key prefetch so checking N campaigns is O(1)
+    connections and avoids N+1 `_fetch_events_by_entity_key` queries.
+    """
     from bathos.index import connect_read
     from bathos.runlog.fold_runs import fold_run
-    from bathos.runlog.ingest import _compute_campaign_fold, _fetch_events_by_entity_key
+    from bathos.runlog.ingest import _compute_campaign_fold, _fold_lookup_scope, _FoldLookup
 
     con = connect_read(catalog_dir)
     try:
         campaign_ids = [r[0] for r in con.execute("SELECT id FROM campaigns").fetchall()]
+        if not campaign_ids:
+            return []
+
+        lookup = _FoldLookup(con)
+        keys_to_prefetch: list[list[str]] = [[cid] for cid in campaign_ids]
+        seen_runs: set[str] = set()
+        for cid in campaign_ids:
+            for rid in lookup.campaign_member_run_ids(cid):
+                if rid not in seen_runs:
+                    seen_runs.add(rid)
+                    keys_to_prefetch.append([rid])
+        _prefetch_lookup_entity_keys(con, lookup, keys_to_prefetch)
+
+        findings: list[dict] = []
+        end_ts_cache: dict[str, datetime | None] = {}
+        with _fold_lookup_scope(lookup):
+            for campaign_id in campaign_ids:
+                row, campaign_runs_rows = _compute_campaign_fold(con, campaign_id)
+
+                if row.get("_threshold_mismatch"):
+                    findings.append({"type": "threshold_mismatch", "campaign_id": campaign_id})
+
+                concluded_at = row.get("concluded_at")
+                concluded_dt = (
+                    _parse_iso_ts(concluded_at) if row.get("status") == "concluded" else None
+                )
+                if concluded_dt is not None:
+                    for member in campaign_runs_rows:
+                        run_id = member["run_id"]
+                        if run_id not in end_ts_cache:
+                            member_events = lookup.events_for_entity_key([run_id])
+                            end_ts_cache[run_id] = (
+                                _folded_run_end_ts(fold_run(member_events))
+                                if member_events
+                                else None
+                            )
+                        end_ts = end_ts_cache[run_id]
+                        if end_ts is not None and end_ts > concluded_dt:
+                            findings.append(
+                                {
+                                    "type": "evalue_changed_after_conclusion",
+                                    "campaign_id": campaign_id,
+                                    "run_id": run_id,
+                                }
+                            )
+        return findings
     finally:
         con.close()
-
-    findings: list[dict] = []
-    for campaign_id in campaign_ids:
-        con = connect_read(catalog_dir)
-        try:
-            row, campaign_runs_rows = _compute_campaign_fold(con, campaign_id)
-
-            if row.get("_threshold_mismatch"):
-                findings.append({"type": "threshold_mismatch", "campaign_id": campaign_id})
-
-            concluded_at = row.get("concluded_at")
-            concluded_dt = _parse_iso_ts(concluded_at) if row.get("status") == "concluded" else None
-            if concluded_dt is not None:
-                for member in campaign_runs_rows:
-                    run_id = member["run_id"]
-                    member_events = _fetch_events_by_entity_key(con, [run_id])
-                    if not member_events:
-                        continue
-                    end_ts = _folded_run_end_ts(fold_run(member_events))
-                    if end_ts is not None and end_ts > concluded_dt:
-                        findings.append(
-                            {
-                                "type": "evalue_changed_after_conclusion",
-                                "campaign_id": campaign_id,
-                                "run_id": run_id,
-                            }
-                        )
-        finally:
-            con.close()
-    return findings
 
 
 def _orphaned_campaign_run_findings(catalog_dir: Path) -> list[dict]:
@@ -731,6 +786,34 @@ def _output_copy_findings(catalog_dir: Path) -> list[dict]:
     return findings
 
 
+_LEGACY_CACHE_FILENAME = ".verify_legacy_cache.json"
+_LEGACY_CACHE_VERSION = 1
+_MISMATCH_FETCH_BATCH_SIZE = 200
+
+
+def _query_import_chains(con) -> dict[tuple[str, ...], tuple[int, str]]:
+    """Query `(kind, *entity, source_class, source_locator) -> (max ordinal, source_sha256)`
+    without transferring or deserializing full `data` JSON payloads."""
+    rows = con.execute(
+        "SELECT kind, entity, "
+        "json_extract_string(data, '$.source_class'), "
+        "json_extract_string(data, '$.source_locator'), "
+        "COALESCE(TRY_CAST(json_extract(data, '$.snapshot') AS BIGINT), 0), "
+        "COALESCE(json_extract_string(data, '$.source_sha256'), '') "
+        "FROM events "
+        "WHERE origin = 'migration' "
+        "AND (kind LIKE '%.imported' OR kind = 'legacy_source.unreadable')"
+    ).fetchall()
+    chains: dict[tuple[str, ...], tuple[int, str]] = {}
+    for kind, entity, source_class, source_locator, ordinal, sha in rows:
+        ent = json.loads(entity) if isinstance(entity, str) else (entity or [])
+        key = (kind or "", *ent, source_class or "", source_locator or "")
+        current = chains.get(key)
+        if current is None or ordinal > current[0]:
+            chains[key] = (ordinal, sha or "")
+    return chains
+
+
 def _known_import_chains(catalog_dir: Path) -> dict[tuple[str, ...], tuple[int, str]]:
     """The already-ingested equivalent of `importer._existing_chains`
     (which reads staging JSONL files pre-cutover): `(kind, *entity,
@@ -738,7 +821,13 @@ def _known_import_chains(catalog_dir: Path) -> dict[tuple[str, ...], tuple[int, 
     from `idx.events` instead, so a post-cutover legacy write can be told
     apart from one the importer already knows about (spec "Legacy writes
     after cut-over" / AC-23 / Migration step 5)."""
-    return _known_import_chains_and_fields(catalog_dir)[0]
+    from bathos.index import connect_read
+
+    con = connect_read(catalog_dir)
+    try:
+        return _query_import_chains(con)
+    finally:
+        con.close()
 
 
 # Importer bookkeeping keys on a `*.imported` event's `data` (importer.py),
@@ -787,6 +876,40 @@ def _known_import_chains_and_fields(
     return chains, fields
 
 
+def _fetch_latest_import_fields(
+    con,
+    wanted_ordinals: dict[tuple[str, ...], int],
+    entity_keys: list[list[str]],
+) -> dict[tuple[str, ...], dict]:
+    """Fetch bookkeeping-stripped `data` ONLY for the specific mismatched `entity_keys`."""
+    if not wanted_ordinals or not entity_keys:
+        return {}
+    unique_keys = list({json.dumps(k): None for k in entity_keys}.keys())
+    fields: dict[tuple[str, ...], dict] = {}
+    for start in range(0, len(unique_keys), _MISMATCH_FETCH_BATCH_SIZE):
+        batch = unique_keys[start : start + _MISMATCH_FETCH_BATCH_SIZE]
+        rows = con.execute(
+            "SELECT kind, entity, data FROM events "
+            "WHERE origin = 'migration' "
+            "AND entity_key IN (SELECT unnest(?::VARCHAR[])) "
+            "AND (kind LIKE '%.imported' OR kind = 'legacy_source.unreadable')",
+            [batch],
+        ).fetchall()
+        for kind, entity, raw_data in rows:
+            ent = json.loads(entity) if isinstance(entity, str) else (entity or [])
+            data = (json.loads(raw_data) if isinstance(raw_data, str) else raw_data) or {}
+            key = (
+                kind,
+                *ent,
+                data.get("source_class", ""),
+                data.get("source_locator", ""),
+            )
+            want_ord = wanted_ordinals.get(key)
+            if want_ord is not None and (data.get("snapshot") or 0) == want_ord:
+                fields[key] = {k: v for k, v in data.items() if k not in _IMPORT_BOOKKEEPING}
+    return fields
+
+
 def _is_schema_only_rewrite(prior: dict, current: dict) -> bool:
     """True when `current` is `prior` re-written by a fragment schema upgrade
     (`bathos.migrate.migrate_catalog`): every prior field unchanged except
@@ -813,53 +936,278 @@ def _is_schema_only_rewrite(prior: dict, current: dict) -> bool:
     return True
 
 
+def _stat_sig(path: Path) -> list[int]:
+    st = path.stat()
+    return [st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino]
+
+
+def _load_legacy_verify_cache(catalog_dir: Path) -> dict:
+    cache_path = catalog_dir / _LEGACY_CACHE_FILENAME
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if (
+            isinstance(data, dict)
+            and data.get("version") == _LEGACY_CACHE_VERSION
+            and isinstance(data.get("warm"), dict)
+            and isinstance(data.get("files"), dict)
+        ):
+            return data
+    except Exception:
+        pass
+    return {"version": _LEGACY_CACHE_VERSION, "warm": {}, "files": {}}
+
+
+def _save_legacy_verify_cache(catalog_dir: Path, new_cache: dict, old_cache: dict) -> None:
+    if not catalog_dir.is_dir() or new_cache == old_cache:
+        return
+    cache_path = catalog_dir / _LEGACY_CACHE_FILENAME
+    tmp_path = catalog_dir / f"{_LEGACY_CACHE_FILENAME}.tmp"
+    with contextlib.suppress(OSError):
+        tmp_path.write_text(json.dumps(new_cache, separators=(",", ":")), encoding="utf-8")
+        tmp_path.replace(cache_path)
+
+
+def _iter_legacy_file_readers(catalog_dir: Path):
+    """Yield `(path, locator, read_fn)` across all legacy fragment/JSON directories
+    using the exact discovery rules and candidate semantics of `bathos.runlog.importer`."""
+    import uuid
+
+    from bathos.runlog.envelope import NAMESPACE_BATHOS
+    from bathos.runlog.importer import (
+        ImportCandidate,
+        _iter_parquet_rows,
+        _parse_reverted_filename_ts,
+        _run_ts,
+    )
+
+    def _parquet_reader(
+        kind: str,
+        source_class: str,
+        id_field: str | None = None,
+        ts_field: str | None = None,
+        *,
+        is_run: bool = False,
+        is_submit: bool = False,
+    ):
+        def _read(path: Path, locator: str) -> list[ImportCandidate] | None:
+            rows = _iter_parquet_rows(path)
+            if rows is None:
+                return None
+            out: list[ImportCandidate] = []
+            for row in rows:
+                if is_submit:
+                    submitted_at = row.get("submitted_at") or ""
+                    submit_id = str(uuid.uuid5(NAMESPACE_BATHOS, f"submit:{locator}"))
+                    out.append(
+                        ImportCandidate(
+                            "submit.imported",
+                            [submit_id],
+                            row,
+                            submitted_at,
+                            "submit_parquet",
+                            locator,
+                        )
+                    )
+                elif is_run:
+                    run_id = row.get("id")
+                    if run_id:
+                        out.append(
+                            ImportCandidate(
+                                kind, [run_id], row, _run_ts(row), source_class, locator
+                            )
+                        )
+                else:
+                    assert id_field is not None
+                    assert ts_field is not None
+                    record_id = row.get(id_field)
+                    if record_id:
+                        out.append(
+                            ImportCandidate(
+                                kind,
+                                [record_id],
+                                row,
+                                row.get(ts_field) or "",
+                                source_class,
+                                locator,
+                            )
+                        )
+            return out
+
+        return _read
+
+    def _read_reaped_json(path: Path, locator: str) -> list[ImportCandidate] | None:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        run_id = record.get("run_id") or path.stem
+        fields = dict(record)
+        fields["status"] = "abandoned"
+        ts = str(record.get("reaped_at") or "")
+        return [ImportCandidate("run.imported", [run_id], fields, ts, "ledger_json", locator)]
+
+    def _read_reverted_json(path: Path, locator: str) -> list[ImportCandidate] | None:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(record, dict):
+            return None
+        run_id = record.get("run_id") or ""
+        reaped_at = str(record.get("reaped_at") or "")
+        filename_ts = _parse_reverted_filename_ts(path.stem)
+        reverted_at = max(reaped_at, filename_ts) if filename_ts else reaped_at
+        fields = dict(record)
+        fields["reverted_at"] = reverted_at
+        return [
+            ImportCandidate(
+                "run_reap.imported", [run_id], fields, reaped_at, "ledger_reverted", locator
+            )
+        ]
+
+    def _read_campaign_json(path: Path, locator: str) -> list[ImportCandidate] | None:
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or "id" not in payload:
+            return []
+        campaign_id = payload["id"]
+        ts = payload.get("concluded_at") or payload.get("started_at") or ""
+        return [
+            ImportCandidate("campaign.imported", [campaign_id], payload, ts, "campaign_json", locator)
+        ]
+
+    runs_dir = catalog_dir / "runs"
+    if runs_dir.is_dir():
+        reader = _parquet_reader("run.imported", "fragment", is_run=True)
+        for f in sorted(runs_dir.rglob("run_*.parquet")):
+            if not f.name.endswith(".tmp.parquet"):
+                yield f, str(f.relative_to(catalog_dir)), reader
+
+    remote_dir = catalog_dir / "remote-runs"
+    if remote_dir.is_dir():
+        reader = _parquet_reader("run.imported", "fragment_remote", is_run=True)
+        for f in sorted(remote_dir.rglob("run_*.parquet")):
+            if not f.name.endswith(".tmp.parquet"):
+                yield f, str(f.relative_to(catalog_dir)), reader
+
+    reaped_dir = catalog_dir / "reaped"
+    if reaped_dir.is_dir():
+        for project_dir in sorted(reaped_dir.iterdir()):
+            if not project_dir.is_dir() or project_dir.name == "reverted":
+                continue
+            for f in sorted(project_dir.glob("*.json")):
+                if f.parent.name != "reverted":
+                    yield f, str(f.relative_to(catalog_dir)), _read_reaped_json
+            reverted_dir = project_dir / "reverted"
+            if reverted_dir.is_dir():
+                for f in sorted(reverted_dir.glob("*.json")):
+                    yield f, str(f.relative_to(catalog_dir)), _read_reverted_json
+
+    submits_dir = catalog_dir / "submits"
+    if submits_dir.is_dir():
+        reader = _parquet_reader("submit.imported", "submit_parquet", is_submit=True)
+        for f in sorted(submits_dir.rglob("*_submit.parquet")):
+            if not f.name.endswith(".tmp"):
+                yield f, str(f.relative_to(catalog_dir)), reader
+
+    campaigns_dir = catalog_dir / "campaigns"
+    if campaigns_dir.is_dir():
+        for f in sorted(campaigns_dir.glob("*.json")):
+            yield f, str(f.relative_to(catalog_dir)), _read_campaign_json
+
+    for dirname, glob, kind, id_field, ts_field in (
+        ("ledger", "ledger_*.parquet", "trust_ledger.imported", "id", "amended_at"),
+        ("archived_items", "archived_*.parquet", "archived_item.imported", "record_id", "recorded_at"),
+        ("blast_radius", "blast_radius_*.parquet", "blast_radius.imported", "id", "amended_at"),
+    ):
+        frag_dir = catalog_dir / dirname
+        if frag_dir.is_dir():
+            reader = _parquet_reader(kind, "fragment", id_field=id_field, ts_field=ts_field)
+            for f in sorted(frag_dir.glob(glob)):
+                if not f.name.endswith(".tmp.parquet"):
+                    yield f, str(f.relative_to(catalog_dir)), reader
+
+
 def _legacy_findings(catalog_dir: Path) -> list[dict]:
     """AC-24: "a legacy write after cut-over", "a `corrupt_legacy_source`",
-    and "a `legacy_db_locked`" -- reuses the importer's own candidate scan
-    (`_all_candidates`, `connect_legacy`) rather than re-implementing legacy-
-    source discovery a second time (spec: "the same test the importer uses,
-    so verify and importer never disagree"). Only meaningful post-cutover
-    (spec Migration step 5: "an older bathos ... writing after cut-over");
-    before cut-over, an unimported legacy source is simply not yet migrated,
-    not an anomaly.
+    and "a `legacy_db_locked`" -- reuses the importer's own candidate builders
+    and `connect_legacy` rather than re-implementing legacy-source semantics a
+    second time (spec: "the same test the importer uses, so verify and
+    importer never disagree"). Only meaningful post-cutover (spec Migration
+    step 5: "an older bathos ... writing after cut-over"); before cut-over, an
+    unimported legacy source is simply not yet migrated, not an anomaly.
+
+    Streams per-table / per-file, extracts only chain metadata from `events`
+    (fetching full `data` only for mismatched chains), and caches verified-clean
+    stat signatures in `.verify_legacy_cache.json` to avoid rescanning frozen
+    legacy sources on subsequent runs.
     """
-    from bathos.runlog.importer import ImportReport, _all_candidates, _source_sha256
+    from bathos.index import connect_legacy, connect_read
+    from bathos.runlog.importer import (
+        _read_table_rows,
+        _source_sha256,
+        _warm_anchor_candidates,
+        _warm_archived_item_candidates,
+        _warm_blast_radius_candidates,
+        _warm_campaign_candidates,
+        _warm_campaign_run_candidates,
+        _warm_edge_candidates,
+        _warm_run_candidates,
+        _warm_sources,
+        _warm_trust_ledger_candidates,
+    )
 
-    report = ImportReport()
-    candidates = _all_candidates(catalog_dir, report)
+    con_idx = connect_read(catalog_dir)
+    try:
+        known_chains = _query_import_chains(con_idx)
 
-    findings: list[dict] = []
-    for path in report.locked:
-        findings.append({"type": "legacy_db_locked", "path": path})
-    for locator in report.unreadable:
-        findings.append({"type": "corrupt_legacy_source", "source_locator": locator})
+        findings: list[dict] = []
+        mismatched_batch: list[tuple[tuple[str, ...], ImportCandidate, int]] = []
 
-    known_chains, known_fields = _known_import_chains_and_fields(catalog_dir)
-    for cand in candidates:
-        if cand.kind == "legacy_source.unreadable":
-            continue  # already reported above via report.unreadable
-        sha = _source_sha256(cand.fields)
-        chain_key = (cand.kind, *cand.entity, cand.source_class, cand.source_locator)
-        known = known_chains.get(chain_key)
-        prior = known_fields.get(chain_key)
-        if (
-            known is not None
-            and known[1] != sha
-            and prior is not None
-            and _is_schema_only_rewrite(prior, cand.fields)
-        ):
-            # A post-cutover `bth migrate` schema upgrade of a frozen fragment
-            # (261025): no value the fold reads changed. Reported as a warning.
-            findings.append(
-                {
-                    "type": "legacy_schema_upgrade_after_cutover",
-                    "kind": cand.kind,
-                    "entity": cand.entity,
-                    "source_locator": cand.source_locator,
-                }
-            )
-            continue
-        if known is None or known[1] != sha:
+        def _flush_mismatched() -> None:
+            if not mismatched_batch:
+                return
+            wanted = {ck: ord_ for ck, _cand, ord_ in mismatched_batch}
+            entity_keys = [cand.entity for _ck, cand, _ord in mismatched_batch]
+            fields_by_key = _fetch_latest_import_fields(con_idx, wanted, entity_keys)
+            for chain_key, cand, _ord in mismatched_batch:
+                prior = fields_by_key.get(chain_key)
+                if prior is not None and _is_schema_only_rewrite(prior, cand.fields):
+                    findings.append(
+                        {
+                            "type": "legacy_schema_upgrade_after_cutover",
+                            "kind": cand.kind,
+                            "entity": cand.entity,
+                            "source_locator": cand.source_locator,
+                        }
+                    )
+                else:
+                    findings.append(
+                        {
+                            "type": "legacy_write_after_cutover",
+                            "kind": cand.kind,
+                            "entity": cand.entity,
+                            "source_locator": cand.source_locator,
+                            "writing_host": cand.fields.get("hostname") or None,
+                        }
+                    )
+            mismatched_batch.clear()
+
+        def _check_candidate(cand) -> tuple[bool, str]:
+            sha = _source_sha256(cand.fields)
+            chain_key = (cand.kind, *cand.entity, cand.source_class, cand.source_locator)
+            known = known_chains.get(chain_key)
+            if known is not None and known[1] == sha:
+                return True, sha
+            if known is not None and known[1] != sha:
+                mismatched_batch.append((chain_key, cand, known[0]))
+                if len(mismatched_batch) >= _MISMATCH_FETCH_BATCH_SIZE:
+                    _flush_mismatched()
+                return False, sha
             findings.append(
                 {
                     "type": "legacy_write_after_cutover",
@@ -869,7 +1217,119 @@ def _legacy_findings(catalog_dir: Path) -> list[dict]:
                     "writing_host": cand.fields.get("hostname") or None,
                 }
             )
-    return findings
+            return False, sha
+
+        old_cache = _load_legacy_verify_cache(catalog_dir)
+        new_cache: dict = {"version": _LEGACY_CACHE_VERSION, "warm": {}, "files": {}}
+
+        warm_builders = (
+            ("runs", _warm_run_candidates),
+            ("campaigns", _warm_campaign_candidates),
+            ("campaign_runs", _warm_campaign_run_candidates),
+            (
+                "campaign_edges",
+                lambda rows, sc, lp: _warm_edge_candidates(
+                    rows, sc, lp, table="campaign_edges", etype="campaign"
+                ),
+            ),
+            (
+                "run_edges",
+                lambda rows, sc, lp: _warm_edge_candidates(
+                    rows, sc, lp, table="run_edges", etype="run"
+                ),
+            ),
+            ("sidecar_anchors", _warm_anchor_candidates),
+            ("blast_radius_ledger", _warm_blast_radius_candidates),
+            ("trust_ledger", _warm_trust_ledger_candidates),
+            ("archived_items", _warm_archived_item_candidates),
+        )
+
+        for path, source_class, locator_prefix in _warm_sources(catalog_dir):
+            opened = connect_legacy(path)
+            if isinstance(opened, dict):
+                status = opened.get("status")
+                if status == "legacy_db_locked":
+                    findings.append({"type": "legacy_db_locked", "path": str(path)})
+                elif status == "corrupt_legacy_source":
+                    findings.append(
+                        {"type": "corrupt_legacy_source", "source_locator": locator_prefix}
+                    )
+                continue
+
+            con_legacy = opened
+            try:
+                stat_sig = _stat_sig(path)
+                cached_warm = old_cache["warm"].get(locator_prefix)
+                if (
+                    isinstance(cached_warm, dict)
+                    and cached_warm.get("stat") == stat_sig
+                    and isinstance(cached_warm.get("chains"), list)
+                    and all(
+                        (known := known_chains.get((k, *ent, source_class, loc))) is not None
+                        and known[1] == sha
+                        for k, ent, loc, sha in cached_warm["chains"]
+                    )
+                ):
+                    new_cache["warm"][locator_prefix] = cached_warm
+                    continue
+
+                warm_chains: list[list] = []
+                all_clean = True
+                for table, builder in warm_builders:
+                    for cand in builder(
+                        _read_table_rows(con_legacy, table), source_class, locator_prefix
+                    ):
+                        clean, sha = _check_candidate(cand)
+                        if clean:
+                            warm_chains.append([cand.kind, cand.entity, cand.source_locator, sha])
+                        else:
+                            all_clean = False
+                if all_clean:
+                    new_cache["warm"][locator_prefix] = {"stat": stat_sig, "chains": warm_chains}
+            finally:
+                con_legacy.close()
+
+        for path, locator, reader in _iter_legacy_file_readers(catalog_dir):
+            try:
+                stat_sig = _stat_sig(path)
+            except OSError:
+                continue
+
+            cached_file = old_cache["files"].get(locator)
+            if (
+                isinstance(cached_file, dict)
+                and cached_file.get("stat") == stat_sig
+                and isinstance(cached_file.get("chains"), list)
+                and all(
+                    (known := known_chains.get((k, *ent, sc, locator))) is not None
+                    and known[1] == sha
+                    for k, ent, sc, sha in cached_file["chains"]
+                )
+            ):
+                new_cache["files"][locator] = cached_file
+                continue
+
+            cands = reader(path, locator)
+            if cands is None:
+                findings.append({"type": "corrupt_legacy_source", "source_locator": locator})
+                continue
+
+            file_chains: list[list] = []
+            all_clean = True
+            for cand in cands:
+                clean, sha = _check_candidate(cand)
+                if clean:
+                    file_chains.append([cand.kind, cand.entity, cand.source_class, sha])
+                else:
+                    all_clean = False
+            if all_clean:
+                new_cache["files"][locator] = {"stat": stat_sig, "chains": file_chains}
+
+        _flush_mismatched()
+        _save_legacy_verify_cache(catalog_dir, new_cache, old_cache)
+        return findings
+    finally:
+        con_idx.close()
 
 
 def verify_runlog(catalog_dir: Path) -> VerifyResult:

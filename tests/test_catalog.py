@@ -4,7 +4,9 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from bathos.catalog import (
+    SUBMIT_SCHEMA,
     CorruptFragment,
+    compact_submit_provenance,
     init_catalog,
     read_runs,
     read_runs_report,
@@ -290,3 +292,148 @@ def test_read_runs_no_corruption_reports_empty_corrupt_list(tmp_catalog: Path, s
     runs, corrupt = read_runs_report(tmp_catalog)
     assert len(runs) == 1
     assert corrupt == []
+
+
+def _write_dated_submit_parquet(
+    catalog_dir: Path, slug: str, job_id: str, submitted_at, filename: str
+) -> Path:
+    import pyarrow as pa
+
+    submit_dir = catalog_dir / "submits" / slug
+    submit_dir.mkdir(parents=True, exist_ok=True)
+    path = submit_dir / filename
+    table = pa.table(
+        {
+            "project_slug": [slug],
+            "command": ["scripts/experiments/foo.py"],
+            "sidecar_sha256": ["abc"],
+            "bth_submit_version": ["0.16.0"],
+            "submitted_at": pa.array([submitted_at], type=pa.timestamp("us", tz="UTC")),
+            "myxcel_job_id": [job_id],
+            "stage_name": ["validation"],
+        },
+        schema=SUBMIT_SCHEMA,
+    )
+    pq.write_table(table, str(path))
+    return path
+
+
+def test_compact_submit_provenance_merges_fragments(tmp_catalog: Path):
+    """#1182: compact_submit_provenance merges per-submit fragments into one file per project."""
+    init_catalog(tmp_catalog)
+    for i in range(3):
+        write_submit_provenance(
+            project_slug="proj_a",
+            command=f"scripts/run_{i}.py",
+            sidecar_sha256="h",
+            myxcel_job_id=f"job-a-{i}",
+            stage_name="validation",
+            catalog_dir=tmp_catalog,
+        )
+    write_submit_provenance(
+        project_slug="proj_b",
+        command="scripts/run_b.py",
+        sidecar_sha256="h",
+        myxcel_job_id="job-b-0",
+        stage_name="exploration",
+        catalog_dir=tmp_catalog,
+    )
+
+    res = compact_submit_provenance(tmp_catalog)
+    assert res.projects_processed == 2
+    assert res.files_before == 4
+    assert res.files_after == 2  # 1 compacted for proj_a + 1 untouched for proj_b
+    assert res.rows_kept == 4
+    assert res.rows_pruned == 0
+
+    a_files = list((tmp_catalog / "submits" / "proj_a").glob("*.parquet"))
+    assert len(a_files) == 1
+    tbl = pq.read_table(a_files[0])
+    assert set(tbl.column("myxcel_job_id").to_pylist()) == {"job-a-0", "job-a-1", "job-a-2"}
+
+
+def test_compact_submit_provenance_prunes_old_records(tmp_catalog: Path):
+    """#1182: max_age_days prunes expired submit rows while retaining recent ones."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    _write_dated_submit_parquet(
+        tmp_catalog, "proj", "old-1", now - timedelta(days=60), "20260101T000001_submit.parquet"
+    )
+    _write_dated_submit_parquet(
+        tmp_catalog, "proj", "old-2", now - timedelta(days=45), "20260115T000001_submit.parquet"
+    )
+    _write_dated_submit_parquet(
+        tmp_catalog, "proj", "new-1", now - timedelta(days=2), "20261121T000001_submit.parquet"
+    )
+
+    res = compact_submit_provenance(tmp_catalog, max_age_days=30)
+    assert res.files_before == 3
+    assert res.files_after == 1
+    assert res.rows_kept == 1
+    assert res.rows_pruned == 2
+
+    files = list((tmp_catalog / "submits" / "proj").glob("*.parquet"))
+    assert len(files) == 1
+    assert pq.read_table(files[0]).column("myxcel_job_id").to_pylist() == ["new-1"]
+
+
+def test_compact_submit_provenance_prunes_all_and_supports_dry_run(tmp_catalog: Path):
+    """#1182: dry_run leaves disk unchanged; pruning all rows removes old files."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    _write_dated_submit_parquet(
+        tmp_catalog, "proj", "old-1", now - timedelta(days=90), "20260101T000001_submit.parquet"
+    )
+    _write_dated_submit_parquet(
+        tmp_catalog, "proj", "old-2", now - timedelta(days=80), "20260110T000001_submit.parquet"
+    )
+
+    dry = compact_submit_provenance(tmp_catalog, max_age_days=30, dry_run=True)
+    assert dry.dry_run is True
+    assert dry.rows_kept == 0
+    assert dry.rows_pruned == 2
+    assert dry.files_before == 2
+    assert dry.files_after == 0
+    assert len(list((tmp_catalog / "submits" / "proj").glob("*.parquet"))) == 2
+
+    applied = compact_submit_provenance(tmp_catalog, max_age_days=30)
+    assert applied.rows_kept == 0
+    assert applied.rows_pruned == 2
+    assert list((tmp_catalog / "submits" / "proj").glob("*.parquet")) == []
+
+
+def test_compact_submit_provenance_skips_corrupt_and_rejects_negative_age(tmp_catalog: Path):
+    """#1182: corrupt submit fragments are skipped intact; negative max_age_days raises."""
+    import pytest
+
+    init_catalog(tmp_catalog)
+    write_submit_provenance(
+        project_slug="proj",
+        command="scripts/a.py",
+        sidecar_sha256="h",
+        myxcel_job_id="j1",
+        stage_name="validation",
+        catalog_dir=tmp_catalog,
+    )
+    write_submit_provenance(
+        project_slug="proj",
+        command="scripts/b.py",
+        sidecar_sha256="h",
+        myxcel_job_id="j2",
+        stage_name="validation",
+        catalog_dir=tmp_catalog,
+    )
+    corrupt = tmp_catalog / "submits" / "proj" / "99999999T000000_submit.parquet"
+    corrupt.write_bytes(b"not parquet")
+
+    with pytest.raises(ValueError, match="max_age_days"):
+        compact_submit_provenance(tmp_catalog, max_age_days=-1)
+
+    res = compact_submit_provenance(tmp_catalog)
+    assert res.corrupt_skipped == 1
+    assert res.rows_kept == 2
+    assert res.files_before == 3
+    assert res.files_after == 2  # 1 compacted + 1 untouched corrupt
+    assert corrupt.exists()

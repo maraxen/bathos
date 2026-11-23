@@ -194,6 +194,54 @@ def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
         )
 
 
+def _load_submitted_job_ids_from_index(conn: Any, project_slug: str) -> set[str]:
+    """Query `index.db`'s folded `submits` table for submitted job IDs."""
+    submit_rows = conn.execute(
+        "SELECT myxcel_job_id, slurm_job_id FROM submits WHERE project_slug = ?",
+        [project_slug],
+    ).fetchall()
+    submitted_job_ids: set[str] = set()
+    for myxcel_jid, slurm_jid in submit_rows:
+        if myxcel_jid:
+            submitted_job_ids.add(str(myxcel_jid))
+        if slurm_jid:
+            submitted_job_ids.add(str(slurm_jid))
+    return submitted_job_ids
+
+
+def _load_submitted_job_ids_from_parquet(catalog_dir: Path, project_slug: str) -> set[str]:
+    """Legacy fallback: read submit-provenance Parquet fragments from `submits/<slug>/`."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq_lib
+
+    provenance_dir = catalog_dir / "submits" / project_slug
+    if not provenance_dir.exists():
+        return set()
+
+    provenance_files = [
+        f
+        for f in provenance_dir.glob("**/*.parquet")
+        if not f.name.endswith(".tmp") and not f.name.endswith(".tmp.parquet")
+    ]
+    if not provenance_files:
+        return set()
+
+    submitted_job_ids: set[str] = set()
+    try:
+        tables = [pq_lib.read_table(str(f)) for f in provenance_files]
+        if tables:
+            combined = pa.concat_tables(tables, promote_options="permissive")
+            for col in ("myxcel_job_id", "slurm_job_id"):
+                if col in combined.column_names:
+                    for jid in combined.column(col).to_pylist():
+                        if jid:
+                            submitted_job_ids.add(str(jid))
+    except Exception:
+        # Silently continue if provenance read fails
+        pass
+    return submitted_job_ids
+
+
 def signal_submit_bypass_rate(
     project_slug: str, db_path: Path, catalog_dir: Path  # noqa: ARG001 -- kept for API stability
 ) -> SignalResult:
@@ -215,9 +263,12 @@ def signal_submit_bypass_rate(
         level ('INFO', 'OK', or 'WARNING'), and message.
 
     Semantics:
-        - Loads all submit-provenance records from ~/.bth/catalog/submits/<project_slug>/**/*.parquet.
+        - In log mode (`is_log_mode(catalog_dir)`), queries `index.db`'s folded
+          `submits` table directly without globbing `submits/` Parquet files.
+        - In legacy mode, falls back to reading submit-provenance Parquet records
+          from `~/.bth/catalog/submits/<project_slug>/**/*.parquet`.
         - For each validation/production run with slurm_job_id populated, checks if matching
-          submit-provenance exists (joined on runs.slurm_job_id = submits.myxcel_job_id).
+          submit-provenance exists (joined on runs.slurm_job_id = submits.myxcel_job_id / slurm_job_id).
         - If match found: run was submitted via bth submit.
         - If no match: run bypassed bth submit (e.g., direct sbatch call).
         - value = (bypassed runs) / (total validation/production runs with slurm_job_id).
@@ -225,30 +276,7 @@ def signal_submit_bypass_rate(
         - OK if rate <= 5%.
         - INFO if no runs or no provenance records found yet.
     """
-    import pyarrow as pa
-    import pyarrow.parquet as pq_lib
-
-    # Load provenance records
-    provenance_dir = catalog_dir / "submits" / project_slug
-    provenance_files = []
-    if provenance_dir.exists():
-        provenance_files = list(provenance_dir.glob("**/*.parquet"))
-
-    submitted_job_ids: set[str] = set()
-    if provenance_files:
-        try:
-            tables = [pq_lib.read_table(str(f)) for f in provenance_files]
-            if tables:
-                combined = pa.concat_tables(tables)
-                submitted_job_ids = set(
-                    jid for jid in combined.column("myxcel_job_id").to_pylist() if jid
-                )
-        except Exception:
-            # Silently continue if provenance read fails
-            # (but could log: f"Warning reading provenance: {e}")
-            pass
-
-    # Query warm DB for validation/production runs with slurm_job_id
+    # Query warm DB / index for validation/production runs with slurm_job_id
     if not catalog_readable(catalog_dir):
         return SignalResult(
             signal="submit_bypass_rate",
@@ -274,6 +302,11 @@ def signal_submit_bypass_rate(
                     level="INFO",
                     message="no validation/production cluster runs found",
                 )
+
+            if is_log_mode(catalog_dir):
+                submitted_job_ids = _load_submitted_job_ids_from_index(conn, project_slug)
+            else:
+                submitted_job_ids = _load_submitted_job_ids_from_parquet(catalog_dir, project_slug)
 
             total = len(rows)
             bypassed = sum(1 for (jid,) in rows if jid not in submitted_job_ids)
