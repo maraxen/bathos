@@ -1134,6 +1134,7 @@ def run_script(
     component_id: str | None = None,
     component_sidecar_sha256: str | None = None,
     seed: int | None = None,
+    from_observation: str | None = None,
 ) -> int:
     """Public entry point: one call is one `bth run` unit of work (runlog
     Mode section). `unit_of_work()` fixes the log-mode flag for the whole
@@ -1161,6 +1162,7 @@ def run_script(
             component_id=component_id,
             component_sidecar_sha256=component_sidecar_sha256,
             seed=seed,
+            from_observation=from_observation,
         )
     return exit_code
 
@@ -1181,6 +1183,7 @@ def _run_script_impl(
     component_id: str | None = None,
     component_sidecar_sha256: str | None = None,
     seed: int | None = None,
+    from_observation: str | None = None,
 ) -> int:
     cwd = Path.cwd() if cwd is None else cwd
     # Resolve the lock/ignore settings FIRST, before any run record or event is written: a malformed config or an
@@ -1481,6 +1484,113 @@ def _run_script_impl(
             return 1
         requires_waiver_reason = gate_result.waiver_reason
 
+    # Epistemic class (spec §3.1) and agent session are fixed at run start and never rewritten:
+    # editing the sidecar afterwards must not change what this run was recorded as.
+    epistemic_class = (
+        None if no_sidecar else _resolve_run_epistemic_class(sidecar, script_path, catalog_dir)
+    )
+
+    # Observation promotion & [holdout] enforcement (spec 261015 §3.4, S4).
+    # Runs before dependency probes / run.started so invalid linkages fail closed before compute.
+    linked_obs = None
+    holdout_record: dict[str, object] | None = None
+    effective_holdout_rank: int | None = None
+    cli_obs_id = (from_observation or "").strip()
+    sidecar_obs_id = (sidecar.derived_from_observation or "").strip() if sidecar else ""
+
+    if cli_obs_id or sidecar_obs_id or (sidecar is not None and sidecar.holdout is not None):
+        from bathos.observations import ObservationError, get_observation
+        from bathos.validate import ValidationError, validate_holdout_and_observation
+
+        obs_errors: list[str] = []
+        if cli_obs_id and (no_sidecar or sidecar is None):
+            obs_errors.append(
+                "--from-observation requires a sidecar declaring [holdout]"
+            )
+        elif cli_obs_id or sidecar_obs_id:
+            try:
+                obs_cli = (
+                    get_observation(cli_obs_id, catalog_dir=catalog_dir) if cli_obs_id else None
+                )
+                obs_sidecar = (
+                    get_observation(sidecar_obs_id, catalog_dir=catalog_dir)
+                    if sidecar_obs_id
+                    else None
+                )
+            except ObservationError as exc:
+                obs_errors.append(str(exc))
+                obs_cli = None
+                obs_sidecar = None
+
+            if not obs_errors:
+                if cli_obs_id and obs_cli is None:
+                    obs_errors.append(f"observation {cli_obs_id!r} not found in catalog")
+                if sidecar_obs_id and obs_sidecar is None:
+                    obs_errors.append(f"observation {sidecar_obs_id!r} not found in catalog")
+                if obs_cli is not None and obs_sidecar is not None and obs_cli.id != obs_sidecar.id:
+                    obs_errors.append(
+                        f"--from-observation ({obs_cli.id}) conflicts with sidecar "
+                        f"[provenance].derived_from_observation ({obs_sidecar.id})"
+                    )
+                linked_obs = obs_cli or obs_sidecar
+
+        if sidecar is not None and not obs_errors:
+            check_sidecar = (
+                dataclasses.replace(sidecar, derived_from_observation=linked_obs.id)
+                if linked_obs is not None and not sidecar.derived_from_observation
+                else sidecar
+            )
+            val_errs: list[ValidationError] = []
+            effective_holdout_rank = validate_holdout_and_observation(
+                check_sidecar,
+                bundle.path if bundle and bundle.found else None,
+                epistemic_class,
+                catalog_dir=catalog_dir,
+                project_root=cwd,
+                errors=val_errs,
+            )
+            obs_errors.extend(f"[{e.field}] {e.message}" for e in val_errs)
+
+        if obs_errors:
+            payload_dict = dataclasses.asdict(
+                _gate_failure_payload(
+                    error_code=GateErrorCode.SIDECAR_INVALID,
+                    phase="pre_execution",
+                    errors=obs_errors,
+                    agent_mode=resolved_mode,
+                    taxonomy_label="holdout_or_observation_invalid",
+                )
+            )
+            event("prereg.gate_deny", reason="holdout_or_observation_invalid", errors=obs_errors)
+            print(json.dumps(payload_dict), file=sys.stderr)
+            return 1
+
+        if sidecar is not None and sidecar.holdout is not None:
+            holdout_record = {
+                "kind": sidecar.holdout.kind,
+                "unit": sidecar.holdout.unit,
+                "split_manifest": sidecar.holdout.split_manifest,
+                "rank": effective_holdout_rank,
+                "holdout_verified": False,
+            }
+
+        if linked_obs is not None and linked_obs.run_id:
+            try:
+                from bathos.query import get_run
+
+                src_run = get_run(
+                    linked_obs.run_id, catalog_dir, allow_cool_fallback=True, include_superseded=True
+                )
+                if src_run is not None and list(src_run.argv or []) == list(argv):
+                    warn_msg = (
+                        f"warning: command argv matches observation {linked_obs.id} source run "
+                        f"{src_run.id[:8]} ({argv}) — verify test data is genuinely held out"
+                    )
+                    print(warn_msg, file=sys.stderr)
+                    _advise("holdout_same_argv", warn_msg)
+            except Exception:
+                pass
+
     # Probe only once the gates have let the run through: a refused run must not first spend
     # up to PROBE_TIMEOUT_S (or a `uv run` sync) describing an environment it will never use.
     # capture_dependency_provenance never raises.
@@ -1516,14 +1626,17 @@ def _run_script_impl(
         sidecar_mode_str = "declared"
     else:
         sidecar_mode_str = ""
-    # Epistemic class (spec §3.1) and agent session are fixed at run start and never rewritten:
-    # editing the sidecar afterwards must not change what this run was recorded as.
-    epistemic_class = (
-        None if no_sidecar else _resolve_run_epistemic_class(sidecar, script_path, catalog_dir)
-    )
     agent_session = (
         os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BTH_AGENT_SESSION") or None
     )
+    initial_meta: dict[str, object] = {}
+    if requires_waiver_reason:
+        initial_meta["requires_waiver"] = {"reason": requires_waiver_reason}
+    if linked_obs is not None:
+        initial_meta["derived_from_observation"] = linked_obs.id
+    if holdout_record is not None:
+        initial_meta["holdout"] = holdout_record
+        initial_meta["holdout_verified"] = False
     run = Run(
         project_slug=project_slug,
         command=" ".join(argv),
@@ -1575,12 +1688,9 @@ def _run_script_impl(
         ),
         git_dirty_content_id=git.dirty_content_id,
         git_provenance_source=git.provenance_source,
-        # Waiver of a [requires] check (spec 261016 B2) lands in the run's free-form metadata JSON.
-        metadata=(
-            json.dumps({"requires_waiver": {"reason": requires_waiver_reason}})
-            if requires_waiver_reason
-            else "{}"
-        ),
+        # Waiver of a [requires] check (spec 261016 B2) and observation/holdout attestation (spec 261015 S4)
+        # land in the run's free-form metadata JSON.
+        metadata=json.dumps(initial_meta) if initial_meta else "{}",
         toolchain_version_source="recorded" if dependency_provenance is not None else None,
     )
     run_uuid_var.set(run.id)
@@ -2256,6 +2366,11 @@ def _run_script_impl(
         metadata = _with_metadata_key(
             metadata, "requires_waiver", {"reason": requires_waiver_reason}
         )
+    if linked_obs is not None:
+        metadata = _with_metadata_key(metadata, "derived_from_observation", linked_obs.id)
+    if holdout_record is not None:
+        metadata = _with_metadata_key(metadata, "holdout", holdout_record)
+        metadata = _with_metadata_key(metadata, "holdout_verified", False)
     if sanity_check_record is not None:
         metadata = _with_metadata_key(metadata, "sanity_check", sanity_check_record)
     run = dataclasses.replace(
@@ -2432,6 +2547,30 @@ def _run_script_impl(
     # Advisory progress file (#105) goes with it; absent is the normal case.
     with suppress(OSError):
         progress_temp_path.unlink(missing_ok=True)
+
+    # Spec 261015 §3.4: once a confirmatory run promoting an observation is recorded
+    # (rank >= 1, not crashed/invalid_measurement), transition observation status to 'promoted'.
+    # Rank-0 holdouts (new_seeds / unit='seed', exploratory class) NEVER promote (§7.6).
+    if (
+        linked_obs is not None
+        and epistemic_class in ("confirmatory", "legacy")
+        and effective_holdout_rank is not None
+        and effective_holdout_rank >= 1
+        and outcome not in ("error", "invalid_measurement")
+        and linked_obs.status != "promoted"
+    ):
+        try:
+            from bathos.observations import update_observation_status
+
+            update_observation_status(
+                linked_obs.id,
+                "promoted",
+                reason=f"promoted by confirmatory run {run.id}",
+                project_root=cwd,
+                catalog_dir=catalog_dir,
+            )
+        except Exception as e:  # pragma: no cover - never discard a persisted run
+            event("run.error", phase="observation_promote", exc_type=type(e).__name__, exc_msg=str(e))
 
     run_outcome_var.set((run.outcome, run.outcome_error_reason))
 

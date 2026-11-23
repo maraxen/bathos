@@ -12,6 +12,10 @@ import duckdb
 
 from bathos.sidecar import (
     BREAKDOWN_DIRECTIONS,
+    FORBIDDEN_HOLDOUT_KINDS,
+    FORBIDDEN_SPLIT_UNITS,
+    HOLDOUT_KINDS,
+    HOLDOUT_SPLIT_UNIT_RANKS,
     RESERVED_OUTCOME_LABELS,
     InvariantSpec,
     Sidecar,
@@ -23,6 +27,7 @@ from bathos.sidecar import (
     evaluate_adversarial_check_detailed,
     evaluate_invariants,
     expand_breakdown_aggregates,
+    holdout_rank,
     parse_source,
     resolve_epistemic_class,
     uncovered_aggregate_message,
@@ -1878,6 +1883,338 @@ def _apply_stoichiometry_and_reagents(
                 reason=err.message,
             )
 
+def _extract_result_field(data: dict[str, Any], field_path: str) -> tuple[bool, Any]:
+    """Resolve top-level or dotted ``field_path`` from ``data``. Returns ``(found, value)``."""
+    if field_path in data:
+        return True, data[field_path]
+    if "." in field_path:
+        cur: Any = data
+        for part in field_path.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                return False, None
+            cur = cur[part]
+        return True, cur
+    return False, None
+
+
+def read_run_result_metadata(run: Any, catalog_dir: Path) -> dict[str, Any]:
+    """Read a run's emitted result JSON dict from ``run.metadata`` or log-mode ``run.finished``."""
+    raw_meta = getattr(run, "metadata", None)
+    if isinstance(raw_meta, dict) and raw_meta:
+        return raw_meta
+    if isinstance(raw_meta, str) and raw_meta.strip() and raw_meta.strip() != "{}":
+        try:
+            parsed = json.loads(raw_meta)
+            if isinstance(parsed, dict) and parsed:
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # In log mode (BTH_LOG_MODE=1), fold_run does not copy run.finished.data.metadata
+    # into idx.runs.metadata; read it from the run.finished event when available.
+    run_id = getattr(run, "id", "")
+    if run_id and catalog_dir is not None:
+        try:
+            from bathos.index import catalog_readable, connect_read
+
+            if catalog_readable(catalog_dir):
+                con = connect_read(catalog_dir, read_only=True)
+                try:
+                    rows = con.execute(
+                        "SELECT data FROM events WHERE kind = 'run.finished' AND entity_key = ? "
+                        "ORDER BY ts DESC, eid DESC LIMIT 1",
+                        [json.dumps([run_id])],
+                    ).fetchall()
+                    if rows:
+                        ev_data = json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
+                        if isinstance(ev_data, dict):
+                            m = ev_data.get("metadata")
+                            if isinstance(m, str) and m.strip():
+                                parsed_m = json.loads(m)
+                                if isinstance(parsed_m, dict):
+                                    return parsed_m
+                            elif isinstance(m, dict):
+                                return m
+                finally:
+                    con.close()
+        except Exception:
+            pass
+    return {}
+
+
+def check_calibration_source_ref(
+    source_str: str,
+    catalog_dir: Path,
+) -> tuple[str | None, str | None, Any | None, dict[str, Any]]:
+    """Validate a ``run:<id>:<field>`` source against ``catalog_dir`` (spec §3.5, S5).
+
+    Returns ``(issue_code, message, run_obj, result_dict)``. ``issue_code`` is None on success.
+    """
+    src = parse_source(source_str)
+    if src is None or src.kind != "run":
+        return None, None, None, {}
+
+    from bathos.query import AmbiguousRunId, get_run
+
+    try:
+        run_obj = get_run(src.ref, catalog_dir, allow_cool_fallback=True, include_superseded=True)
+    except AmbiguousRunId as exc:
+        return "calibration_run_not_found", f"source {source_str!r}: {exc}", None, {}
+    except Exception as exc:
+        return (
+            "calibration_run_not_found",
+            f"source {source_str!r}: failed to look up run {src.ref!r} ({exc})",
+            None,
+            {},
+        )
+
+    if run_obj is None:
+        return (
+            "calibration_run_not_found",
+            f"source {source_str!r}: calibration run {src.ref!r} not found in catalog",
+            None,
+            {},
+        )
+
+    if run_obj.epistemic_class != "calibrating":
+        return (
+            "non_calibrating_run_source",
+            f"source {source_str!r}: run {run_obj.id[:8]} has epistemic_class="
+            f"{run_obj.epistemic_class!r}, expected 'calibrating' (spec §3.5)",
+            run_obj,
+            {},
+        )
+
+    if run_obj.exit_code != 0 or run_obj.outcome in ("error", "invalid_measurement"):
+        return (
+            "calibration_run_unusable",
+            f"source {source_str!r}: calibration run {run_obj.id[:8]} exited {run_obj.exit_code} "
+            f"with outcome={run_obj.outcome!r} (C16)",
+            run_obj,
+            {},
+        )
+
+    result_dict = read_run_result_metadata(run_obj, catalog_dir)
+    found, val = _extract_result_field(result_dict, src.field)
+    if not found or val is None:
+        detail = "is null" if found else "not found in result JSON"
+        return (
+            "calibration_field_missing",
+            f"source {source_str!r}: field {src.field!r} {detail} on calibration run {run_obj.id[:8]}",
+            run_obj,
+            result_dict,
+        )
+
+    return None, None, run_obj, result_dict
+
+
+def validate_holdout_and_observation(
+    sidecar: Sidecar,
+    sidecar_path: Path | None,
+    epistemic_class: str | None,
+    *,
+    catalog_dir: Path | None = None,
+    project_root: Path | None = None,
+    errors: list[ValidationError],
+) -> int | None:
+    """Validate `[holdout]` and `[provenance].derived_from_observation` (spec §3.4, S4).
+
+    Returns the effective holdout rank (0..3) if `[holdout]` is present and valid, else None.
+    """
+    holdout = sidecar.holdout
+    obs_id = (sidecar.derived_from_observation or "").strip()
+
+    if holdout is None and not obs_id:
+        return None
+
+    if sidecar.kind != SidecarKind.EXPERIMENT:
+        if holdout is not None:
+            errors.append(ValidationError("holdout", "[holdout] is only valid on [experiment] sidecars"))
+        if obs_id:
+            errors.append(
+                ValidationError(
+                    "provenance.derived_from_observation",
+                    "[provenance].derived_from_observation is only valid on [experiment] sidecars",
+                )
+            )
+        return None
+
+    if obs_id and holdout is None:
+        errors.append(
+            ValidationError(
+                "holdout",
+                "[holdout] block is required when [provenance].derived_from_observation is set",
+            )
+        )
+
+    effective_rank: int | None = None
+    has_placeholder = False
+    if holdout is not None:
+        for hfield, hval in (
+            ("kind", holdout.kind),
+            ("unit", holdout.unit),
+            ("split_manifest", holdout.split_manifest),
+        ):
+            if hval and "${" in hval:
+                has_placeholder = True
+                errors.append(
+                    ValidationError(
+                        f"holdout.{hfield}",
+                        f"unfilled placeholder in holdout.{hfield} {hval!r}: "
+                        "template '${...}' must be filled in before the sidecar is valid",
+                    )
+                )
+
+        if not has_placeholder:
+            if not holdout.kind:
+                errors.append(ValidationError("holdout.kind", "[holdout] requires a non-empty 'kind'"))
+            elif holdout.kind in FORBIDDEN_HOLDOUT_KINDS:
+                errors.append(
+                    ValidationError(
+                        "holdout.kind",
+                        f"{holdout.kind!r} is not a valid holdout kind: frame or time splits of "
+                        "the same trajectories are not independent (C9)",
+                    )
+                )
+            elif holdout.kind not in HOLDOUT_KINDS:
+                errors.append(
+                    ValidationError(
+                        "holdout.kind",
+                        f"invalid holdout kind {holdout.kind!r}; must be one of {list(HOLDOUT_KINDS)}",
+                    )
+                )
+            elif holdout.kind == "held_out_split":
+                if holdout.unit in FORBIDDEN_SPLIT_UNITS:
+                    errors.append(
+                        ValidationError(
+                            "holdout.unit",
+                            f"held_out_split unit {holdout.unit!r} is forbidden: frame or time splits "
+                            "of the same trajectories are not valid (C9); use one of ['seed', 'build', 'system']",
+                        )
+                    )
+                elif holdout.unit not in HOLDOUT_SPLIT_UNIT_RANKS:
+                    errors.append(
+                        ValidationError(
+                            "holdout.unit",
+                            f"held_out_split requires 'unit' in ['seed', 'build', 'system'], "
+                            f"got {holdout.unit!r}",
+                        )
+                    )
+                elif (
+                    obs_id
+                    and holdout.unit in ("build", "system")
+                    and not holdout.split_manifest
+                    and epistemic_class in ("confirmatory", "legacy")
+                ):
+                    errors.append(
+                        ValidationError(
+                            "holdout.split_manifest",
+                            "held_out_split promoting an observation requires 'split_manifest' "
+                            "(committed in git or emitted by an earlier bth run before the source run) "
+                            "to rank >= 1 (C10)",
+                        )
+                    )
+
+            effective_rank = holdout_rank(holdout)
+            if (
+                effective_rank == 0
+                and epistemic_class in ("confirmatory", "legacy")
+                and not (holdout.kind == "held_out_split" and holdout.unit not in HOLDOUT_SPLIT_UNIT_RANKS)
+            ):
+                errors.append(
+                    ValidationError(
+                        "holdout",
+                        f"holdout kind={holdout.kind!r}"
+                        + (f" (unit={holdout.unit!r})" if holdout.unit else "")
+                        + " ranks 0 and cannot promote to a confirmatory test; use rank >= 1 "
+                        "(new_builds, held_out_split with unit='build'|'system', new_system) "
+                        "or scaffold an exploratory kill test",
+                    )
+                )
+
+    if obs_id and catalog_dir is not None:
+        from bathos.observations import (
+            ObservationError,
+            check_observation_promotion_eligibility,
+            check_split_manifest_timing,
+            get_observation,
+        )
+
+        try:
+            obs = get_observation(obs_id, catalog_dir=catalog_dir)
+        except ObservationError as exc:
+            errors.append(ValidationError("provenance.derived_from_observation", str(exc)))
+            obs = None
+
+        if obs is None:
+            if not any(e.field == "provenance.derived_from_observation" for e in errors):
+                errors.append(
+                    ValidationError(
+                        "provenance.derived_from_observation",
+                        f"observation {obs_id!r} not found in catalog",
+                    )
+                )
+        else:
+            h_kind = holdout.kind if (holdout is not None and "${" not in holdout.kind) else ""
+            for msg in check_observation_promotion_eligibility(
+                obs, holdout_kind=h_kind, catalog_dir=catalog_dir
+            ):
+                field_name = (
+                    "holdout.kind"
+                    if "literature_prediction" in msg
+                    else "provenance.derived_from_observation"
+                )
+                errors.append(ValidationError(field_name, msg))
+
+            if obs.run_id:
+                for label, spec in sidecar.outcomes.items():
+                    if not spec.source or "${" in spec.source:
+                        continue
+                    src = parse_source(spec.source)
+                    if (
+                        src is not None
+                        and src.kind == "run"
+                        and (
+                            obs.run_id == src.ref
+                            or obs.run_id.startswith(src.ref)
+                            or src.ref.startswith(obs.run_id)
+                        )
+                    ):
+                        errors.append(
+                            ValidationError(
+                                f"outcomes.{label}.source",
+                                f"cannot cite exploratory observation source run {obs.run_id[:8]} "
+                                "as a threshold source (optimistic selection bias); use a "
+                                "calibrating run, SESOI, appraised literature, or provisional",
+                            )
+                        )
+
+            if (
+                holdout is not None
+                and not has_placeholder
+                and holdout.kind == "held_out_split"
+                and holdout.unit in ("build", "system")
+                and holdout.split_manifest
+            ):
+                probe_root = project_root
+                if probe_root is None and sidecar_path is not None:
+                    from bathos.config import find_project_config
+
+                    cfg_p = find_project_config(sidecar_path.parent)
+                    probe_root = cfg_p.parent if cfg_p is not None else sidecar_path.parent
+                timing_ok, timing_msg = check_split_manifest_timing(
+                    holdout.split_manifest,
+                    obs,
+                    project_root=probe_root,
+                    catalog_dir=catalog_dir,
+                )
+                effective_rank = holdout_rank(holdout, split_timing_ok=timing_ok)
+                if not timing_ok and epistemic_class in ("confirmatory", "legacy"):
+                    errors.append(ValidationError("holdout.split_manifest", timing_msg))
+
+    return effective_rank
+
+
 def validate_sidecar(
     sidecar: Sidecar,
     sidecar_path: Path | None = None,
@@ -1885,6 +2222,7 @@ def validate_sidecar(
     *,
     stem_has_prior_runs: bool = False,
     result: dict[str, Any] | Path | str | None = None,
+    catalog_dir: Path | None = None,
 ) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
@@ -2278,6 +2616,26 @@ def validate_sidecar(
     breakdown_errors, breakdown_warnings = validate_breakdown_block(sidecar)
     errors.extend(breakdown_errors)
     warnings.extend(breakdown_warnings)
+
+    # Validate [holdout] and [provenance].derived_from_observation (spec 261015 §3.4, S4)
+    validate_holdout_and_observation(
+        sidecar,
+        sidecar_path,
+        cls,
+        catalog_dir=catalog_dir,
+        errors=errors,
+    )
+
+    # Validate run:<id>:<field> calibration sources when catalog_dir is supplied (spec §3.5, S5)
+    if catalog_dir is not None and sidecar.kind == SidecarKind.EXPERIMENT:
+        for label, spec in sidecar.outcomes.items():
+            if not spec.source or "${" in spec.source:
+                continue
+            issue_code, issue_msg, _run_obj, _res = check_calibration_source_ref(
+                spec.source, catalog_dir
+            )
+            if issue_code is not None and issue_msg:
+                errors.append(ValidationError(f"outcomes.{label}.source", issue_msg))
 
     _apply_stoichiometry_and_reagents(sidecar, sidecar_path, errors, warnings)
 

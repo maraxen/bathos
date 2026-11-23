@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -26,6 +27,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bathos.appraisal import (
+    USE_TIER_RANK,
     AppraisalRecord,
     compute_use_tier,
     get_appraisal,
@@ -35,7 +37,7 @@ from bathos.appraisal import (
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
 from bathos.errors import BathosError, BathosErrorCode
 from bathos.index import connect_read
-from bathos.query import AmbiguousRunId, get_run
+from bathos.query import AmbiguousRunId, get_run, list_runs
 from bathos.runlog.emit import emit_or_legacy, unit_of_work
 from bathos.runlog.envelope import uuid7
 from bathos.runlog.mode import is_log_mode
@@ -954,6 +956,263 @@ def update_observation_status(
     return status_rec
 
 
+def _parse_iso_utc(raw: str | datetime | None) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw.replace(tzinfo=UTC) if raw.tzinfo is None else raw.astimezone(UTC)
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def check_observation_promotion_eligibility(
+    obs: ObservationRecord,
+    *,
+    holdout_kind: str = "",
+    catalog_dir: Path | str | None = None,
+) -> list[str]:
+    """Validate whether ``obs`` may be promoted or linked via ``--from-observation`` (spec §3.3.1, §3.4).
+
+    Checks:
+    - Run-less observations must not be ``unappraised`` (C25).
+    - ``uses_as == 'contrast-context'`` cannot promote a hypothesis.
+    - Run-less observations' appraisals must yield ``use_tier >= 'hypothesis-source'``
+      (no unaddressed decisive/major objections) and satisfy ``obs.uses_as`` if set.
+    - ``holdout_kind == 'literature_prediction'`` is valid ONLY for appraised run-less
+      observations (C8); run-backed observations require a data holdout.
+    """
+    cd = _resolve_catalog_dir(catalog_dir)
+    errors: list[str] = []
+
+    if obs.unappraised:
+        errors.append(
+            f"observation {obs.id} is unappraised and cannot be promoted or used as a source "
+            "(record an appraisal via 'bth appraise' first)"
+        )
+    if obs.ref and not obs.appraisal_ids:
+        errors.append(
+            f"run-less observation {obs.id} has no appraisal_ids and cannot be promoted"
+        )
+    if obs.uses_as == "contrast-context":
+        errors.append(
+            f"observation {obs.id} has uses_as='contrast-context', which cannot promote a hypothesis "
+            "(requires 'hypothesis-source' or 'threshold-source')"
+        )
+
+    if obs.ref and obs.appraisal_ids:
+        appr_records: list[AppraisalRecord] = []
+        missing_apprs: list[str] = []
+        for aid in obs.appraisal_ids:
+            rec = get_appraisal(aid, catalog_dir=cd)
+            if rec is None:
+                missing_apprs.append(aid)
+            else:
+                appr_records.append(rec)
+        if missing_apprs:
+            errors.append(
+                f"observation {obs.id} references missing appraisal(s): {', '.join(missing_apprs)}"
+            )
+        elif appr_records:
+            all_lookup = {a.id: a for a in list_appraisals(catalog_dir=cd)}
+            tier_res = compute_use_tier(
+                appr_records,
+                value_provenance=obs.value_provenance,
+                citing_session=obs.agent_session or None,
+                lookup_appraisals=all_lookup,
+            )
+            actual_rank = USE_TIER_RANK.get(tier_res.use_tier or "", -1)
+            if actual_rank < USE_TIER_RANK["hypothesis-source"]:
+                errors.append(
+                    f"observation {obs.id} appraisals yield use_tier={tier_res.use_tier!r}, "
+                    "below 'hypothesis-source' required for promotion"
+                )
+            elif obs.uses_as:
+                try:
+                    validate_uses_as(obs.uses_as, tier_res)
+                except Exception as exc:
+                    errors.append(f"observation {obs.id}: {exc}")
+
+    if holdout_kind == "literature_prediction" and (obs.run_id or not obs.ref):
+        errors.append(
+            f"holdout kind 'literature_prediction' is valid only for run-less observations "
+            f"with an appraisal; observation {obs.id} is run-backed (run {obs.run_id}) and "
+            "requires a data holdout of rank >= 1 (C8)"
+        )
+
+    return errors
+
+
+def collect_source_run_ids(
+    obs: ObservationRecord,
+    *,
+    catalog_dir: Path | str | None = None,
+) -> list[str]:
+    """Return unique source ``run_id``s across ``obs`` and its ``supersedes`` lineage."""
+    cd = _resolve_catalog_dir(catalog_dir)
+    run_ids: list[str] = []
+    seen_obs: set[str] = set()
+    cur: ObservationRecord | None = obs
+    while cur is not None and cur.id not in seen_obs:
+        seen_obs.add(cur.id)
+        if cur.run_id and cur.run_id not in run_ids:
+            run_ids.append(cur.run_id)
+        if not cur.supersedes:
+            break
+        cur = get_observation(cur.supersedes, catalog_dir=cd)
+    return run_ids
+
+
+def _manifest_matches_output(manifest_str: str, output_str: str, project_root: Path | None) -> bool:
+    norm_m = Path(manifest_str).as_posix().lstrip("./")
+    norm_o = Path(output_str).as_posix().lstrip("./")
+    if norm_m == norm_o:
+        return True
+    if norm_o.endswith("/" + norm_m) or norm_m.endswith("/" + norm_o):
+        return True
+    if project_root is not None:
+        m_abs = (
+            Path(manifest_str)
+            if Path(manifest_str).is_absolute()
+            else (project_root / manifest_str)
+        )
+        o_abs = (
+            Path(output_str)
+            if Path(output_str).is_absolute()
+            else (project_root / output_str)
+        )
+        if m_abs.resolve() == o_abs.resolve():
+            return True
+    return False
+
+
+def resolve_split_manifest_time(
+    split_manifest: str,
+    *,
+    project_root: Path | None = None,
+    catalog_dir: Path | str | None = None,
+) -> tuple[datetime | None, str]:
+    """Return earliest provenance timestamp for ``split_manifest`` from git or prior `bth run` (C10)."""
+    manifest = split_manifest.strip()
+    if not manifest:
+        return None, ""
+
+    candidates: list[tuple[datetime, str]] = []
+    cd = _resolve_catalog_dir(catalog_dir)
+
+    # 1. Check recorded outputs of prior `bth run`s in the catalog.
+    if cd.exists():
+        try:
+            for r in list_runs(cd, limit=100_000):
+                outs = list(r.output_paths or [])
+                if any(_manifest_matches_output(manifest, op, project_root) for op in outs):
+                    ts = _parse_iso_utc(r.timestamp)
+                    if ts is not None:
+                        candidates.append((ts, f"run:{r.id[:8]}"))
+        except Exception:
+            pass
+
+    # 2. Check first git commit timestamp for the split manifest file.
+    probe_root = project_root or Path.cwd()
+    manifest_p = Path(manifest)
+    target_path = manifest_p if manifest_p.is_absolute() else (probe_root / manifest_p)
+    git_dir = target_path.parent if target_path.parent.exists() else probe_root
+    if git_dir.exists():
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(git_dir), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if top.returncode == 0 and top.stdout.strip():
+                repo_root = Path(top.stdout.strip()).resolve()
+                if not target_path.exists() and not manifest_p.is_absolute():
+                    repo_cand = repo_root / manifest_p
+                    if repo_cand.exists():
+                        target_path = repo_cand
+                try:
+                    rel = target_path.resolve().relative_to(repo_root).as_posix()
+                except ValueError:
+                    rel = manifest
+                log_res = subprocess.run(
+                    ["git", "-C", str(repo_root), "log", "--reverse", "--format=%cI", "--", rel],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if log_res.returncode == 0:
+                    lines = [ln.strip() for ln in log_res.stdout.splitlines() if ln.strip()]
+                    if lines:
+                        ts = _parse_iso_utc(lines[0])
+                        if ts is not None:
+                            candidates.append((ts, "git"))
+        except Exception:
+            pass
+
+    if not candidates:
+        return None, ""
+    earliest_ts, src = min(candidates, key=lambda pair: pair[0])
+    return earliest_ts, src
+
+
+def check_split_manifest_timing(
+    split_manifest: str,
+    obs: ObservationRecord,
+    *,
+    project_root: Path | None = None,
+    catalog_dir: Path | str | None = None,
+) -> tuple[bool, str]:
+    """Verify ``split_manifest`` predates the observation's source run(s) (spec §3.4, C10)."""
+    cd = _resolve_catalog_dir(catalog_dir)
+    split_ts, _src = resolve_split_manifest_time(
+        split_manifest, project_root=project_root, catalog_dir=cd
+    )
+    if split_ts is None:
+        return (
+            False,
+            f"split_manifest {split_manifest!r} has no first git commit and is not a recorded "
+            "output of an earlier bth run; split ranks 0 (C10)",
+        )
+
+    source_timestamps: list[datetime] = []
+    for rid in collect_source_run_ids(obs, catalog_dir=cd):
+        try:
+            src_run = get_run(rid, cd, allow_cool_fallback=True, include_superseded=True)
+        except Exception:
+            src_run = None
+        if src_run is not None:
+            ts = _parse_iso_utc(src_run.timestamp)
+            if ts is not None:
+                source_timestamps.append(ts)
+
+    if not source_timestamps:
+        created_ts = _parse_iso_utc(obs.created_at)
+        if created_ts is not None:
+            source_timestamps.append(created_ts)
+
+    if not source_timestamps:
+        return True, ""
+
+    earliest_source = min(source_timestamps)
+    if split_ts >= earliest_source:
+        return (
+            False,
+            f"split_manifest {split_manifest!r} timestamp ({split_ts.isoformat()}) is not before "
+            f"observation source run timestamp ({earliest_source.isoformat()}); split ranks 0 (C10)",
+        )
+    return True, ""
+
+
 __all__ = [
     "LITERATURE_DISPOSITIONS",
     "OBSERVATION_ORIGINS",
@@ -966,9 +1225,13 @@ __all__ = [
     "ObservationRunNotFoundError",
     "ObservationStatusRecord",
     "ObservationValidationError",
+    "check_observation_promotion_eligibility",
+    "check_split_manifest_timing",
+    "collect_source_run_ids",
     "create_observation",
     "get_observation",
     "get_observation_status_history",
     "list_observations",
+    "resolve_split_manifest_time",
     "update_observation_status",
 ]

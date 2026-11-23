@@ -482,6 +482,9 @@ class Sidecar:
     sanity: SanityBlock | None = None
     declared_levels: dict[str, list[str]] = field(default_factory=dict)
     excluded_levels: dict[str, str] = field(default_factory=dict)
+    # observation promotion & holdout attestation (spec 261015 §3.4, S4)
+    derived_from_observation: str = ""
+    holdout: HoldoutSpec | None = None
 
     def to_declaration(self) -> dict[str, typing.Any]:
         """Serialize this Sidecar to a JSON-safe declaration dict (symmetric with `from_declaration`)."""
@@ -598,6 +601,78 @@ class CalibrateBlock:
     """Top-level `[calibrate]` block: the quantity a calibration run measures (spec §3.5)."""
 
     quantity: str
+
+
+HOLDOUT_KINDS: tuple[str, ...] = (
+    "new_seeds",
+    "new_builds",
+    "held_out_split",
+    "new_system",
+    "literature_prediction",
+)
+HOLDOUT_SPLIT_UNIT_RANKS: dict[str, int] = {
+    "seed": 0,
+    "build": 1,
+    "system": 2,
+}
+FORBIDDEN_SPLIT_UNITS: frozenset[str] = frozenset({"frame", "time"})
+FORBIDDEN_HOLDOUT_KINDS: frozenset[str] = frozenset({"frame_split", "time_split"})
+HOLDOUT_KEYS: frozenset[str] = frozenset(
+    {"kind", "unit", "split_manifest", "description", "attestation"}
+)
+PROVENANCE_KEYS: frozenset[str] = frozenset({"derived_from_observation", "track_packages"})
+
+
+@dataclass
+class HoldoutSpec:
+    """Independent test-data specification for observation-promoted runs (`[holdout]`, spec §3.4)."""
+
+    kind: str = ""
+    unit: str = ""
+    split_manifest: str = ""
+    description: str = ""
+    attestation: str = ""
+
+
+def holdout_rank(holdout: HoldoutSpec, *, split_timing_ok: bool | None = None) -> int | None:
+    """Return the holdout rank (0..3) per spec §3.4, or None when kind/unit is invalid.
+
+    Rank 0 (`new_seeds`, `held_out_split` with `unit='seed'`, or `held_out_split` lacking
+    verified pre-source-run timing) is a kill test only and cannot promote to confirmatory.
+    """
+    kind = (holdout.kind or "").strip()
+    if kind == "new_seeds":
+        return 0
+    if kind == "new_builds":
+        return 1
+    if kind == "held_out_split":
+        unit = (holdout.unit or "").strip()
+        if unit not in HOLDOUT_SPLIT_UNIT_RANKS:
+            return None
+        base = min(2, HOLDOUT_SPLIT_UNIT_RANKS[unit])
+        if split_timing_ok is False:
+            return 0
+        return base
+    if kind in ("new_system", "literature_prediction"):
+        return 3
+    return None
+
+
+def canonical_outcomes_signature(outcomes: dict[str, OutcomeSpec]) -> str:
+    """Return a deterministic SHA256 over canonicalized `[outcomes]` (C3 laundering tripwire)."""
+    if not outcomes:
+        return ""
+    rows = [
+        {
+            "label": label,
+            "condition": " ".join((spec.condition or "").split()),
+            "decision": " ".join((spec.decision or "").split()),
+            "is_residual": bool(spec.is_residual),
+        }
+        for label, spec in sorted(outcomes.items())
+    ]
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 ENFORCED_DIRS = {"experiments", "benchmarks", "validation"}
@@ -1045,6 +1120,35 @@ def parse_sidecar(path: Path) -> Sidecar:
     declared_levels, excluded_levels = _parse_factors_and_exclusions(data, path)
     sidecar.declared_levels = declared_levels
     sidecar.excluded_levels = excluded_levels
+
+    # Parse [provenance] block (optional; shares table with dependency_provenance.track_packages)
+    if "provenance" in data:
+        prov_data = data.get("provenance")
+        if not isinstance(prov_data, dict):
+            logger.warning("[provenance] is not a table; ignoring")
+        else:
+            raw_dfo = prov_data.get("derived_from_observation")
+            if raw_dfo is not None:
+                sidecar.derived_from_observation = str(raw_dfo).strip()
+            for key in prov_data:
+                if key not in PROVENANCE_KEYS:
+                    logger.warning(f"Unknown key in [provenance]: {key!r}")
+
+    # Parse [holdout] block (optional, experiment sidecars, spec 261015 §3.4)
+    if "holdout" in data:
+        holdout_data = data.get("holdout")
+        if not isinstance(holdout_data, dict):
+            raise SidecarError(f"{path}: [holdout] must be a table")
+        sidecar.holdout = HoldoutSpec(
+            kind=str(holdout_data.get("kind", "") or "").strip(),
+            unit=str(holdout_data.get("unit", "") or "").strip(),
+            split_manifest=str(holdout_data.get("split_manifest", "") or "").strip(),
+            description=str(holdout_data.get("description", "") or "").strip(),
+            attestation=str(holdout_data.get("attestation", "") or "").strip(),
+        )
+        for key in holdout_data:
+            if key not in HOLDOUT_KEYS:
+                logger.warning(f"Unknown key in [holdout]: {key!r}")
 
     return sidecar
 

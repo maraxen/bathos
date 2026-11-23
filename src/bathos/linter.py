@@ -186,6 +186,10 @@ def lint_project(project_root: Path) -> list[LintIssue]:
         # Epistemic-class contract: stage_name canonicality, restage hints, source grammar (spec §3.1-3.2)
         issues.extend(check_epistemic_sidecars(project_root))
 
+        # Observation promotion, [holdout], laundering tripwire, & calibration run sources (spec §3.4-3.5, S4/S5)
+        issues.extend(check_holdout_and_observation_lint(project_root))
+        issues.extend(check_calibration_sources(project_root))
+
         # Unmeasured prose data-quality/filtering claims (#2662) and factor coverage declarations (#2200)
         issues.extend(check_unmeasured_data_quality_claims(project_root))
         issues.extend(check_factor_coverage_lint(project_root))
@@ -1092,6 +1096,357 @@ def check_epistemic_sidecars(project_root: Path) -> list[LintIssue]:
                             ),
                         )
                     )
+    return issues
+
+
+def _companion_script_sha256(sidecar_path: Path) -> str:
+    """Return SHA256 hex digest of `<stem>.py` adjacent to `<stem>.bth.toml`, or ''."""
+    import hashlib
+
+    if not sidecar_path.name.endswith(_SIDECAR_SUFFIX):
+        return ""
+    stem = sidecar_path.name[: -len(_SIDECAR_SUFFIX)]
+    script_path = sidecar_path.parent / f"{stem}.py"
+    if not script_path.is_file():
+        return ""
+    try:
+        return hashlib.sha256(script_path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _finite_float(val: object) -> float | None:
+    import math
+
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    f = float(val)
+    return f if math.isfinite(f) else None
+
+
+_MDE_FIELD_NAMES = frozenset(
+    {
+        "mde",
+        "min_detectable_effect",
+        "minimum_detectable_effect",
+        "noise_floor",
+        "detectable_effect",
+    }
+)
+
+
+def check_calibration_sources(
+    project_root: Path,
+    catalog_dir: Path | None = None,
+) -> list[LintIssue]:
+    """Tier-1/Tier-2 lint for `run:<id>:<field>` calibration sources & SESOI-vs-MDE (spec §3.5, S5).
+
+    Checks:
+    - ERROR (`calibration_run_not_found`, `non_calibrating_run_source`, `calibration_run_unusable`,
+      `calibration_field_missing`): every `run:<id>:<field>` must resolve to an existing
+      `epistemic_class='calibrating'` run that exited 0 with non-error/non-invalid_measurement
+      outcome and carries the named field. Also rejects exploratory self-sourcing (§3.4).
+    - WARNING (`underpowered_vs_sesoi`): if a sidecar declares both a `sesoi:<value>:<why>`
+      source and a calibration run whose MDE/noise_floor exceeds the SESOI value (C21).
+    """
+    from bathos.observations import get_observation
+    from bathos.sidecar import SidecarKind, parse_sidecar, parse_source, resolve_sidecar_for_run
+    from bathos.validate import check_calibration_source_ref
+
+    cd = catalog_dir or _resolve_project_catalog_dir(project_root)
+    if cd is None:
+        return []
+
+    issues: list[LintIssue] = []
+    for sidecar_path in iter_project_sidecars(project_root):
+        try:
+            sidecar = parse_sidecar(sidecar_path)
+        except Exception:
+            continue
+        if sidecar.kind != SidecarKind.EXPERIMENT:
+            continue
+
+        obs_run_id = ""
+        if sidecar.derived_from_observation:
+            with suppress(Exception):
+                obs = get_observation(sidecar.derived_from_observation, catalog_dir=cd)
+                if obs is not None:
+                    obs_run_id = obs.run_id
+
+        sesoi_sources: list[tuple[str, float]] = []
+        resolved_cals: list[tuple[str, str, object, dict]] = []
+
+        for label, spec in sidecar.outcomes.items():
+            if not spec.source or "${" in spec.source:
+                continue
+            src = parse_source(spec.source)
+            if src is None:
+                continue
+            if src.kind == "sesoi" and src.value is not None and src.value > 0:
+                sesoi_sources.append((label, float(src.value)))
+                continue
+            if src.kind != "run":
+                continue
+
+            issue_code, issue_msg, run_obj, res_dict = check_calibration_source_ref(spec.source, cd)
+            if issue_code is not None and issue_msg:
+                if (
+                    issue_code == "non_calibrating_run_source"
+                    and obs_run_id
+                    and run_obj is not None
+                    and run_obj.id == obs_run_id
+                ):
+                    issue_msg += " — exploratory observation source run cannot source a threshold (§3.4)"
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory=sidecar_path.parent.name,
+                        issue=issue_code,
+                        severity=IssueSeverity.ERROR,
+                        detail=f"outcomes.{label}.source: {issue_msg}",
+                    )
+                )
+            elif run_obj is not None:
+                resolved_cals.append((label, src.field, run_obj, res_dict))
+
+        if sesoi_sources and resolved_cals:
+            db = None
+            if catalog_readable(cd):
+                with suppress(Exception):
+                    db = connect_read(cd, read_only=True)
+            try:
+                for _cal_label, cal_field, cal_run, cal_res in resolved_cals:
+                    mde_candidates: list[tuple[str, float]] = []
+                    cal_quantity = ""
+                    with suppress(Exception):
+                        cal_sc = resolve_sidecar_for_run(
+                            getattr(cal_run, "sidecar_path", None),
+                            catalog_dir=cd,
+                            sidecar_sha256=getattr(cal_run, "sidecar_sha256", "") or "",
+                            run_id=getattr(cal_run, "id", "") or "",
+                            db=db,
+                        )
+                        if cal_sc is not None and cal_sc.calibrate is not None:
+                            cal_quantity = cal_sc.calibrate.quantity.lower()
+
+                    field_lower = cal_field.lower()
+                    is_mde_field = (
+                        field_lower in _MDE_FIELD_NAMES
+                        or field_lower.endswith("_mde")
+                        or "mde" in cal_quantity
+                        or "detectable" in cal_quantity
+                        or "noise floor" in cal_quantity
+                    )
+                    if is_mde_field:
+                        v = _finite_float(cal_res.get(cal_field))
+                        if v is not None:
+                            mde_candidates.append((cal_field, v))
+
+                    for extra_k in ("mde", "min_detectable_effect", "minimum_detectable_effect"):
+                        if extra_k == cal_field and any(k == extra_k for k, _ in mde_candidates):
+                            continue
+                        ev = _finite_float(cal_res.get(extra_k))
+                        if ev is not None:
+                            mde_candidates.append((extra_k, ev))
+
+                    for sesoi_label, sesoi_val in sesoi_sources:
+                        for mde_name, mde_val in mde_candidates:
+                            if mde_val > sesoi_val:
+                                issues.append(
+                                    LintIssue(
+                                        path=sidecar_path,
+                                        directory=sidecar_path.parent.name,
+                                        issue="underpowered_vs_sesoi",
+                                        severity=IssueSeverity.WARNING,
+                                        detail=(
+                                            f"outcomes.{sesoi_label} SESOI ({sesoi_val:g}) is smaller than "
+                                            f"calibration {mde_name} ({mde_val:g}) from run "
+                                            f"{getattr(cal_run, 'id', '')[:8]} — design is underpowered "
+                                            "by construction (C21)"
+                                        ),
+                                    )
+                                )
+            finally:
+                if db is not None:
+                    db.close()
+
+    return issues
+
+
+def check_holdout_and_observation_lint(
+    project_root: Path,
+    catalog_dir: Path | None = None,
+) -> list[LintIssue]:
+    """Tier-1/Tier-2 lint for `[holdout]`, observation promotion, C3 laundering, & same-argv (S4)."""
+    from bathos.observations import get_observation
+    from bathos.query import get_run, list_runs
+    from bathos.sidecar import (
+        SidecarKind,
+        canonical_outcomes_signature,
+        parse_sidecar,
+        resolve_epistemic_class,
+        resolve_sidecar_for_run,
+    )
+    from bathos.validate import (
+        ValidationError,
+        read_run_result_metadata,
+        validate_holdout_and_observation,
+    )
+
+    cd = catalog_dir or _resolve_project_catalog_dir(project_root)
+    issues: list[LintIssue] = []
+
+    for sidecar_path in iter_project_sidecars(project_root):
+        try:
+            sidecar = parse_sidecar(sidecar_path)
+        except Exception:
+            continue
+        if sidecar.kind != SidecarKind.EXPERIMENT:
+            continue
+        cls = resolve_epistemic_class(sidecar, stem_has_prior_runs=True)
+        errs: list[ValidationError] = []
+        validate_holdout_and_observation(
+            sidecar,
+            sidecar_path,
+            cls,
+            catalog_dir=cd,
+            project_root=project_root,
+            errors=errs,
+        )
+        for err in errs:
+            # Skip unfilled scaffold placeholders and run: self-sourcing (reported by check_calibration_sources).
+            if "${" in err.message:
+                continue
+            if cd is not None and err.field.startswith("outcomes.") and err.field.endswith(".source"):
+                continue
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory=sidecar_path.parent.name,
+                    issue="holdout_or_observation_invalid",
+                    severity=IssueSeverity.ERROR,
+                    detail=f"{err.field}: {err.message}",
+                )
+            )
+
+    if cd is None:
+        return issues
+
+    project_slug = ""
+    bth_toml = project_root / ".bth.toml"
+    if bth_toml.is_file():
+        with suppress(Exception):
+            from bathos.config import load_project_config
+
+            project_slug = load_project_config(bth_toml).slug
+
+    try:
+        all_runs = list_runs(cd, project=project_slug or None, limit=10_000)
+    except Exception:
+        all_runs = []
+
+    # Laundering tripwire (C3): match confirmatory sidecars with no [holdout] against prior exploratory runs.
+    exp_by_sha: dict[str, object] = {}
+    exp_by_outcomes: dict[str, object] = {}
+    db = None
+    if catalog_readable(cd):
+        with suppress(Exception):
+            db = connect_read(cd, read_only=True)
+    try:
+        for r in all_runs:
+            if r.epistemic_class != "exploratory":
+                continue
+            if r.script_sha256 and r.script_sha256 not in exp_by_sha:
+                exp_by_sha[r.script_sha256] = r
+            with suppress(Exception):
+                raw_sp = r.sidecar_path
+                if raw_sp and not Path(raw_sp).is_absolute() and not Path(raw_sp).is_file():
+                    cand_sp = project_root / raw_sp
+                    if cand_sp.is_file():
+                        raw_sp = str(cand_sp)
+                sc = resolve_sidecar_for_run(
+                    raw_sp,
+                    catalog_dir=cd,
+                    sidecar_sha256=r.sidecar_sha256 or "",
+                    run_id=r.id,
+                    db=db,
+                )
+                if sc is not None and sc.outcomes:
+                    sig = canonical_outcomes_signature(sc.outcomes)
+                    if sig and sig not in exp_by_outcomes:
+                        exp_by_outcomes[sig] = r
+    finally:
+        if db is not None:
+            db.close()
+
+    if exp_by_sha or exp_by_outcomes:
+        for sidecar_path in iter_project_sidecars(project_root):
+            try:
+                sidecar = parse_sidecar(sidecar_path)
+            except Exception:
+                continue
+            if sidecar.kind != SidecarKind.EXPERIMENT:
+                continue
+            cls = resolve_epistemic_class(sidecar, stem_has_prior_runs=False)
+            if cls not in ("confirmatory", "legacy"):
+                continue
+            if sidecar.holdout is not None or sidecar.derived_from_observation:
+                continue
+
+            reasons: list[str] = []
+            matched_run = None
+            script_sha = _companion_script_sha256(sidecar_path)
+            if script_sha and script_sha in exp_by_sha:
+                matched_run = exp_by_sha[script_sha]
+                reasons.append("script_sha256")
+            sig = canonical_outcomes_signature(sidecar.outcomes)
+            if sig and sig in exp_by_outcomes:
+                if matched_run is None:
+                    matched_run = exp_by_outcomes[sig]
+                reasons.append("canonicalized [outcomes]")
+
+            if matched_run is not None:
+                issues.append(
+                    LintIssue(
+                        path=sidecar_path,
+                        directory=sidecar_path.parent.name,
+                        issue="laundering_tripwire",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"confirmatory sidecar has no [holdout] and matches prior exploratory run "
+                            f"{getattr(matched_run, 'id', '')[:8]} ({', '.join(reasons)}) — possible "
+                            "rename-and-retune without holdout (C3)"
+                        ),
+                    )
+                )
+
+    # Same-argv warning (§3.4): confirmatory run argv matches observation source run argv.
+    for r in all_runs:
+        if r.epistemic_class not in ("confirmatory", "legacy"):
+            continue
+        meta = read_run_result_metadata(r, cd)
+        obs_id = str(meta.get("derived_from_observation") or "")
+        if not obs_id:
+            continue
+        with suppress(Exception):
+            obs = get_observation(obs_id, catalog_dir=cd)
+            if obs is None or not obs.run_id:
+                continue
+            src_run = get_run(obs.run_id, cd, allow_cool_fallback=True, include_superseded=True)
+            if src_run is not None and list(r.argv or []) == list(src_run.argv or []):
+                issues.append(
+                    LintIssue(
+                        path=cd,
+                        directory="catalog",
+                        issue="holdout_same_argv",
+                        severity=IssueSeverity.WARNING,
+                        detail=(
+                            f"confirmatory run {r.id[:8]} has identical argv to observation {obs.id} "
+                            f"source run {src_run.id[:8]} ({r.argv}) — verify test data is held out"
+                        ),
+                    )
+                )
+
     return issues
 
 

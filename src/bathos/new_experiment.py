@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -223,10 +224,61 @@ class ScaffoldResult:
     needs_filling: list[str] = field(default_factory=list)
     #: Epistemic class resolved from the written sidecar (spec §3.1).
     epistemic_class: str | None = None
+    #: Observation id linked via `--from-observation` (spec §3.4).
+    derived_from_observation: str = ""
+    #: Holdout kind written into `[holdout]` (spec §3.4).
+    holdout_kind: str = ""
 
 
 def _is_placeholder_error(message: str, field_name: str) -> bool:
     return "${" in message or "${" in field_name
+
+
+def _build_observation_promotion_blocks(
+    obs,
+    *,
+    holdout_kind: str,
+    holdout_unit: str,
+    split_manifest: str,
+    catalog_dir: Path | str | None,
+) -> str:
+    """Render `[provenance]` and `[holdout]` blocks for `--from-observation` scaffolds."""
+    lines = ["", "[provenance]", f"derived_from_observation = {json.dumps(obs.id)}"]
+    if obs.run_id:
+        from bathos.observations import _resolve_catalog_dir
+        from bathos.query import get_run
+        from bathos.validate import read_run_result_metadata
+
+        cd = _resolve_catalog_dir(catalog_dir)
+        lines.append(
+            f"# Context from exploratory observation source run {obs.run_id[:8]} "
+            "(selection-biased — DO NOT cite as `source = \"run:...\"`; use sesoi:, a calibrating run, "
+            "appraised lit:, or provisional:)."
+        )
+        try:
+            src_run = get_run(obs.run_id, cd, allow_cool_fallback=True, include_superseded=True)
+            if src_run is not None:
+                res = read_run_result_metadata(src_run, cd)
+                if res:
+                    lines.append(f"# Observed exploratory metrics: {json.dumps(res, sort_keys=True)}")
+        except Exception:
+            pass
+
+    lines.extend(
+        [
+            "",
+            "[holdout]",
+            "# Independent test data vs the observation (rank >= 1 required for confirmatory promotion;",
+            "# new_seeds / unit='seed' is a rank-0 exploratory kill test only).",
+            "# Threshold source guidance: (a) sesoi:<value>:<why>, (b) calibrating run:<id>:<field>,",
+            "# (c) appraised lit:<ref> (threshold-source tier), (d) provisional:<why>.",
+            f"kind = {json.dumps(holdout_kind)}",
+        ]
+    )
+    if holdout_kind == "held_out_split":
+        lines.append(f"unit = {json.dumps(holdout_unit or '${HOLDOUT_UNIT}')}")
+        lines.append(f"split_manifest = {json.dumps(split_manifest or '${SPLIT_MANIFEST}')}")
+    return "\n".join(lines) + "\n"
 
 
 def scaffold_experiment(
@@ -237,6 +289,11 @@ def scaffold_experiment(
     workload: str | None = None,
     question_slug: str = "",
     reopen_reason: str = "",
+    from_observation: str = "",
+    holdout_kind: str = "",
+    holdout_unit: str = "",
+    split_manifest: str = "",
+    catalog_dir: Path | str | None = None,
 ) -> ScaffoldResult:
     """Write `scripts/experiments/<name>.py` and its `<name>.bth.toml` sidecar.
 
@@ -255,6 +312,81 @@ def scaffold_experiment(
         raise ValueError(f"unknown mode {mode!r}: expected one of {', '.join(_SCAFFOLD_MODES)}")
     if workload is not None and workload not in _WORKLOADS:
         raise ValueError(f"unknown workload {workload!r}: expected one of {', '.join(_WORKLOADS)}")
+
+    obs_record = None
+    effective_mode = mode
+    effective_holdout_kind = holdout_kind.strip()
+    clean_holdout_unit = holdout_unit.strip()
+    clean_split_manifest = split_manifest.strip()
+    clean_from_obs = from_observation.strip()
+
+    if effective_holdout_kind:
+        from bathos.sidecar import (
+            FORBIDDEN_HOLDOUT_KINDS,
+            FORBIDDEN_SPLIT_UNITS,
+            HOLDOUT_KINDS,
+            HOLDOUT_SPLIT_UNIT_RANKS,
+        )
+
+        if (
+            effective_holdout_kind in FORBIDDEN_HOLDOUT_KINDS
+            or effective_holdout_kind not in HOLDOUT_KINDS
+        ):
+            raise ValueError(
+                f"invalid holdout_kind {effective_holdout_kind!r}: expected one of {', '.join(HOLDOUT_KINDS)}"
+            )
+        if (
+            effective_holdout_kind == "held_out_split"
+            and clean_holdout_unit
+            and (
+                clean_holdout_unit in FORBIDDEN_SPLIT_UNITS
+                or clean_holdout_unit not in HOLDOUT_SPLIT_UNIT_RANKS
+            )
+        ):
+            raise ValueError(
+                f"invalid holdout_unit {clean_holdout_unit!r}: expected one of seed, build, system"
+            )
+    elif clean_holdout_unit:
+        raise ValueError("holdout_unit requires holdout_kind='held_out_split'")
+
+    if clean_from_obs:
+        from bathos.observations import (
+            ObservationNotFoundError,
+            ObservationValidationError,
+            check_observation_promotion_eligibility,
+            get_observation,
+        )
+
+        obs_record = get_observation(clean_from_obs, catalog_dir=catalog_dir)
+        if obs_record is None:
+            raise ObservationNotFoundError(f"Observation not found: {clean_from_obs!r}")
+
+        promo_errors = check_observation_promotion_eligibility(
+            obs_record,
+            holdout_kind=effective_holdout_kind,
+            catalog_dir=catalog_dir,
+        )
+        if promo_errors:
+            raise ObservationValidationError("; ".join(promo_errors))
+
+        is_rank_zero = effective_holdout_kind == "new_seeds" or (
+            effective_holdout_kind == "held_out_split" and clean_holdout_unit == "seed"
+        )
+        if is_rank_zero:
+            if mode == "confirm":
+                raise ValueError(
+                    "rank-0 holdout ('new_seeds' / unit='seed') is a kill test only and cannot "
+                    "scaffold confirmatory mode"
+                )
+            effective_mode = "explore"
+        else:
+            effective_mode = "confirm"
+            if not effective_holdout_kind:
+                effective_holdout_kind = (
+                    "literature_prediction"
+                    if (obs_record.ref and not obs_record.run_id)
+                    else "${HOLDOUT_KIND}"
+                )
 
     if question_slug:
         from bathos.errors import FindingReopenReasonRequiredError
@@ -296,7 +428,21 @@ def scaffold_experiment(
             paths = ", ".join(str(p) for p in existing)
             raise FileExistsError(f"Already exists (use --force to overwrite): {paths}")
 
-    sidecar_template = _EXPLORE_SIDECAR_TEMPLATE if mode == "explore" else _CONFIRM_SIDECAR_TEMPLATE
+    sidecar_template = (
+        _EXPLORE_SIDECAR_TEMPLATE if effective_mode == "explore" else _CONFIRM_SIDECAR_TEMPLATE
+    )
+    if obs_record is not None:
+        obs_summary = " ".join((obs_record.claim or obs_record.text).split())
+        if effective_mode == "explore":
+            sidecar_template = sidecar_template.replace(
+                'question = "TODO: state what you want to see"',
+                f"question = {json.dumps(f'Kill-test observation {obs_record.id}: {obs_summary}')}",
+            )
+        else:
+            sidecar_template = sidecar_template.replace(
+                'hypothesis = "TODO: state your hypothesis"',
+                f"hypothesis = {json.dumps(f'TODO: refine hypothesis from {obs_record.id} — {obs_summary}')}",
+            )
     if question_slug:
         extra_experiment = f'question_slug = "{question_slug}"\n'
         if reopen_reason:
@@ -305,8 +451,19 @@ def scaffold_experiment(
 
     script.write_text(_SCRIPT_TEMPLATE.format(name=name))
     script.chmod(0o755)
+    obs_block = (
+        _build_observation_promotion_blocks(
+            obs_record,
+            holdout_kind=effective_holdout_kind,
+            holdout_unit=clean_holdout_unit,
+            split_manifest=clean_split_manifest,
+            catalog_dir=catalog_dir,
+        )
+        if obs_record is not None
+        else ""
+    )
     workload_block = _JAX_GATE_TEMPLATE.replace("{stem}", name) if workload == "jax" else ""
-    sidecar.write_text(sidecar_template + workload_block + _REVIEW_STUB + _corpus_guidance())
+    sidecar.write_text(sidecar_template + obs_block + workload_block + _REVIEW_STUB + _corpus_guidance())
 
     from bathos.sidecar import parse_sidecar, resolve_epistemic_class
     from bathos.validate import validate_sidecar
@@ -336,9 +493,11 @@ def scaffold_experiment(
         script=script,
         sidecar=sidecar,
         name_warning=warning,
-        mode=mode,
+        mode=effective_mode,
         needs_filling=needs_filling,
         epistemic_class=resolve_epistemic_class(sidecar_obj, stem_has_prior_runs=False),
+        derived_from_observation=obs_record.id if obs_record is not None else "",
+        holdout_kind=effective_holdout_kind if obs_record is not None else "",
     )
 
 

@@ -2987,6 +2987,7 @@ def run_tool(
     component_id: str = "",
     component_sidecar_sha256: str = "",
     seed: int | None = None,
+    from_observation: str = "",
 ) -> dict:
     """Run a script and record provenance.
 
@@ -3095,6 +3096,7 @@ def run_tool(
             component_id=component_id or None,
             component_sidecar_sha256=component_sidecar_sha256 or None,
             seed=seed,
+            from_observation=from_observation or None,
         )
         outcome_pair = run_outcome_var.get(None)
     finally:
@@ -3143,6 +3145,7 @@ def run_cli_tool(
     component_id: str = "",
     component_sidecar_sha256: str = "",
     bth_seed: int | None = None,
+    from_observation: str = "",
 ) -> dict:
     """CLI-facing wrapper over run_tool: propagates the run script's own exit
     code as the `bth run` process's exit code (matching the shipped Typer
@@ -3178,6 +3181,7 @@ def run_cli_tool(
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
         seed=bth_seed,
+        from_observation=from_observation,
     )
     print(json.dumps(result, indent=2, default=str))
     raise SystemExit(1 if result.get("error") else result.get("exit_code", 0))
@@ -4584,6 +4588,7 @@ async def mcp_run_tool(
     campaign_id: str = "",
     no_sidecar: bool = False,
     sidecar: str = "",
+    from_observation: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Run a script and record provenance.
@@ -4601,6 +4606,7 @@ async def mcp_run_tool(
         campaign_id=campaign_id,
         no_sidecar=no_sidecar,
         sidecar=sidecar,
+        from_observation=from_observation,
     )
 
 
@@ -5738,6 +5744,11 @@ def new_experiment_tool(
     workload: str | None = None,
     question_slug: str = "",
     reopen_reason: str = "",
+    from_observation: str = "",
+    holdout_kind: str = "",
+    holdout_unit: str = "",
+    split_manifest: str = "",
+    catalog_dir: str | None = None,
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
 
@@ -5749,7 +5760,9 @@ def new_experiment_tool(
     mode is rejected. `workload="jax"` appends the launch-gate tables: a live
     `[requires]` (a probe record under outputs/profiling/<name>/ at HEAD) and a
     commented `[budget]` to fill from the `xtrax profile` report. Any other
-    workload is rejected.
+    workload is rejected. `from_observation` promotes an observation (or creates
+    a rank-0 exploratory kill test when `holdout_kind="new_seeds"`), pre-filling
+    `[provenance]` and `[holdout]`.
 
     The scaffold's optional blocks ship commented out on purpose: an
     uncommented `[[review.literature]]` with empty fields is a validation
@@ -5758,7 +5771,9 @@ def new_experiment_tool(
     Returns the two paths written plus the sidecar's validation state, so
     the caller can see immediately which placeholders still need filling.
     """
+    from bathos.appraisal import AppraisalError
     from bathos.new_experiment import scaffold_experiment
+    from bathos.observations import ObservationError
 
     if workspace_root:
         ws = Path(workspace_root).expanduser().resolve()
@@ -5766,6 +5781,8 @@ def new_experiment_tool(
         from bathos.workspace import resolve_workspace
 
         ws = resolve_workspace().fs_root
+
+    resolved_cat = _get_catalog_dir(catalog_dir) if (catalog_dir or from_observation) else None
 
     try:
         scaffolded = scaffold_experiment(
@@ -5776,6 +5793,11 @@ def new_experiment_tool(
             workload=workload,
             question_slug=question_slug,
             reopen_reason=reopen_reason,
+            from_observation=from_observation,
+            holdout_kind=holdout_kind,
+            holdout_unit=holdout_unit,
+            split_manifest=split_manifest,
+            catalog_dir=resolved_cat,
         )
     except FindingReopenReasonRequiredError as e:
         return {
@@ -5794,6 +5816,13 @@ def new_experiment_tool(
             "error_code": BathosErrorCode.DOCUMENT_CONFLICT.value,
             "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.DOCUMENT_CONFLICT],
         }
+    except (ObservationError, AppraisalError) as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": e.code.value,
+            "resolution_hint": RESOLUTION_HINTS.get(e.code, ""),
+        }
     except (OSError, ValueError) as e:
         return {
             "ok": False,
@@ -5811,7 +5840,7 @@ def new_experiment_tool(
         "needs_filling": scaffolded.needs_filling,
     }
 
-    return {
+    out = {
         "ok": True,
         "error_code": None,
         "error": None,
@@ -5833,6 +5862,10 @@ def new_experiment_tool(
             )
         ),
     }
+    if scaffolded.derived_from_observation:
+        out["derived_from_observation"] = scaffolded.derived_from_observation
+        out["holdout_kind"] = scaffolded.holdout_kind
+    return out
 
 
 @cisternal.tool(registry="bathos")
@@ -5846,6 +5879,11 @@ async def new_experiment(
     workload: str | None = None,
     question_slug: str = "",
     reopen_reason: str = "",
+    from_observation: str = "",
+    holdout_kind: str = "",
+    holdout_unit: str = "",
+    split_manifest: str = "",
+    catalog_dir: str | None = None,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Scaffold an experiment script and its pre-registration sidecar.
@@ -5854,6 +5892,8 @@ async def new_experiment(
     or "confirm" (confirmatory sidecar with ${THRESHOLD}/${SOURCE} placeholders listed in
     sidecar_validation.needs_filling). Any other value is rejected. `workload` is None
     (default) or "jax" (adds the launch-gate [requires] table and a commented [budget]).
+    `from_observation` scaffolds a promotion (or rank-0 exploratory kill test when
+    `holdout_kind="new_seeds"`) with `[provenance]` and `[holdout]`.
 
     Closes a real parity gap: `bth new-experiment` existed only on the CLI, so an agent
     driving bathos through MCP had to hand-author `<stem>.bth.toml` from memory -- the
@@ -5869,6 +5909,11 @@ async def new_experiment(
         workload=workload,
         question_slug=question_slug,
         reopen_reason=reopen_reason,
+        from_observation=from_observation,
+        holdout_kind=holdout_kind,
+        holdout_unit=holdout_unit,
+        split_manifest=split_manifest,
+        catalog_dir=catalog_dir,
     )
 
 
@@ -5944,9 +5989,19 @@ def validate_sidecar_tool(
     # Same prior-run answer `bth run` gets (prereg.gate_check): looked up only for a stage that
     # needs it, so legacy exploration/calibration sidecars validate as they do at run time.
     from bathos.prereg import _stem_has_prior_runs
+    from bathos.sidecar import parse_source
 
+    cat_dir = _get_catalog_dir(None)
+    needs_catalog = bool(
+        sidecar.derived_from_observation
+        or any(
+            (src := parse_source(s.source)) is not None and src.kind == "run"
+            for s in sidecar.outcomes.values()
+            if s.source
+        )
+    )
     stem_has_runs = sidecar.stage_name_raw in ("exploration", "calibration") and (
-        _stem_has_prior_runs(sidecar_path, _get_catalog_dir(None))
+        _stem_has_prior_runs(sidecar_path, cat_dir)
     )
     validation = validate_sidecar_impl(
         sidecar,
@@ -5954,6 +6009,7 @@ def validate_sidecar_tool(
         claim=claim,
         stem_has_prior_runs=stem_has_runs,
         result=parsed_result,
+        catalog_dir=cat_dir if needs_catalog else None,
     )
 
     if validation.errors:
