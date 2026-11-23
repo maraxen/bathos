@@ -2521,3 +2521,113 @@ def test_requires_waiver_reaches_run_record(tmp_path):
     runs = read_runs(tmp_path / "catalog")
     assert len(runs) == 1
     assert json.loads(runs[0].metadata)["requires_waiver"] == {"reason": "pilot run"}
+
+
+# --- tech_debt #3326: outcome=unknown / outcome=error must surface via advisories & run_tool ---
+
+
+def test_run_tool_and_cli_surface_unknown_and_error_outcomes(tmp_catalog: Path, tmp_path: Path, monkeypatch):
+    from bathos.cli_cyclopts import app
+    from bathos.mcp import run_tool
+    from tests._cyclopts_runner import CyclopticRunner
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+    (tmp_path / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{tmp_path}"\n')
+    init_catalog(tmp_catalog)
+
+    # 1. Missing result -> outcome='unknown' must surface in run_tool warnings & outcome field
+    script_unknown = _outcome_fixture(tmp_path, "pass\n")
+    res_unknown = run_tool(
+        script_path=str(script_unknown),
+        project_slug="testproj",
+        catalog_dir=str(tmp_catalog),
+    )
+    assert res_unknown["outcome"] == "unknown"
+    assert any(w["code"] == "outcome_unresolved" for w in res_unknown["warnings"])
+
+    # 2. Malformed SQL condition in non-enforced dir -> outcome='error' surfaces in run_tool + CLI JSON
+    bad_sidecar = _OUTCOME_SIDECAR.replace("temp_std < 5", "no_such_col < 5")
+    script_error = _outcome_fixture(
+        tmp_path,
+        "import os, json\n"
+        'json.dump({"temp_std": 1.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n',
+        sidecar_text=bad_sidecar,
+        subdir="scratch",
+    )
+    res_error = run_tool(
+        script_path=str(script_error),
+        project_slug="testproj",
+        catalog_dir=str(tmp_catalog),
+    )
+    assert res_error["outcome"] == "error"
+    assert "no_such_col" in res_error["outcome_error_reason"]
+    assert any(w["code"] == "outcome_unresolved" for w in res_error["warnings"])
+
+    cli = CyclopticRunner()
+    cli_res = cli.invoke(app, ["run", str(script_unknown)])
+    assert cli_res.exit_code == 0
+    assert "outcome 'unknown'" in cli_res.output
+
+    # 3. Negative control: intentional fail/pass keeps clean outcome and no outcome_unresolved warning
+    fail_dir = tmp_path / "fail_case"
+    fail_dir.mkdir()
+    script_fail = _outcome_fixture(
+        fail_dir,
+        "import os, json\n"
+        'json.dump({"temp_std": 12.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n',
+    )
+    res_fail = run_tool(
+        script_path=str(script_fail),
+        project_slug="testproj",
+        catalog_dir=str(tmp_catalog),
+    )
+    assert res_fail["outcome"] == "fallback"
+    assert not any(w["code"] == "outcome_unresolved" for w in res_fail["warnings"])
+
+
+def test_exploratory_malformed_outcome_condition_warns_not_silent(
+    tmp_catalog: Path, tmp_path: Path, capsys
+):
+    """#3326: exploratory sidecar with malformed [outcomes] condition must warn instead of staying silent."""
+    import textwrap
+
+    init_catalog(tmp_catalog)
+    exp_sidecar = textwrap.dedent("""
+        [experiment]
+        hypothesis = "h"
+        stage_name = "exploration"
+        [observe]
+        looking_for = "x"
+        [outcomes.pass]
+        condition = "missing_field > 0"
+        decision = "go"
+        reasoning = "r"
+        [outcomes.fail]
+        condition = "x <= 0"
+        decision = "stop"
+        reasoning = "r"
+        is_residual = true
+        [result_schema]
+        x = "float"
+    """)
+    script = _outcome_fixture(
+        tmp_path,
+        "import os, json\n"
+        'json.dump({"x": 1.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n',
+        sidecar_text=exp_sidecar,
+        subdir="explore",
+    )
+    rc = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "WARNING:" in err
+    assert "missing_field" in err

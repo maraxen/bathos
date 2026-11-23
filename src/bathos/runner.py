@@ -12,6 +12,7 @@ import threading
 import time
 import tomllib
 from contextlib import suppress
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,6 +73,12 @@ from bathos.sidecar import (
 from bathos.telemetry import event, init_telemetry, run_advisories_var, run_uuid_var
 
 logger = logging.getLogger(__name__)
+
+# Set by run_script before returning so MCP / CLI JSON callers (`run_tool` / `run_cli_tool`)
+# can surface the resolved outcome and outcome_error_reason without re-querying the catalog.
+run_outcome_var: ContextVar[tuple[str, str] | None] = ContextVar(
+    "bathos_run_outcome", default=None
+)
 
 
 def _campaign_is_claim_bound(catalog_dir: Path, campaign_id: str) -> bool:
@@ -544,15 +551,24 @@ def _unresolved_outcome_warning(
     outcome_error_reason: str,
     emission_source: str,
     output_paths: list[str],
+    *,
+    epistemic_class: str | None = None,
 ) -> str | None:
     """One-line stderr WARNING for a sidecar run that finished with exit 0 but whose outcome is
-    'unknown' or 'error', or None when there is nothing to say (debt #2343/#2241/#2244).
+    'unknown' or 'error', or None when there is nothing to say (debt #2343/#2241/#2244/#3326).
 
     Never changes the exit code -- it only stops the condition from being silent. A result file
     that was found but matched no outcome condition is reported too, with a distinct reason.
     """
-    if not sidecar.outcomes or outcome not in ("unknown", "error"):
+    if outcome not in ("unknown", "error"):
         return None
+    if not sidecar.outcomes:
+        if epistemic_class in ("exploratory", "calibrating"):
+            return None
+        return (
+            f"WARNING: outcome {outcome!r} (exit code left at 0): sidecar declares no [outcomes] "
+            "branches, so no verdict could be evaluated."
+        )
     if outcome in sidecar.outcomes and not outcome_error_reason:
         # The user declared this label ([outcomes.unknown] / [outcomes.error]) and it matched.
         return None
@@ -586,6 +602,21 @@ def _unresolved_outcome_warning(
         f"WARNING: outcome 'unknown': a result was read (from {emission_source}) but no [outcomes] "
         "condition matched it. Add a catch-all outcome or check the result fields."
     )
+
+
+def _emit_unresolved_outcome_warning(
+    outcome_label: str,
+    reason: str,
+    warning_text: str,
+) -> None:
+    """Emit telemetry + stderr WARNING + MCP advisory for an unresolved/error outcome."""
+    event("run.outcome_unresolved", outcome=outcome_label, reason=reason)
+    msg = (
+        warning_text[len("WARNING: ") :]
+        if warning_text.startswith("WARNING: ")
+        else warning_text
+    )
+    _advise("outcome_unresolved", msg, outcome=outcome_label, reason=reason)
 
 
 def _bookkeeping_roots(script_path: Path | None, cwd: Path) -> list[Path]:
@@ -1618,6 +1649,7 @@ def _run_script_impl(
                     event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
                     raise
             print(json.dumps(dataclasses.asdict(payload)), file=sys.stderr)
+            run_outcome_var.set((run.outcome, run.outcome_error_reason))
             return finish_exit_code
         event("run.differential_preflight_passed", run_uuid=run.id)
 
@@ -1727,6 +1759,7 @@ def _run_script_impl(
                 exc_msg=str(write_err),
             )
             raise
+        run_outcome_var.set((run.outcome, run.outcome_error_reason))
         return spawn_exit_code
     finally:
         if heartbeat_stop:
@@ -1829,13 +1862,17 @@ def _run_script_impl(
         outcome, outcome_error_reason = _evaluate_sidecar_outcome(sidecar, metadata, resolved_mode)
 
     # A clean exit whose outcome could not be resolved used to be completely silent.
-    if sidecar is not None and exit_code == 0:
+    if sidecar is not None and exit_code == 0 and epistemic_class not in ("exploratory", "calibrating"):
         unresolved = _unresolved_outcome_warning(
-            sidecar, outcome, outcome_error_reason, result_emission.source, output_paths
+            sidecar,
+            outcome,
+            outcome_error_reason,
+            result_emission.source,
+            output_paths,
+            epistemic_class=epistemic_class,
         )
         if unresolved:
-            event("run.outcome_unresolved", outcome=outcome, reason=outcome_error_reason)
-            print(unresolved, file=sys.stderr)
+            _emit_unresolved_outcome_warning(outcome, outcome_error_reason, unresolved)
 
     # Auto-register any files written to BTH_OUTPUT_DIR that weren't in --out
     registered_paths = set(output_paths)
@@ -1852,6 +1889,24 @@ def _run_script_impl(
         outcome, outcome_error_reason, tentative_outcome, metadata = _apply_observation_precedence(
             sidecar, epistemic_class, metadata, bth_output_dir, resolved_mode
         )
+        if tentative_outcome == "error" and outcome_error_reason:
+            unresolved = _unresolved_outcome_warning(
+                sidecar,
+                "error",
+                outcome_error_reason,
+                result_emission.source,
+                output_paths,
+                epistemic_class=epistemic_class,
+            )
+            if unresolved:
+                _emit_unresolved_outcome_warning("error", outcome_error_reason, unresolved)
+        elif outcome == "invalid_measurement" and outcome_error_reason:
+            _advise(
+                "invalid_measurement",
+                f"outcome 'invalid_measurement': {outcome_error_reason}",
+                outcome=outcome,
+                reason=outcome_error_reason,
+            )
 
     # Spec 261026 D1 emission check: a clean run whose verdict names a declared non-residual
     # outcome must have emitted the [breakdown] summary columns. Advisory only: the outcome is
@@ -2099,6 +2154,8 @@ def _run_script_impl(
     # Advisory progress file (#105) goes with it; absent is the normal case.
     with suppress(OSError):
         progress_temp_path.unlink(missing_ok=True)
+
+    run_outcome_var.set((run.outcome, run.outcome_error_reason))
 
     # Link this run into campaign_runs (the table campaign review/conclude actually
     # read from). The run only exists in the cool tier until compacted, so compact

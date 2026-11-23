@@ -2496,6 +2496,8 @@ def check_tool(
     check_stoichiometry: bool = False,
     sidecar_path: str = "",
     rebaseline: bool = False,
+    check_docs: bool = False,
+    doc_store: str = "",
 ) -> dict:
     """Check run freshness vs git HEAD.
 
@@ -2514,11 +2516,15 @@ def check_tool(
             flag: on, emits the event only; off, writes the warm `runs.output_metadata`
             column directly (this command's own "legacy" path -- there is no prior
             `--rebaseline` to preserve).
+        check_docs: Also check decision docs for citations to postmortem-overridden runs/campaigns
+            (runs automatically when doc_store has docs; pass True to enforce explicitly)
+        doc_store: Optional explicit decision doc store path for override detection
 
     Returns:
         Dict with check results
     """
     from bathos.checker import check_output_files, check_output_sha_drift, rebaseline_run_outputs
+    from bathos.doc_store import find_overridden_decision_docs
     from bathos.linter import iter_project_sidecars
     from bathos.query import get_run
     from bathos.sidecar import SidecarError, parse_sidecar
@@ -2631,6 +2637,13 @@ def check_tool(
                 f"No sidecar files declaring [stoichiometry] or [reagents] found under {proj_root}"
             )
 
+    flagged_docs_raw = find_overridden_decision_docs(
+        proj_root,
+        cat_dir,
+        doc_store=doc_store,
+    )
+    flagged_docs = [d.to_dict() for d in flagged_docs_raw]
+
     result_dict: dict = {
         "results": results_json,
         "count": len(results_json),
@@ -2640,6 +2653,8 @@ def check_tool(
         "rebaselined_count": rebaselined_count,
         "stoichiometry_results": stoichiometry_results,
         "stoichiometry_failure_count": stoichiometry_failure_count,
+        "flagged_docs": flagged_docs,
+        "flagged_doc_count": len(flagged_docs),
     }
     error_parts: list[str] = []
     if stale_count > 0 or drift_count > 0:
@@ -2652,6 +2667,10 @@ def check_tool(
         error_parts.append(stoich_zero_error)
     elif stoichiometry_failure_count > 0:
         error_parts.append(f"{stoichiometry_failure_count} stoichiometry check failure(s) detected")
+    if flagged_docs and (check_docs or len(flagged_docs) > 0):
+        error_parts.append(
+            f"{len(flagged_docs)} decision doc(s) cite postmortem-overridden run/verdict(s)"
+        )
     if error_parts:
         result_dict["error"] = "; ".join(error_parts)
     return result_dict
@@ -2996,7 +3015,10 @@ def run_tool(
     # run_script (invalid sidecar, gate-check failure) bail before a Run is ever
     # constructed/persisted, and thus never touch run_uuid_var themselves — without
     # this reset a failed call in the same context could report a prior call's ID.
+    from bathos.runner import run_outcome_var
+
     run_uuid_var.set(None)
+    outcome_token = run_outcome_var.set(None)
 
     # run_script runs in-process, so its stderr advisories never reach an MCP caller: collect
     # them through run_advisories_var and return them as `warnings` (spec 261026 D2).
@@ -3020,8 +3042,10 @@ def run_tool(
             component_sidecar_sha256=component_sidecar_sha256 or None,
             seed=seed,
         )
+        outcome_pair = run_outcome_var.get(None)
     finally:
         run_advisories_var.reset(advisories_token)
+        run_outcome_var.reset(outcome_token)
 
     # run_script doesn't return the Run it creates (its return type is a plain
     # exit_code int, relied on elsewhere — cli.py's typer.Exit(exit_code) and 29
@@ -3037,6 +3061,12 @@ def run_tool(
         "success": exit_code == 0,
         "warnings": advisories,
     }
+    if outcome_pair is not None:
+        outcome_val, outcome_reason = outcome_pair
+        if outcome_val:
+            response["outcome"] = outcome_val
+        if outcome_reason:
+            response["outcome_error_reason"] = outcome_reason
     if interpreter_warning:
         response["warning"] = interpreter_warning
     return response
@@ -4392,6 +4422,8 @@ async def mcp_check_tool(
     check_stoichiometry: bool = False,
     sidecar_path: str = "",
     rebaseline: bool = False,
+    check_docs: bool = False,
+    doc_store: str = "",
 ) -> dict:
     """Check run freshness vs git HEAD."""
     return check_tool(
@@ -4402,6 +4434,8 @@ async def mcp_check_tool(
         check_stoichiometry=check_stoichiometry,
         sidecar_path=sidecar_path,
         rebaseline=rebaseline,
+        check_docs=check_docs,
+        doc_store=doc_store,
     )
 
 
@@ -4741,7 +4775,26 @@ def postmortem_validate_tool(
         from bathos.obligations import discharge_validated
 
         outcome = discharge_validated(ws, pm, pm_path, cat_dir)
-        return {
+
+        from bathos.doc_store import find_overridden_decision_docs
+        from bathos.postmortem import is_override_postmortem
+
+        flagged_docs: list[dict] = []
+        if is_override_postmortem(pm):
+            target_id = pm.run_id or pm.campaign_id
+            for doc_hit in find_overridden_decision_docs(ws, cat_dir):
+                if target_id and (
+                    doc_hit.target_id == target_id
+                    or doc_hit.target_id.startswith(target_id)
+                    or target_id.startswith(doc_hit.target_id)
+                    or doc_hit.cited_id == target_id
+                ):
+                    flagged_docs.append(doc_hit.to_dict())
+                    warnings.append(
+                        f"stale_decision_doc: {doc_hit.doc_path}: {doc_hit.stale_reason}"
+                    )
+
+        res_dict: dict = {
             "validation_ok": True,
             "run_id": pm.run_id,
             "campaign_id": pm.campaign_id,
@@ -4750,6 +4803,9 @@ def postmortem_validate_tool(
             "discharged": outcome["discharged"],
             "not_discharged": outcome["not_discharged"],
         }
+        if flagged_docs:
+            res_dict["flagged_docs"] = flagged_docs
+        return res_dict
     return {
         "validation_ok": False,
         "errors": [e.message for e in result.errors],
@@ -5747,6 +5803,7 @@ async def new_experiment(
 def validate_sidecar_tool(
     path: str,
     campaign_id: str | None = None,
+    result: str | None = None,
 ) -> dict:
     """Validate a sidecar TOML file for structural integrity.
 
@@ -5754,6 +5811,8 @@ def validate_sidecar_tool(
         path: Path to .bth.toml sidecar file
         campaign_id: Optional campaign ID (or prefix). If given, cross-checks
             claim_discriminates/claim_isolates against the campaign's registered claim (#3719).
+        result: Optional path to an emitted result JSON file (or inline JSON object string)
+            to validate against `[result_schema]` and `[outcomes]` conditions (#3327).
 
     Returns:
         {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...],
@@ -5764,6 +5823,7 @@ def validate_sidecar_tool(
     from bathos.campaigns import CampaignError
     from bathos.claim import load_registered_claim
     from bathos.sidecar import SidecarError, parse_sidecar
+    from bathos.validate import validate_result_against_sidecar
     from bathos.validate import validate_sidecar as validate_sidecar_impl
 
     def _fail(errors: list[str], warnings: list[str] | None = None) -> dict:
@@ -5780,6 +5840,23 @@ def validate_sidecar_tool(
         sidecar = parse_sidecar(sidecar_path)
     except SidecarError as e:
         return _fail([str(e)])
+
+    parsed_result: object | None = None
+    if result is not None:
+        raw_r = result.strip()
+        if raw_r.startswith("{") or raw_r.startswith("["):
+            try:
+                parsed_result = json.loads(raw_r)
+            except json.JSONDecodeError as e:
+                return _fail([f"result: Invalid JSON string: {e}"])
+        else:
+            r_path = Path(result)
+            if not r_path.is_file():
+                return _fail([f"result: Result JSON file not found: {result}"])
+            try:
+                parsed_result = json.loads(r_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                return _fail([f"result: Invalid JSON in {result}: {e}"])
 
     claim = None
     if campaign_id:
@@ -5798,20 +5875,27 @@ def validate_sidecar_tool(
     stem_has_runs = sidecar.stage_name_raw in ("exploration", "calibration") and (
         _stem_has_prior_runs(sidecar_path, _get_catalog_dir(None))
     )
-    result = validate_sidecar_impl(
+    validation = validate_sidecar_impl(
         sidecar,
         sidecar_path=sidecar_path,
         claim=claim,
         stem_has_prior_runs=stem_has_runs,
+        result=parsed_result,
     )
 
-    if result.errors:
-        error_msgs = [f"{e.field}: {e.message}" for e in result.errors]
-        return _fail(error_msgs, result.warnings)
+    if validation.errors:
+        error_msgs = [f"{e.field}: {e.message}" for e in validation.errors]
+        return _fail(error_msgs, validation.warnings)
 
     ok_result: dict = {"validation_ok": True, "path": path}
-    if result.warnings:
-        ok_result["warnings"] = result.warnings
+    if parsed_result is not None:
+        _res_errs, matched = validate_result_against_sidecar(
+            sidecar, parsed_result, sidecar_path=None
+        )
+        if matched is not None:
+            ok_result["matched_outcome"] = matched
+    if validation.warnings:
+        ok_result["warnings"] = validation.warnings
     return ok_result
 
 
@@ -5820,6 +5904,7 @@ def validate_sidecar_tool(
 async def validate_sidecar(
     path: str,
     campaign_id: str | None = None,
+    result: str | None = None,
 ) -> dict:
     """Validate a sidecar TOML file for structural integrity.
 
@@ -5827,19 +5912,21 @@ async def validate_sidecar(
         path: Path to .bth.toml sidecar file
         campaign_id: Optional campaign ID (or prefix). If given, cross-checks
             claim_discriminates/claim_isolates against the campaign's registered claim (#3719).
+        result: Optional path to an emitted result JSON file (or inline JSON object string)
+            to validate against `[result_schema]` and `[outcomes]` conditions (#3327).
 
     Returns:
         {'validation_ok': True} on success or {'validation_ok': False, 'errors': [...]} on failure.
     """
-    result = validate_sidecar_tool(path=path, campaign_id=campaign_id)
+    out = validate_sidecar_tool(path=path, campaign_id=campaign_id, result=result)
     # validate_sidecar_tool injects an "error" key for CLI rendering purposes
     # (render_or_exit's uniform contract) -- strip it here so this MCP tool's
     # envelope is byte-identical to its pre-extraction shape: traced_tool
     # would otherwise read the presence of "error" and flip its default
     # ok=True to ok=False, a real behavior change this refactor must not
     # introduce as a side effect.
-    result.pop("error", None)
-    return result
+    out.pop("error", None)
+    return out
 
 
 @cisternal.tool(registry="bathos-cli", name="list_outputs", cli_group="outputs", cli_name="list")
@@ -6592,6 +6679,20 @@ def lint_tool(project_root: str = "", concentration_threshold: int = 20) -> dict
     )
 
     catalog_dir = _get_catalog_dir(None)
+    from bathos.doc_store import find_overridden_decision_docs
+    from bathos.linter import LintIssue
+
+    for doc_hit in find_overridden_decision_docs(root.resolve(), catalog_dir):
+        issues.append(
+            LintIssue(
+                path=Path(doc_hit.doc_path),
+                directory="docs",
+                issue="overridden_citation",
+                severity=IssueSeverity.ERROR,
+                detail=doc_hit.stale_reason,
+            )
+        )
+
     # Reads run.started events, which only a log-mode index has: gated by catalog_readable inside, not by bathos.db.
     issues.extend(check_undeclared_resume_dirs(catalog_dir, project_slug=soft_project_slug() or ""))
     db_path = catalog_dir / "bathos.db"

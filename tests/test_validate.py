@@ -1328,3 +1328,219 @@ def test_reagents_amortization_violations_fail(
     res = validate_sidecar(parse_sidecar(path))
     assert res.ok is False
     assert any(err.field == expected_field for err in res.errors)
+
+
+# ── tech_debt #3327: nested keys, = null, shadowed outcomes, result JSON checks ─────────────
+
+
+def test_nested_result_schema_keys_validate_and_reject_unknown_subfield(tmp_path: Path):
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    good = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "nested schema validates"
+        [outcomes.pass]
+        condition = "metrics.loss < 0.1"
+        decision = "keep"
+        reasoning = "low loss"
+        [outcomes.fail]
+        condition = "metrics.loss >= 0.1"
+        decision = "stop"
+        reasoning = "high loss"
+        is_residual = true
+        [result_schema.metrics]
+        loss = "float"
+    """,
+    )
+    assert validate_sidecar(parse_sidecar(good)).ok is True
+
+    bad = tmp_path / "bad_nested.bth.toml"
+    bad.write_text(good.read_text().replace("metrics.loss < 0.1", "metrics.missing_col < 0.1"))
+    res_bad = validate_sidecar(parse_sidecar(bad))
+    assert res_bad.ok is False
+    assert any("DuckDB parse error" in e.message for e in res_bad.errors)
+
+
+def test_sql_null_equality_operator_is_rejected_while_is_null_passes(tmp_path: Path):
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    bad_eq = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "null eq"
+        [outcomes.pass]
+        condition = "temp_std = null"
+        decision = "go"
+        reasoning = "r"
+        [outcomes.fail]
+        condition = "temp_std >= 0"
+        decision = "stop"
+        reasoning = "r"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+    """,
+    )
+    res_eq = validate_sidecar(parse_sidecar(bad_eq))
+    assert res_eq.ok is False
+    assert any("IS NULL" in e.message for e in res_eq.errors)
+
+    bad_neq = tmp_path / "bad_neq.bth.toml"
+    bad_neq.write_text(bad_eq.read_text().replace("temp_std = null", "NULL != temp_std"))
+    res_neq = validate_sidecar(parse_sidecar(bad_neq))
+    assert res_neq.ok is False
+    assert any("IS NULL" in e.message for e in res_neq.errors)
+
+    good_is_null = tmp_path / "good_is_null.bth.toml"
+    good_is_null.write_text(bad_eq.read_text().replace("temp_std = null", "temp_std IS NULL"))
+    assert validate_sidecar(parse_sidecar(good_is_null)).ok is True
+
+
+def test_shadowed_and_unsatisfiable_outcomes_are_rejected(tmp_path: Path):
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    # 1. Earlier tautology shadows subsequent outcome
+    taut = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "tautology shadows"
+        [outcomes.fallback]
+        condition = "TRUE"
+        decision = "stop"
+        reasoning = "catch-all first"
+        is_residual = true
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "go"
+        reasoning = "never reached"
+        [result_schema]
+        temp_std = "float"
+    """,
+    )
+    res_taut = validate_sidecar(parse_sidecar(taut))
+    assert res_taut.ok is False
+    assert any("shadowed" in e.message for e in res_taut.errors)
+
+    # 2. Subsumed numeric interval shadows later branch
+    subsumed = tmp_path / "subsumed.bth.toml"
+    subsumed.write_text(
+        textwrap.dedent("""
+        [experiment]
+        hypothesis = "subsumed interval"
+        [outcomes.marginal]
+        condition = "temp_std < 10"
+        decision = "tune"
+        reasoning = "wide first"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "go"
+        reasoning = "narrower second"
+        [outcomes.fail]
+        condition = "temp_std >= 10"
+        decision = "stop"
+        reasoning = "residual"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+    """)
+    )
+    res_sub = validate_sidecar(parse_sidecar(subsumed))
+    assert res_sub.ok is False
+    assert any("shadowed" in e.message and "marginal" in e.message for e in res_sub.errors)
+
+    # 3. Unsatisfiable conjunction
+    unsat = tmp_path / "unsat.bth.toml"
+    unsat.write_text(
+        textwrap.dedent("""
+        [experiment]
+        hypothesis = "unsat"
+        [outcomes.pass]
+        condition = "temp_std > 10 AND temp_std < 5"
+        decision = "go"
+        reasoning = "impossible"
+        [outcomes.fail]
+        condition = "temp_std >= 0"
+        decision = "stop"
+        reasoning = "residual"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+    """)
+    )
+    res_unsat = validate_sidecar(parse_sidecar(unsat))
+    assert res_unsat.ok is False
+    assert any("unsatisfiable" in e.message for e in res_unsat.errors)
+
+
+def test_validate_sidecar_with_result_json_catches_schema_and_condition_errors(tmp_path: Path):
+    import json
+
+    from bathos.cli_cyclopts import app
+    from bathos.mcp import validate_sidecar_tool
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+    from tests._cyclopts_runner import CyclopticRunner
+
+    sidecar_path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "result validation"
+        [outcomes.pass]
+        condition = "metrics.loss < 0.1 AND n_steps >= 10"
+        decision = "go"
+        reasoning = "good"
+        [outcomes.fail]
+        condition = "metrics.loss >= 0.1 AND n_steps >= 10"
+        decision = "stop"
+        reasoning = "bad"
+        is_residual = true
+        [result_schema]
+        n_steps = "int"
+        [result_schema.metrics]
+        loss = "float"
+    """,
+    )
+    sc = parse_sidecar(sidecar_path)
+
+    # Valid result JSON passes and identifies matched outcome
+    ok_json = tmp_path / "ok.json"
+    ok_json.write_text(json.dumps({"n_steps": 20, "metrics": {"loss": 0.05}}))
+    assert validate_sidecar(sc, sidecar_path=sidecar_path, result=ok_json).ok is True
+
+    tool_ok = validate_sidecar_tool(path=str(sidecar_path), result=str(ok_json))
+    assert tool_ok["validation_ok"] is True
+    assert tool_ok["matched_outcome"] == "pass"
+
+    # CLI --result works
+    cli = CyclopticRunner()
+    cli_ok = cli.invoke(app, ["validate-sidecar", str(sidecar_path), "--result", str(ok_json)])
+    assert cli_ok.exit_code == 0
+
+    # Null field fails
+    res_null = validate_sidecar(
+        sc, result={"n_steps": 20, "metrics": {"loss": None}}
+    )
+    assert res_null.ok is False
+    assert any("null" in e.message for e in res_null.errors)
+
+    # Bool masquerading as int fails
+    res_bool = validate_sidecar(
+        sc, result={"n_steps": True, "metrics": {"loss": 0.05}}
+    )
+    assert res_bool.ok is False
+    assert any("expected int" in e.message for e in res_bool.errors)
+
+    # Unmatched condition (would evaluate to unknown: n_steps < 10) fails
+    bad_json = tmp_path / "unknown.json"
+    bad_json.write_text(json.dumps({"n_steps": 2, "metrics": {"loss": 0.05}}))
+    cli_bad = cli.invoke(app, ["validate-sidecar", str(sidecar_path), "--result", str(bad_json)])
+    assert cli_bad.exit_code == 1
+    assert "unknown" in cli_bad.output

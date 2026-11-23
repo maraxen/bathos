@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
@@ -13,9 +15,11 @@ from bathos.sidecar import (
     RESERVED_OUTCOME_LABELS,
     Sidecar,
     SidecarKind,
+    _condition_value,
     breakdown_summary_columns,
     check_sanity_expr,
     columns_referenced,
+    evaluate_adversarial_check_detailed,
     expand_breakdown_aggregates,
     parse_source,
     resolve_epistemic_class,
@@ -34,6 +38,609 @@ def _map_type_to_sql(python_type: str) -> str:
         "bool": "BOOLEAN",
     }
     return mapping.get(python_type, "VARCHAR")
+
+
+def _quote_sql_ident(name: str) -> str:
+    escaped = str(name).replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _schema_type_to_sql(spec_val: object) -> str | None:
+    """Map a `[result_schema]` value (scalar type string or nested table dict) to DuckDB SQL."""
+    if isinstance(spec_val, str):
+        return _map_type_to_sql(spec_val)
+    if isinstance(spec_val, dict):
+        fields: list[str] = []
+        for sub_k, sub_v in spec_val.items():
+            sub_sql = _schema_type_to_sql(sub_v)
+            if sub_sql is not None:
+                fields.append(f"{_quote_sql_ident(sub_k)} {sub_sql}")
+        if fields:
+            return f"STRUCT({', '.join(fields)})"
+        return "VARCHAR"
+    return None
+
+
+def _collect_schema_field_names(schema: dict[str, Any], prefix: str = "") -> set[str]:
+    """Collect top-level and dotted nested field names from `[result_schema]`."""
+    names: set[str] = set()
+    for key, val in schema.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        names.add(dotted)
+        if isinstance(val, dict):
+            names.update(_collect_schema_field_names(val, dotted))
+    return names
+
+
+_SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
+_NULL_EQ_RIGHT_RE = re.compile(r"(?<![!<>])(?:==|!=|<>|=)\s*NULL\b", re.IGNORECASE)
+_NULL_EQ_LEFT_RE = re.compile(r"\bNULL\s*(?:==|!=|<>|=)(?!=)", re.IGNORECASE)
+
+
+def _strip_sql_string_literals(expr: str) -> str:
+    """Replace SQL single-quoted string literals with empty quotes so regexes ignore literal text."""
+    return _SQL_STRING_RE.sub("''", expr)
+
+
+def _find_null_equality_ops(expr: str) -> list[str]:
+    """Return SQL `= NULL` / `!= NULL` / `<> NULL` operators outside string literals."""
+    stripped = _strip_sql_string_literals(expr)
+    hits: list[str] = []
+    for pat in (_NULL_EQ_RIGHT_RE, _NULL_EQ_LEFT_RE):
+        for m in pat.finditer(stripped):
+            hits.append(m.group(0).strip())
+    return hits
+
+
+_TAUTOLOGY_RE = re.compile(r"^\s*(?:true|1\s*==?\s*1|0\s*==?\s*0)\s*$", re.IGNORECASE)
+_CONTRADICTION_RE = re.compile(r"^\s*(?:false|1\s*==?\s*0|0\s*==?\s*1)\s*$", re.IGNORECASE)
+_IDENT_PAT = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+_NUM_PAT = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_CMP_LEFT_RE = re.compile(
+    rf"^\s*({_IDENT_PAT})\s*(<=|>=|<>|!=|==|=|<|>)\s*({_NUM_PAT})\s*$"
+)
+_CMP_RIGHT_RE = re.compile(
+    rf"^\s*({_NUM_PAT})\s*(<=|>=|<>|!=|==|=|<|>)\s*({_IDENT_PAT})\s*$"
+)
+_IS_NULL_RE = re.compile(rf"^\s*({_IDENT_PAT})\s+IS\s+(NOT\s+)?NULL\s*$", re.IGNORECASE)
+_BOOL_EQ_RE = re.compile(
+    rf"^\s*({_IDENT_PAT})\s*(==|=|!=|<>)\s*(true|false)\s*$", re.IGNORECASE
+)
+_STR_EQ_RE = re.compile(
+    rf"^\s*({_IDENT_PAT})\s*(==|=|!=|<>)\s*'((?:''|[^'])*)'\s*$", re.IGNORECASE
+)
+
+_FLIP_OP = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "=": "=", "==": "==", "!=": "!=", "<>": "<>"}
+
+
+@dataclass
+class _NumConstraint:
+    lo: float | None = None
+    lo_inc: bool = False
+    hi: float | None = None
+    hi_inc: bool = False
+    neq: set[float] = field(default_factory=set)
+
+    def tighten(self, op: str, val: float) -> None:
+        if op in ("=", "=="):
+            if self.lo is None or val > self.lo:
+                self.lo, self.lo_inc = val, True
+            elif val == self.lo:
+                self.lo_inc = self.lo_inc and True
+            if self.hi is None or val < self.hi:
+                self.hi, self.hi_inc = val, True
+            elif val == self.hi:
+                self.hi_inc = self.hi_inc and True
+        elif op == ">":
+            if self.lo is None or val > self.lo or (val == self.lo and self.lo_inc):
+                self.lo, self.lo_inc = val, False
+        elif op == ">=":
+            if self.lo is None or val > self.lo:
+                self.lo, self.lo_inc = val, True
+        elif op == "<":
+            if self.hi is None or val < self.hi or (val == self.hi and self.hi_inc):
+                self.hi, self.hi_inc = val, False
+        elif op == "<=":
+            if self.hi is None or val < self.hi:
+                self.hi, self.hi_inc = val, True
+        elif op in ("!=", "<>"):
+            self.neq.add(val)
+
+    def is_empty(self) -> bool:
+        if self.lo is not None and self.hi is not None:
+            if self.lo > self.hi:
+                return True
+            if self.lo == self.hi and not (self.lo_inc and self.hi_inc):
+                return True
+            if self.lo == self.hi and self.lo in self.neq:
+                return True
+        return False
+
+    def subset_of(self, other: _NumConstraint) -> bool:
+        if self.is_empty():
+            return True
+        if other.lo is not None:
+            if self.lo is None or self.lo < other.lo:
+                return False
+            if self.lo == other.lo and self.lo_inc and not other.lo_inc:
+                return False
+        if other.hi is not None:
+            if self.hi is None or self.hi > other.hi:
+                return False
+            if self.hi == other.hi and self.hi_inc and not other.hi_inc:
+                return False
+        for v in other.neq:
+            if v in self.neq:
+                continue
+            in_lo = self.lo is None or (v > self.lo or (v == self.lo and self.lo_inc))
+            in_hi = self.hi is None or (v < self.hi or (v == self.hi and self.hi_inc))
+            if in_lo and in_hi:
+                return False
+        return True
+
+
+def _split_top_level_and(expr: str) -> list[str] | None:
+    """Split on top-level AND outside parentheses/quotes; return None if top-level OR appears."""
+    parts: list[str] = []
+    depth = 0
+    in_quote = False
+    i = 0
+    start = 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch == "'":
+            if in_quote and i + 1 < n and expr[i + 1] == "'":
+                i += 2
+                continue
+            in_quote = not in_quote
+            i += 1
+            continue
+        if in_quote:
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            # Check keyword boundary for OR / AND
+            prev_ok = i == 0 or not (expr[i - 1].isalnum() or expr[i - 1] == "_")
+            if prev_ok:
+                rest = expr[i:]
+                m_or = re.match(r"OR(?![A-Za-z0-9_])", rest, re.IGNORECASE)
+                if m_or:
+                    return None
+                m_and = re.match(r"AND(?![A-Za-z0-9_])", rest, re.IGNORECASE)
+                if m_and:
+                    parts.append(expr[start:i].strip())
+                    i += m_and.end()
+                    start = i
+                    continue
+        i += 1
+    parts.append(expr[start:].strip())
+    return [p for p in parts if p]
+
+
+def _unwrap_parens(atom: str) -> str:
+    s = atom.strip()
+    while s.startswith("(") and s.endswith(")"):
+        depth = 0
+        in_quote = False
+        balanced = True
+        for idx, ch in enumerate(s):
+            if ch == "'":
+                if in_quote and idx + 1 < len(s) and s[idx + 1] == "'":
+                    continue
+                in_quote = not in_quote
+            elif not in_quote:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0 and idx < len(s) - 1:
+                        balanced = False
+                        break
+        if balanced and depth == 0:
+            s = s[1:-1].strip()
+        else:
+            break
+    return s
+
+
+@dataclass
+class _ParsedConjunction:
+    is_tautology: bool = False
+    is_empty: bool = False
+    num: dict[str, _NumConstraint] = field(default_factory=dict)
+    eq: dict[str, set[tuple[str, Any]]] = field(default_factory=dict)  # col -> {("eq", val) | ("neq", val)}
+    nullness: dict[str, bool] = field(default_factory=dict)  # True=IS NULL, False=IS NOT NULL
+
+    def subsumes(self, candidate: _ParsedConjunction) -> bool:
+        """Return True when every assignment satisfying `candidate` must satisfy `self`."""
+        if candidate.is_empty:
+            return True
+        if self.is_tautology:
+            return True
+        if self.is_empty or candidate.is_tautology:
+            return False
+        for col, req_null in self.nullness.items():
+            if candidate.nullness.get(col) != req_null:
+                return False
+        for col, req_num in self.num.items():
+            cand_num = candidate.num.get(col)
+            if cand_num is None or not cand_num.subset_of(req_num):
+                return False
+        for col, req_eqs in self.eq.items():
+            cand_eqs = candidate.eq.get(col, set())
+            if not req_eqs.issubset(cand_eqs):
+                return False
+        return True
+
+
+def _parse_conjunction(expr: str) -> _ParsedConjunction | None:
+    """Parse simple SQL conjunctions for exact subsumption/unsatisfiability analysis."""
+    stripped = _unwrap_parens(expr)
+    if _TAUTOLOGY_RE.match(stripped):
+        return _ParsedConjunction(is_tautology=True)
+    if _CONTRADICTION_RE.match(stripped):
+        return _ParsedConjunction(is_empty=True)
+
+    clauses = _split_top_level_and(stripped)
+    if clauses is None:
+        return None
+
+    parsed = _ParsedConjunction()
+    for raw_clause in clauses:
+        clause = _unwrap_parens(raw_clause)
+        if _TAUTOLOGY_RE.match(clause):
+            continue
+        if _CONTRADICTION_RE.match(clause):
+            return _ParsedConjunction(is_empty=True)
+
+        m_l = _CMP_LEFT_RE.match(clause)
+        if m_l:
+            col, op, num_s = m_l.groups()
+            parsed.nullness.setdefault(col, False)
+            if parsed.nullness[col] is True:
+                return _ParsedConjunction(is_empty=True)
+            nc = parsed.num.setdefault(col, _NumConstraint())
+            nc.tighten(op, float(num_s))
+            if nc.is_empty():
+                return _ParsedConjunction(is_empty=True)
+            continue
+
+        m_r = _CMP_RIGHT_RE.match(clause)
+        if m_r:
+            num_s, op, col = m_r.groups()
+            parsed.nullness.setdefault(col, False)
+            if parsed.nullness[col] is True:
+                return _ParsedConjunction(is_empty=True)
+            nc = parsed.num.setdefault(col, _NumConstraint())
+            nc.tighten(_FLIP_OP[op], float(num_s))
+            if nc.is_empty():
+                return _ParsedConjunction(is_empty=True)
+            continue
+
+        m_null = _IS_NULL_RE.match(clause)
+        if m_null:
+            col, is_not = m_null.groups()
+            want_null = is_not is None
+            if col in parsed.nullness and parsed.nullness[col] != want_null:
+                return _ParsedConjunction(is_empty=True)
+            parsed.nullness[col] = want_null
+            continue
+
+        m_bool = _BOOL_EQ_RE.match(clause)
+        if m_bool:
+            col, op, b_str = m_bool.groups()
+            val = b_str.lower() == "true"
+            if op in ("!=", "<>"):
+                val = not val
+            if parsed.nullness.get(col) is True:
+                return _ParsedConjunction(is_empty=True)
+            parsed.nullness[col] = False
+            bucket = parsed.eq.setdefault(col, set())
+            if ("eq", not val) in bucket:
+                return _ParsedConjunction(is_empty=True)
+            bucket.add(("eq", val))
+            continue
+
+        m_str = _STR_EQ_RE.match(clause)
+        if m_str:
+            col, op, s_val = m_str.groups()
+            if parsed.nullness.get(col) is True:
+                return _ParsedConjunction(is_empty=True)
+            parsed.nullness[col] = False
+            bucket = parsed.eq.setdefault(col, set())
+            kind = "neq" if op in ("!=", "<>") else "eq"
+            other_kind = "eq" if kind == "neq" else "neq"
+            if (other_kind, s_val) in bucket:
+                return _ParsedConjunction(is_empty=True)
+            if kind == "eq":
+                for prev_k, prev_v in bucket:
+                    if prev_k == "eq" and prev_v != s_val:
+                        return _ParsedConjunction(is_empty=True)
+            bucket.add((kind, s_val))
+            continue
+
+        # Unknown atom (function call, arithmetic, etc.) — bail safely
+        return None
+
+    return parsed
+
+
+def _check_shadowed_outcomes(sidecar: Sidecar) -> list[ValidationError]:
+    """Detect shadowed, duplicate, or unsatisfiable outcome branches in declaration order."""
+    errors: list[ValidationError] = []
+    prior: list[tuple[str, str, str, _ParsedConjunction | None]] = []
+
+    for label, spec in sidecar.outcomes.items():
+        cond = (spec.condition or "").strip()
+        if not cond or "${" in cond:
+            continue
+        norm = re.sub(r"\s+", " ", cond).lower()
+        parsed = _parse_conjunction(cond)
+
+        if parsed is not None and parsed.is_empty:
+            errors.append(
+                ValidationError(
+                    f"outcomes.{label}.condition",
+                    f"Outcome {label!r} condition is unsatisfiable/unreachable: {cond!r}",
+                )
+            )
+            continue
+
+        shadowed_by: tuple[str, str] | None = None
+        for prev_label, prev_raw, prev_norm, prev_parsed in prior:
+            if norm == prev_norm:
+                shadowed_by = (prev_label, prev_raw)
+                break
+            if prev_parsed is not None and prev_parsed.is_tautology:
+                shadowed_by = (prev_label, prev_raw)
+                break
+            if prev_parsed is not None and parsed is not None and prev_parsed.subsumes(parsed):
+                shadowed_by = (prev_label, prev_raw)
+                break
+
+        if shadowed_by is not None:
+            p_label, p_raw = shadowed_by
+            errors.append(
+                ValidationError(
+                    f"outcomes.{label}.condition",
+                    f"Outcome {label!r} ({cond!r}) is shadowed by earlier outcome "
+                    f"{p_label!r} ({p_raw!r}) and is unreachable",
+                )
+            )
+        prior.append((label, cond, norm, parsed))
+
+    return errors
+
+
+_EXPECTED_TYPES_DOC = ("int", "float", "str", "bool", "dict", "list")
+
+
+def _find_nested_location(data: dict[str, Any], target_key: str, prefix: str = "") -> str | None:
+    for k, v in data.items():
+        path = f"{prefix}.{k}" if prefix else k
+        if k == target_key and prefix:
+            return path
+        if isinstance(v, dict):
+            found = _find_nested_location(v, target_key, path)
+            if found is not None:
+                return found
+    return None
+
+
+def _check_result_schema_recursive(
+    schema: dict[str, Any],
+    data: dict[str, Any],
+    root_data: dict[str, Any],
+    prefix: str,
+    errors: list[ValidationError],
+) -> None:
+    for key, expected in schema.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        if key not in data:
+            nested_hint = ""
+            if not prefix:
+                nested_at = _find_nested_location(root_data, key)
+                if nested_at is not None:
+                    nested_hint = f" (found nested at {nested_at!r})"
+            errors.append(
+                ValidationError(
+                    f"result.{dotted}",
+                    f"Missing required [result_schema] field {dotted!r}{nested_hint}",
+                )
+            )
+            continue
+
+        val = data[key]
+        if isinstance(expected, dict):
+            if val is None:
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} is null (expected nested object)",
+                    )
+                )
+            elif not isinstance(val, dict):
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} expected object/dict, got {type(val).__name__}",
+                    )
+                )
+            else:
+                _check_result_schema_recursive(expected, val, root_data, dotted, errors)
+            continue
+
+        if not isinstance(expected, str):
+            continue
+
+        if val is None:
+            errors.append(
+                ValidationError(
+                    f"result.{dotted}",
+                    f"Field {dotted!r} is null (expected {expected})",
+                )
+            )
+            continue
+
+        if expected == "int":
+            if not (isinstance(val, int) and not isinstance(val, bool)):
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} expected int, got {type(val).__name__}",
+                    )
+                )
+        elif expected == "float":
+            if not (isinstance(val, (int, float)) and not isinstance(val, bool)):
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} expected float, got {type(val).__name__}",
+                    )
+                )
+            elif not math.isfinite(float(val)):
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} must be a finite number, got {val!r}",
+                    )
+                )
+        elif expected == "str":
+            if not isinstance(val, str):
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} expected str, got {type(val).__name__}",
+                    )
+                )
+        elif expected == "bool":
+            if not isinstance(val, bool):
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} expected bool, got {type(val).__name__}",
+                    )
+                )
+        elif expected == "dict":
+            if not isinstance(val, dict):
+                errors.append(
+                    ValidationError(
+                        f"result.{dotted}",
+                        f"Field {dotted!r} expected dict, got {type(val).__name__}",
+                    )
+                )
+        elif expected == "list" and not isinstance(val, list):
+            errors.append(
+                ValidationError(
+                    f"result.{dotted}",
+                    f"Field {dotted!r} expected list, got {type(val).__name__}",
+                )
+            )
+
+
+_DOTTED_REF_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b")
+
+
+def validate_result_against_sidecar(
+    sidecar: Sidecar,
+    result: object,
+    sidecar_path: Path | None = None,
+) -> tuple[list[ValidationError], str | None]:
+    """Validate an emitted result JSON object against `[result_schema]` and `[outcomes]`.
+
+    Returns ``(errors, matched_outcome)``.
+    """
+    errors: list[ValidationError] = []
+    if not isinstance(result, dict):
+        err = ValidationError(
+            "result",
+            f"Emitted result JSON must be an object, got {type(result).__name__}",
+        )
+        errors.append(err)
+        if sidecar_path:
+            event("sidecar.validate_error", path=str(sidecar_path), field="result", reason=err.message)
+        return errors, None
+
+    if sidecar.result_schema:
+        _check_result_schema_recursive(sidecar.result_schema, result, result, "", errors)
+
+    # Check nested dotted keys referenced by conditions exist in `result`
+    for label, spec in sidecar.outcomes.items():
+        if not spec.condition or "${" in spec.condition:
+            continue
+        stripped = _strip_sql_string_literals(spec.condition)
+        for ref in _DOTTED_REF_RE.findall(stripped):
+            parts = ref.split(".")
+            cur: Any = result
+            missing = False
+            for part in parts:
+                if not isinstance(cur, dict) or part not in cur:
+                    missing = True
+                    break
+                cur = cur[part]
+            if missing:
+                errors.append(
+                    ValidationError(
+                        f"outcomes.{label}.condition",
+                        f"Nested key {ref!r} referenced by outcomes.{label} is missing in result JSON",
+                    )
+                )
+
+    matched_outcome: str | None = None
+    eval_errored = False
+    if sidecar.outcomes:
+        for label, spec in sidecar.outcomes.items():
+            if not spec.condition or "${" in spec.condition:
+                continue
+            try:
+                val = _condition_value(spec.condition, result)
+            except Exception as e:
+                eval_errored = True
+                errors.append(
+                    ValidationError(
+                        f"outcomes.{label}.condition",
+                        f"Condition evaluation error against result JSON: {e}",
+                    )
+                )
+                continue
+            if val and matched_outcome is None:
+                matched_outcome = label
+
+        if matched_outcome is None and not eval_errored and not errors:
+            errors.append(
+                ValidationError(
+                    "outcomes",
+                    "No [outcomes] condition matched the provided result JSON (evaluates to 'unknown')",
+                )
+            )
+
+        if matched_outcome is not None:
+            _adv_status, adv_err = evaluate_adversarial_check_detailed(
+                sidecar, matched_outcome, result
+            )
+            if adv_err:
+                errors.append(
+                    ValidationError(
+                        f"outcomes.{matched_outcome}.adversarial_check",
+                        f"Adversarial check evaluation error against result JSON: {adv_err}",
+                    )
+                )
+
+    if sidecar_path:
+        for err in errors:
+            event(
+                "sidecar.validate_error",
+                path=str(sidecar_path),
+                field=err.field,
+                reason=err.message,
+            )
+
+    return errors, matched_outcome
 
 
 @dataclass
@@ -684,6 +1291,7 @@ def validate_sidecar(
     claim=None,
     *,
     stem_has_prior_runs: bool = False,
+    result: dict[str, Any] | Path | str | None = None,
 ) -> ValidationResult:
     """Validate a parsed Sidecar for structural integrity and logical consistency.
 
@@ -957,24 +1565,44 @@ def validate_sidecar(
                     reason="Missing 'reasoning' field",
                 )
 
+        # SQL `= NULL` / `!= NULL` / `<> NULL` is syntactically valid in DuckDB but always
+        # evaluates to NULL (never matches). Flag it explicitly before DuckDB parses it.
+        for placeholder_field, text in (
+            ("condition", spec.condition),
+            ("adversarial_check", spec.adversarial_check),
+        ):
+            if text and "${" not in text:
+                for null_op in _find_null_equality_ops(text):
+                    err = ValidationError(
+                        f"outcomes.{label}.{placeholder_field}",
+                        f"Invalid SQL NULL comparison ({null_op!r}) in {placeholder_field} "
+                        f"{text!r} — use 'IS NULL' or 'IS NOT NULL' instead",
+                    )
+                    errors.append(err)
+                    if sidecar_path:
+                        event(
+                            "sidecar.validate_error",
+                            path=str(sidecar_path),
+                            field=f"outcomes.{label}.{placeholder_field}",
+                            reason=err.message,
+                        )
+
         # DuckDB SQL must parse. A placeholder condition is reported above; it is not parsed here.
         if spec.condition and "${" not in spec.condition:
             try:
                 con = duckdb.connect()
-                # Build a dummy table from result_schema to validate SQL
+                # Build a dummy table from result_schema to validate SQL (including nested STRUCTs)
                 if sidecar.result_schema:
-                    cols = ", ".join(
-                        f"{k} {_map_type_to_sql(v)}"
-                        for k, v in sidecar.result_schema.items()
-                        if isinstance(
-                            v, str
-                        )  # skip nested tables (e.g. [result_schema.provenance])
-                    )
+                    col_defs: list[str] = []
+                    for k, v in sidecar.result_schema.items():
+                        sql_t = _schema_type_to_sql(v)
+                        if sql_t is not None:
+                            col_defs.append(f"{_quote_sql_ident(k)} {sql_t}")
+                    cols = ", ".join(col_defs)
                     if cols:
                         con.execute(f"CREATE TEMP TABLE _dummy ({cols})")
                         con.execute(f"SELECT ({spec.condition}) FROM _dummy LIMIT 0")
                     else:
-                        # result_schema has only nested sub-tables (e.g. [result_schema.provenance])
                         con.execute(f"SELECT ({spec.condition})")
                 else:
                     # If no schema, just validate as boolean expression
@@ -994,9 +1622,22 @@ def validate_sidecar(
                         reason=f"DuckDB parse error: {e}",
                     )
 
+    # Catch shadowed / duplicate / unsatisfiable outcome branches
+    if sidecar.outcomes:
+        shadow_errors = _check_shadowed_outcomes(sidecar)
+        errors.extend(shadow_errors)
+        if sidecar_path:
+            for err in shadow_errors:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=err.field,
+                    reason=err.message,
+                )
+
     # At least one result_schema field must appear in conditions
     if sidecar.result_schema and sidecar.outcomes:
-        schema_keys = set(sidecar.result_schema.keys())
+        schema_keys = _collect_schema_field_names(sidecar.result_schema)
         all_conditions = " ".join(s.condition for s in sidecar.outcomes.values() if s.condition)
         if not any(key in all_conditions for key in schema_keys):
             err = ValidationError(
@@ -1054,5 +1695,26 @@ def validate_sidecar(
     warnings.extend(breakdown_warnings)
 
     _apply_stoichiometry_and_reagents(sidecar, sidecar_path, errors, warnings)
+
+    if result is not None:
+        loaded_result: Any = result
+        if isinstance(result, (Path, str)):
+            r_path = Path(result)
+            if not r_path.is_file():
+                errors.append(ValidationError("result", f"Result JSON file not found: {result}"))
+                loaded_result = None
+            else:
+                try:
+                    loaded_result = json.loads(r_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    errors.append(
+                        ValidationError("result", f"Invalid result JSON in {result}: {exc}")
+                    )
+                    loaded_result = None
+        if loaded_result is not None:
+            res_errors, _matched = validate_result_against_sidecar(
+                sidecar, loaded_result, sidecar_path=sidecar_path
+            )
+            errors.extend(res_errors)
 
     return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings)
