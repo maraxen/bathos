@@ -429,6 +429,74 @@ CREATE TABLE IF NOT EXISTS bearings_items (
 )
 """
 
+# Exploratory observations & appraisals (spec 261015, S3): append-only ledgers.
+OBSERVATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS observations (
+    id VARCHAR PRIMARY KEY,
+    project_slug VARCHAR,
+    run_id VARCHAR,
+    text VARCHAR,
+    figure VARCHAR,
+    output_sha256 VARCHAR,
+    output_shas_json VARCHAR,
+    tags_json VARCHAR,
+    supersedes VARCHAR,
+    status VARCHAR,
+    origin VARCHAR,
+    agent_session VARCHAR,
+    ref VARCHAR,
+    locator VARCHAR,
+    claim VARCHAR,
+    quote VARCHAR,
+    value_provenance VARCHAR,
+    quote_checked BOOLEAN,
+    disposition VARCHAR,
+    bears_on VARCHAR,
+    uses_as VARCHAR,
+    appraisal_ids_json VARCHAR,
+    unappraised BOOLEAN,
+    created_at VARCHAR,
+    eid VARCHAR
+)
+"""
+
+OBSERVATION_STATUSES_DDL = """
+CREATE TABLE IF NOT EXISTS observation_statuses (
+    eid VARCHAR PRIMARY KEY,
+    obs_id VARCHAR,
+    status VARCHAR,
+    reason VARCHAR,
+    actor VARCHAR,
+    agent_session VARCHAR,
+    ts VARCHAR
+)
+"""
+
+APPRAISALS_DDL = """
+CREATE TABLE IF NOT EXISTS appraisals (
+    id VARCHAR PRIMARY KEY,
+    project_slug VARCHAR,
+    ref VARCHAR,
+    locator VARCHAR,
+    appraiser VARCHAR,
+    appraiser_session VARCHAR,
+    session_attested BOOLEAN,
+    appraiser_agent_id VARCHAR,
+    appraiser_kind VARCHAR,
+    kind_attested BOOLEAN,
+    read_depth VARCHAR,
+    blind_to_json VARCHAR,
+    scope_claimed VARCHAR,
+    scope_supported VARCHAR,
+    interpretation VARCHAR,
+    for_json VARCHAR,
+    against_json VARCHAR,
+    payload_sha256 VARCHAR,
+    created_at VARCHAR,
+    eid VARCHAR
+)
+"""
+
 
 _DDL_NON_COLUMN_PREFIXES = ("CREATE", ")", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK")
 
@@ -457,6 +525,9 @@ CHARTER_CONFIRMATIONS_COLUMNS: list[str] = _columns_of(CHARTER_CONFIRMATIONS_DDL
 CHARTER_PIVOTS_COLUMNS: list[str] = _columns_of(CHARTER_PIVOTS_DDL)
 BEARINGS_READINGS_COLUMNS: list[str] = _columns_of(BEARINGS_READINGS_DDL)
 BEARINGS_ITEMS_COLUMNS: list[str] = _columns_of(BEARINGS_ITEMS_DDL)
+OBSERVATIONS_COLUMNS: list[str] = _columns_of(OBSERVATIONS_DDL)
+OBSERVATION_STATUSES_COLUMNS: list[str] = _columns_of(OBSERVATION_STATUSES_DDL)
+APPRAISALS_COLUMNS: list[str] = _columns_of(APPRAISALS_DDL)
 
 
 def index_db_path(catalog_dir: Path | None = None) -> Path:
@@ -525,6 +596,12 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     )  # links_json (AC-5b), budget_json (AC-4b)
     con.execute(BEARINGS_ITEMS_DDL)
     _add_missing_columns(con, "bearings_items", BEARINGS_ITEMS_DDL)  # budget_limited (review 261110)
+    con.execute(OBSERVATIONS_DDL)
+    _add_missing_columns(con, "observations", OBSERVATIONS_DDL)
+    con.execute(OBSERVATION_STATUSES_DDL)
+    _add_missing_columns(con, "observation_statuses", OBSERVATION_STATUSES_DDL)
+    con.execute(APPRAISALS_DDL)
+    _add_missing_columns(con, "appraisals", APPRAISALS_DDL)
 
 
 def _empty_select(ddl: str) -> str:
@@ -783,6 +860,9 @@ def connect_read(
         for tbl, tbl_ddl in (
             ("bearings_readings", BEARINGS_READINGS_DDL),
             ("bearings_items", BEARINGS_ITEMS_DDL),
+            ("observations", OBSERVATIONS_DDL),
+            ("observation_statuses", OBSERVATION_STATUSES_DDL),
+            ("appraisals", APPRAISALS_DDL),
         ):
             have_tbl = con.execute(
                 "SELECT count(*) FROM duckdb_tables() "
@@ -898,6 +978,8 @@ def connect_legacy(
 __all__ = [
     "ACKNOWLEDGMENT_LEDGER_COLUMNS",
     "ACKNOWLEDGMENT_LEDGER_DDL",
+    "APPRAISALS_COLUMNS",
+    "APPRAISALS_DDL",
     "ARCHIVED_ITEMS_COLUMNS",
     "ARCHIVED_ITEMS_DDL",
     "BLAST_RADIUS_LEDGER_COLUMNS",
@@ -917,6 +999,10 @@ __all__ = [
     "CHARTER_PIVOTS_COLUMNS",
     "CHARTER_PIVOTS_DDL",
     "EVENTS_DDL",
+    "OBSERVATIONS_COLUMNS",
+    "OBSERVATIONS_DDL",
+    "OBSERVATION_STATUSES_COLUMNS",
+    "OBSERVATION_STATUSES_DDL",
     "OUTPUT_COPIES_COLUMNS",
     "OUTPUT_COPIES_DDL",
     "QUARANTINE_DDL",

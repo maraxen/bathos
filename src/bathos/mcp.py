@@ -7699,6 +7699,378 @@ async def bearings_compare(
     return {"ok": True, **res}
 
 
+# ---------------------------------------------------------------------------
+# Exploratory Observations & Appraisals (spec 261015, S3)
+# ---------------------------------------------------------------------------
+
+
+@cisternal.tool(registry="bathos-cli", name="observe", cli_name="observe")
+def observe_tool(
+    run_id: str = "",
+    text: str = "",
+    figure: str = "",
+    tags: list[str] | None = None,
+    ref: str = "",
+    locator: str = "",
+    claim: str = "",
+    quote: str = "",
+    value_provenance: str = "",
+    disposition: str = "",
+    bears_on: str = "",
+    uses_as: str = "",
+    appraisal: list[str] | None = None,
+    supersedes: str = "",
+    origin: str = "",
+    agent_session: str = "",
+    status_of: str = "",
+    status: str = "",
+    reason: str = "",
+    show: str = "",
+    list_all: bool = False,
+    unappraised_only: bool = False,
+    json_output: bool = False,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Record a run-backed or run-less observation, update status, or inspect observations."""
+    from bathos.observations import (
+        ObservationNotFoundError,
+        create_observation,
+        get_observation,
+        get_observation_status_history,
+        list_observations,
+        update_observation_status,
+    )
+
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
+
+    if show:
+        obs = get_observation(show, catalog_dir=cat_dir)
+        if obs is None:
+            raise ObservationNotFoundError(f"Observation not found: {show!r}")
+        history = [h.to_dict() for h in get_observation_status_history(obs.id, catalog_dir=cat_dir)]
+        out: dict[str, Any] = {
+            "ok": True,
+            "observation": obs.to_dict(),
+            "status_history": history,
+        }
+        if not json_output:
+            out["message"] = (
+                f"{obs.id} [{obs.status}] "
+                + (f"run={obs.run_id[:8]}" if obs.run_id else f"ref={obs.ref} ({obs.locator})")
+                + f": {obs.text}"
+            )
+        return out
+
+    if list_all:
+        rows = [
+            o.to_dict()
+            for o in list_observations(
+                run_id=run_id or None,
+                ref=ref or None,
+                status=status or None,
+                unappraised_only=unappraised_only,
+                catalog_dir=cat_dir,
+            )
+        ]
+        out = {"ok": True, "observations": rows, "count": len(rows)}
+        if not json_output:
+            out["message"] = (
+                "\n".join(
+                    f"{r['id']} [{r['status']}] "
+                    + (f"run={r['run_id'][:8]}" if r["run_id"] else f"ref={r['ref']}")
+                    + (" (unappraised)" if r["unappraised"] else "")
+                    + f": {r['text']}"
+                    for r in rows
+                )
+                if rows
+                else "No observations found."
+            )
+        return out
+
+    if status_of:
+        if not status:
+            return {"error": "--status is required with --status-of"}
+        st_rec = update_observation_status(
+            status_of,
+            status,
+            reason=reason,
+            agent_session=agent_session,
+            project_root=project_root or None,
+            catalog_dir=cat_dir,
+        )
+        out = {"ok": True, "status_record": st_rec.to_dict()}
+        if not json_output:
+            out["message"] = f"Updated observation {st_rec.obs_id} status to {st_rec.status}"
+        return out
+
+    obs = create_observation(
+        run_id=run_id,
+        text=text,
+        figure=figure,
+        tags=tags,
+        ref=ref,
+        locator=locator,
+        claim=claim,
+        quote=quote,
+        value_provenance=value_provenance,
+        disposition=disposition,
+        bears_on=bears_on,
+        uses_as=uses_as,
+        appraisal_ids=appraisal,
+        supersedes=supersedes,
+        origin=origin,
+        agent_session=agent_session,
+        project_root=project_root or None,
+        catalog_dir=cat_dir,
+    )
+    out = {"ok": True, "observation": obs.to_dict()}
+    if not json_output:
+        target = f"run={obs.run_id[:8]}" if obs.run_id else f"ref={obs.ref} ({obs.locator})"
+        unappr_note = ", unappraised=true" if obs.unappraised else ""
+        out["message"] = (
+            f"Recorded observation {obs.id} ({target}, status={obs.status}{unappr_note})"
+        )
+    return out
+
+
+observe_tool.__annotations__["list_all"] = Annotated[bool, cyclopts.Parameter(name="--list")]
+observe_tool.__annotations__["json_output"] = Annotated[bool, cyclopts.Parameter(name="--json")]
+
+
+@cisternal.tool(registry="bathos", name="observe")
+@traced_tool
+@require_write_token
+async def mcp_observe_tool(
+    run_id: str = "",
+    text: str = "",
+    figure: str = "",
+    tags: list[str] | None = None,
+    ref: str = "",
+    locator: str = "",
+    claim: str = "",
+    quote: str = "",
+    value_provenance: str = "",
+    disposition: str = "",
+    bears_on: str = "",
+    uses_as: str = "",
+    appraisal: list[str] | None = None,
+    supersedes: str = "",
+    origin: str = "",
+    agent_session: str = "",
+    status_of: str = "",
+    status: str = "",
+    reason: str = "",
+    show: str = "",
+    list_all: bool = False,
+    unappraised_only: bool = False,
+    json_output: bool = False,
+    project_root: str = "",
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    """Record a run-backed or run-less observation, update status, or inspect observations."""
+    is_write = not (show or list_all or status_of)
+    eff_origin = origin or ("agent" if is_write else "")
+    return observe_tool(
+        run_id=run_id,
+        text=text,
+        figure=figure,
+        tags=tags,
+        ref=ref,
+        locator=locator,
+        claim=claim,
+        quote=quote,
+        value_provenance=value_provenance,
+        disposition=disposition,
+        bears_on=bears_on,
+        uses_as=uses_as,
+        appraisal=appraisal,
+        supersedes=supersedes,
+        origin=eff_origin,
+        agent_session=agent_session,
+        status_of=status_of,
+        status=status,
+        reason=reason,
+        show=show,
+        list_all=list_all,
+        unappraised_only=unappraised_only,
+        json_output=json_output,
+        project_root=project_root,
+        catalog_dir=catalog_dir,
+    )
+
+
+@cisternal.tool(registry="bathos-cli", name="appraise", cli_name="appraise")
+def appraise_tool(
+    ref: str = "",
+    locator: str = "",
+    file: str = "",
+    payload: str = "",
+    appraiser_session: str = "",
+    appraiser_agent_id: str = "",
+    appraiser_kind: str = "",
+    show: str = "",
+    list_all: bool = False,
+    use_tier: bool = False,
+    value_provenance: str = "",
+    citing_session: str = "",
+    other_labels: bool = False,
+    json_output: bool = False,
+    project_root: str = "",
+    catalog_dir: str = "",
+) -> dict:
+    """Record a structured citation/claim appraisal, inspect appraisals, or compute use_tier."""
+    from bathos.appraisal import (
+        AppraisalNotFoundError,
+        compute_use_tier,
+        create_appraisal,
+        get_appraisal,
+        list_appraisals,
+        summarize_other_labels,
+    )
+
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
+
+    if show:
+        rec = get_appraisal(show, catalog_dir=cat_dir)
+        if rec is None:
+            raise AppraisalNotFoundError(f"Appraisal not found: {show!r}")
+        out: dict[str, Any] = {"ok": True, "appraisal": rec.to_dict()}
+        if not json_output:
+            out["message"] = (
+                f"{rec.id} ref={rec.ref} depth={rec.read_depth} "
+                f"for={len(rec.for_entries)} against={len(rec.against_entries)}"
+            )
+        return out
+
+    if other_labels:
+        summary = summarize_other_labels(catalog_dir=cat_dir)
+        out = {"ok": True, "other_labels": summary, "count": len(summary)}
+        if not json_output:
+            out["message"] = (
+                "\n".join(
+                    f"{row['side']}: {row['other_label']} ({row['count']})"
+                    for row in summary
+                )
+                if summary
+                else "No 'other' appraisal labels recorded."
+            )
+        return out
+
+    if use_tier:
+        if not ref:
+            return {"error": "--ref is required with --use-tier"}
+        all_apprs = list_appraisals(catalog_dir=cat_dir)
+        matching = [a for a in all_apprs if a.ref == ref and (not locator or a.locator == locator)]
+        lookup = {a.id: a for a in all_apprs}
+        eff_citing = citing_session or (
+            os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("BTH_AGENT_SESSION") or None
+        )
+        tier_res = compute_use_tier(
+            matching,
+            value_provenance=value_provenance,
+            citing_session=eff_citing,
+            lookup_appraisals=lookup,
+        )
+        out = {"ok": True, "ref": ref, **tier_res.to_dict()}
+        if not json_output:
+            out["message"] = (
+                f"use_tier={tier_res.use_tier or 'unappraised'} "
+                f"(appraisals={tier_res.appraisal_count}, independence={tier_res.independence_verified})"
+            )
+        return out
+
+    if list_all:
+        rows = [
+            a.to_dict()
+            for a in list_appraisals(
+                ref=ref or None,
+                locator=locator or None,
+                catalog_dir=cat_dir,
+            )
+        ]
+        out = {"ok": True, "appraisals": rows, "count": len(rows)}
+        if not json_output:
+            out["message"] = (
+                "\n".join(
+                    f"{r['id']} ref={r['ref']} depth={r['read_depth']} "
+                    f"appraiser={r['appraiser']}"
+                    for r in rows
+                )
+                if rows
+                else "No appraisals found."
+            )
+        return out
+
+    rec = create_appraisal(
+        ref=ref,
+        locator=locator,
+        file=file or None,
+        payload=payload or None,
+        appraiser_session=appraiser_session,
+        appraiser_agent_id=appraiser_agent_id,
+        appraiser_kind=appraiser_kind,
+        project_root=project_root or None,
+        catalog_dir=cat_dir,
+    )
+    out = {"ok": True, "appraisal": rec.to_dict()}
+    if not json_output:
+        out["message"] = (
+            f"Recorded appraisal {rec.id} (ref={rec.ref}, read_depth={rec.read_depth}, "
+            f"sha256={rec.payload_sha256[:12]})"
+        )
+    return out
+
+
+appraise_tool.__annotations__["list_all"] = Annotated[bool, cyclopts.Parameter(name="--list")]
+appraise_tool.__annotations__["json_output"] = Annotated[bool, cyclopts.Parameter(name="--json")]
+
+
+@cisternal.tool(registry="bathos", name="appraise")
+@traced_tool
+@require_write_token
+async def mcp_appraise_tool(
+    ref: str = "",
+    locator: str = "",
+    file: str = "",
+    payload: dict[str, Any] | str | None = None,
+    appraiser_session: str = "",
+    appraiser_agent_id: str = "",
+    appraiser_kind: str = "",
+    show: str = "",
+    list_all: bool = False,
+    use_tier: bool = False,
+    value_provenance: str = "",
+    citing_session: str = "",
+    other_labels: bool = False,
+    json_output: bool = False,
+    project_root: str = "",
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    """Record a structured citation/claim appraisal, inspect appraisals, or compute use_tier."""
+    payload_str = json.dumps(payload) if isinstance(payload, dict) else (payload or "")
+    return appraise_tool(
+        ref=ref,
+        locator=locator,
+        file=file,
+        payload=payload_str,
+        appraiser_session=appraiser_session,
+        appraiser_agent_id=appraiser_agent_id,
+        appraiser_kind=appraiser_kind,
+        show=show,
+        list_all=list_all,
+        use_tier=use_tier,
+        value_provenance=value_provenance,
+        citing_session=citing_session,
+        other_labels=other_labels,
+        json_output=json_output,
+        project_root=project_root,
+        catalog_dir=catalog_dir,
+    )
+
+
 if __name__ == "__main__":
     init_server_telemetry()
     app.run()
@@ -7813,6 +8185,8 @@ _WIRED = cisternal.wire(
         "bearings_packet",
         "bearings_record",
         "bearings_compare",
+        "observe",
+        "appraise",
     ],
 )
 

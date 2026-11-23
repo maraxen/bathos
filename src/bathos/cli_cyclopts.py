@@ -156,6 +156,9 @@ wire(
         # archive sweep & telemetry rotation (spec 261106 Phase 3)
         "archive_sweep",
         "telemetry_rotate",
+        # exploratory observations & appraisals (spec 261015 S3)
+        "observe",
+        "appraise",
     ],
 )
 

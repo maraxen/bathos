@@ -64,10 +64,13 @@ import pyarrow as pa
 
 from bathos.config import default_catalog_dir
 from bathos.index import (
+    APPRAISALS_COLUMNS,
     BEARINGS_ITEMS_COLUMNS,
     BEARINGS_READINGS_COLUMNS,
     CHARTER_CONFIRMATIONS_COLUMNS,
     CHARTER_PIVOTS_COLUMNS,
+    OBSERVATION_STATUSES_COLUMNS,
+    OBSERVATIONS_COLUMNS,
 )
 from bathos.runlog.fold_anchors import fold_anchor
 from bathos.runlog.fold_bearings import (
@@ -88,6 +91,12 @@ from bathos.runlog.fold_ledgers import (
     fold_blast_radius,
     fold_submit,
     fold_trust_ledger,
+)
+from bathos.runlog.fold_observations import (
+    APPRAISAL_KINDS,
+    OBSERVATION_KINDS,
+    fold_appraisal,
+    fold_observation,
 )
 from bathos.runlog.fold_output_copies import OUTPUT_COPY_KINDS, fold_output_copy
 from bathos.runlog.fold_runs import fold_run
@@ -171,6 +180,9 @@ _OUTPUT_COPY_KINDS = OUTPUT_COPY_KINDS
 _CHARTER_KINDS = CHARTER_KINDS
 # Bearings (spec 261104, slice 2): entity `[project, reading_id]`, no `*.imported` counterpart; wired in `fold_roots_into`.
 _BEARINGS_KINDS = BEARINGS_KINDS
+# Observations & appraisals (spec 261015, S3): entity `[obs_id]` / `[appraisal_id]`.
+_OBSERVATION_KINDS = OBSERVATION_KINDS
+_APPRAISAL_KINDS = APPRAISAL_KINDS
 
 
 class IngestWalRemainsError(RunLogError):
@@ -1129,6 +1141,33 @@ def _refold_bearings(
         _insert_row(con, "bearings_items", BEARINGS_ITEMS_COLUMNS, row)
 
 
+def _refold_observation(
+    con: duckdb.DuckDBPyConnection,
+    obs_id: str,
+    lookup: _FoldLookup | None = None,
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([obs_id])
+    con.execute("DELETE FROM observations WHERE id = ?", [obs_id])
+    con.execute("DELETE FROM observation_statuses WHERE obs_id = ?", [obs_id])
+    obs_row, status_rows = fold_observation(events)
+    if obs_row is not None:
+        _insert_row(con, "observations", OBSERVATIONS_COLUMNS, obs_row)
+    for srow in status_rows:
+        _insert_row(con, "observation_statuses", OBSERVATION_STATUSES_COLUMNS, srow)
+
+
+def _refold_appraisal(
+    con: duckdb.DuckDBPyConnection,
+    appraisal_id: str,
+    lookup: _FoldLookup | None = None,
+) -> None:
+    events = _resolve_lookup(con, lookup).events_for_entity_key([appraisal_id])
+    con.execute("DELETE FROM appraisals WHERE id = ?", [appraisal_id])
+    row = fold_appraisal(events)
+    if row is not None:
+        _insert_row(con, "appraisals", APPRAISALS_COLUMNS, row)
+
+
 def _check_no_wal(tmp_path: Path) -> None:
     """AC-19: refuse the swap when a `.wal` remains after `close()`."""
     wal_path = tmp_path.with_name(tmp_path.name + ".wal")
@@ -1280,6 +1319,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     affected_output_copy_keys: set[tuple[str, str]] = set()
     affected_charter_projects: set[str] = set()
     affected_bearings_keys: set[tuple[str, str]] = set()
+    affected_observation_ids: set[str] = set()
+    affected_appraisal_ids: set[str] = set()
 
     con = duckdb.connect(str(db_path))
     in_txn = False
@@ -1376,6 +1417,10 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                         affected_charter_projects.add(entity[0])
                     elif kind in _BEARINGS_KINDS and len(entity) == 2:
                         affected_bearings_keys.add((entity[0], entity[1]))
+                    elif kind in _OBSERVATION_KINDS and len(entity) == 1:
+                        affected_observation_ids.add(entity[0])
+                    elif kind in _APPRAISAL_KINDS and len(entity) == 1:
+                        affected_appraisal_ids.add(entity[0])
                 if new_offset != prev_offset:
                     watermarks[wm_key] = new_offset
                     _upsert_watermark(con, root_kind, root_id, seg.name, size, new_offset)
@@ -1415,6 +1460,8 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
             + [list(k) for k in affected_output_copy_keys]
             + [[p] for p in affected_charter_projects]
             + [list(k) for k in affected_bearings_keys]
+            + [[o] for o in affected_observation_ids]
+            + [[a] for a in affected_appraisal_ids]
         )
 
         # Shared across every refold in this batch (review finding, MEDIUM):
@@ -1451,6 +1498,10 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                 _refold_charter(con, project, lookup=lookup)
             for b_project, b_reading_id in affected_bearings_keys:
                 _refold_bearings(con, b_project, b_reading_id, lookup=lookup)
+            for obs_id in affected_observation_ids:
+                _refold_observation(con, obs_id, lookup=lookup)
+            for appr_id in affected_appraisal_ids:
+                _refold_appraisal(con, appr_id, lookup=lookup)
             reconcile_campaign_runs(
                 con, lookup=lookup, campaign_fold_cache=campaign_fold_cache
             )
