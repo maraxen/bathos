@@ -986,6 +986,7 @@ def submit(
 
     from bathos.cli_common import catalog_dir, require_project_config_path
     from bathos.cluster import (
+        build_submit_command,
         job_wait,
         pull_project,
         push_project,
@@ -1236,7 +1237,7 @@ def submit(
     # `myxcel submit-job` has no generic `--env` passthrough (see
     # `myxcel-slurm-submit`), so these are exported by prefixing the shell
     # command itself, which `--command` already passes through verbatim.
-    cmd_env_prefix = ""
+    env_pairs: list[str] = []
     from bathos.runlog.mode import is_log_mode
 
     if is_log_mode(cat_dir):
@@ -1246,10 +1247,14 @@ def submit(
         project_id = read_project_id(cfg_path)
         if project_id:
             env_pairs.append(f"BTH_PROJECT_ID={project_id}")
-        cmd_env_prefix = "env " + " ".join(env_pairs) + " "
 
     # 7. Submit
-    cmd_str = cmd_env_prefix + " ".join(command)
+    cmd_str = build_submit_command(
+        command,
+        env_pairs=env_pairs or None,
+        sidecar=sidecar,
+        project_root=cfg_path.parent,
+    )
     try:
         result = submit_job(
             cluster.remote,

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -70,6 +72,84 @@ def resolve_cluster_config(
         )
 
     return ClusterConfig(remote=remote, preset=preset, project=project)
+
+
+def _portable_submit_sidecar(sidecar: str, project_root: Path | None) -> str:
+    """Relativize sidecar path against project_root when inside it so remote SLURM jobs resolve it."""
+    p = Path(sidecar)
+    if project_root is not None:
+        try:
+            root_res = project_root.resolve()
+            p_res = (p if p.is_absolute() else (root_res / p)).resolve()
+            return p_res.relative_to(root_res).as_posix()
+        except ValueError:
+            pass
+    return str(sidecar)
+
+
+def _inject_sidecar_for_bth_run(tokens: list[str], sidecar_arg: str) -> list[str]:
+    """Forward ``--sidecar <path>`` to an inner ``bth run`` command when not already specified."""
+    if not tokens:
+        return tokens
+    run_idx: int | None = None
+    for i, tok in enumerate(tokens):
+        if Path(tok).name == "bth" and i + 1 < len(tokens) and tokens[i + 1] == "run":
+            run_idx = i + 1
+            break
+        if (
+            i + 2 < len(tokens)
+            and Path(tok).name in ("python", "python3")
+            and tokens[i + 1] == "-m"
+            and tokens[i + 2] == "bathos"
+            and i + 3 < len(tokens)
+            and tokens[i + 3] == "run"
+        ):
+            run_idx = i + 3
+            break
+    if run_idx is None:
+        return tokens
+
+    # Scan bth run's own options (before a `--` passthrough marker or positional script)
+    # to avoid duplicating an explicit --sidecar or overriding --no-sidecar.
+    j = run_idx + 1
+    while j < len(tokens):
+        t = tokens[j]
+        if t == "--":
+            break
+        if t in ("--sidecar", "--no-sidecar") or t.startswith("--sidecar="):
+            return tokens
+        j += 1
+
+    return [*tokens[: run_idx + 1], "--sidecar", sidecar_arg, *tokens[run_idx + 1 :]]
+
+
+def build_submit_command(
+    command: list[str],
+    *,
+    env_pairs: list[str] | None = None,
+    sidecar: str | None = None,
+    project_root: Path | None = None,
+) -> str:
+    """Build the shell command string passed to ``myxcel submit-job --command``.
+
+    Preserves single-string shell commands verbatim, safely quotes multi-token
+    commands, prepends log-mode env vars when provided, and forwards an explicit
+    ``--sidecar`` into an inner ``bth run`` invocation so cluster-submitted jobs
+    evaluate sidecar outcomes instead of falling back to ``'unknown'``.
+    """
+    tokens = list(command)
+    if sidecar:
+        portable = _portable_submit_sidecar(sidecar, project_root)
+        tokens = _inject_sidecar_for_bth_run(tokens, portable)
+
+    if len(tokens) == 1 and any(ch in tokens[0] for ch in (" ", "\t", "\n", ";", "&", "|")):
+        body = tokens[0]
+    else:
+        body = shlex.join(tokens)
+
+    if env_pairs:
+        return "env " + " ".join(env_pairs) + (" " + body if body else "")
+    return body
 
 
 def _parse_myxcel_json(result, what: str, *, hint: str = "") -> dict:

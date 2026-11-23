@@ -176,3 +176,123 @@ def test_pull_path_unused_tokens_for_other_args_is_not_a_gap():
         with pytest.raises(RuntimeError) as excinfo:
             pull_path("engaging", "~/.bth/log/", "/x/")
     assert not isinstance(excinfo.value, MyxcelCapabilityGapError)
+
+
+def test_build_submit_command_forwards_portable_sidecar_to_bth_run(tmp_path):
+    """#2243: bth submit --sidecar PATH must forward --sidecar to an inner bth run."""
+    from bathos.cluster import build_submit_command
+
+    repo = tmp_path / "repo"
+    sc = repo / "scripts" / "experiments" / "exp.bth.toml"
+    sc.parent.mkdir(parents=True)
+    sc.write_text("[experiment]\nhypothesis = 'h'\n")
+
+    cmd = build_submit_command(
+        ["bth", "run", "--", "uv", "run", "python", "scripts/experiments/exp.py"],
+        env_pairs=["BTH_LOG_MODE=1", "BTH_PROJECT_ID=pid1"],
+        sidecar=str(sc),
+        project_root=repo,
+    )
+    assert cmd == (
+        "env BTH_LOG_MODE=1 BTH_PROJECT_ID=pid1 "
+        "bth run --sidecar scripts/experiments/exp.bth.toml -- "
+        "uv run python scripts/experiments/exp.py"
+    )
+
+    # Does not duplicate when inner bth run already specifies --sidecar or --no-sidecar
+    cmd_dup = build_submit_command(
+        ["bth", "run", "--sidecar", "other.bth.toml", "--", "python", "x.py"],
+        sidecar=str(sc),
+        project_root=repo,
+    )
+    assert cmd_dup == "bth run --sidecar other.bth.toml -- python x.py"
+
+    cmd_nosidecar = build_submit_command(
+        ["bth", "run", "--no-sidecar", "--", "python", "x.py"],
+        sidecar=str(sc),
+        project_root=repo,
+    )
+    assert cmd_nosidecar == "bth run --no-sidecar -- python x.py"
+
+
+def test_bth_submit_cli_forwards_sidecar_to_bth_run(tmp_path, monkeypatch):
+    """#2243: CLI integration test for `bth submit --sidecar ... -- bth run ...`."""
+    from bathos.cli_cyclopts import app
+    from tests._cyclopts_runner import CyclopticRunner
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "myproj"\nroot = "{tmp_path}"\n\n'
+        '[slurm]\nremote = "engaging"\npreset = "gpu"\n'
+    )
+    sc = tmp_path / "configs" / "exp.bth.toml"
+    sc.parent.mkdir(parents=True)
+    sc.write_text(
+        '[experiment]\nhypothesis = "h"\n'
+        '[outcomes.pass]\ncondition = "x > 0"\ndecision = "go"\nreasoning = "r"\n'
+        '[outcomes.fail]\ncondition = "x <= 0"\ndecision = "stop"\nreasoning = "r"\nis_residual = true\n'
+        '[result_schema]\nx = "float"\n'
+    )
+
+    submit_ret = {"slurm_job_id": "555", "script_path": "/tmp/j.sh", "preset_used": {}, "job_name": "j"}
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=submit_ret) as mock_submit,
+    ):
+        res = CyclopticRunner().invoke(
+            app,
+            [
+                "submit",
+                "--no-wait",
+                "--sidecar",
+                str(sc),
+                "--",
+                "bth",
+                "run",
+                "--",
+                "uv",
+                "run",
+                "python",
+                "train.py",
+            ],
+        )
+    assert res.exit_code == 0, res.output
+    submitted_cmd = mock_submit.call_args.args[3]
+    assert "--sidecar configs/exp.bth.toml" in submitted_cmd
+
+
+def test_bth_submit_cli_missing_sidecar_fails_before_push_or_submit(tmp_path, monkeypatch):
+    """#2243 negative control: `bth submit --sidecar <missing>` exits non-zero before push/submit."""
+    from bathos.cli_cyclopts import app
+    from tests._cyclopts_runner import CyclopticRunner
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_path / "catalog"))
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "myproj"\nroot = "{tmp_path}"\n\n'
+        '[slurm]\nremote = "engaging"\npreset = "gpu"\n'
+    )
+
+    with (
+        patch("bathos.cluster.push_project") as mock_push,
+        patch("bathos.cluster.submit_job") as mock_submit,
+    ):
+        res = CyclopticRunner().invoke(
+            app,
+            [
+                "submit",
+                "--no-wait",
+                "--sidecar",
+                "configs/missing.bth.toml",
+                "--",
+                "bth",
+                "run",
+                "--",
+                "python",
+                "train.py",
+            ],
+        )
+    assert res.exit_code != 0
+    mock_push.assert_not_called()
+    mock_submit.assert_not_called()

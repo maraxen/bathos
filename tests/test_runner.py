@@ -2631,3 +2631,240 @@ def test_exploratory_malformed_outcome_condition_warns_not_silent(
     err = capsys.readouterr().err
     assert "WARNING:" in err
     assert "missing_field" in err
+
+
+def test_bth_run_explicit_sidecar_flag_and_negative_controls(
+    tmp_catalog: Path, tmp_path: Path, monkeypatch
+):
+    """#2243: `bth run --sidecar PATH` binds an explicit sidecar and evaluates outcomes;
+    rejects missing sidecar or conflicting --no-sidecar."""
+    from bathos.cli_cyclopts import app
+    from bathos.mcp import run_tool
+    from bathos.query import list_runs
+    from tests._cyclopts_runner import CyclopticRunner
+
+    init_catalog(tmp_catalog)
+    repo = tmp_path / "repo"
+    (repo / "scripts" / "scratch").mkdir(parents=True)
+    (repo / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{repo}"\ncatalog_dir = "{tmp_catalog}"\n'
+    )
+    script = repo / "scripts" / "scratch" / "probe.py"
+    script.write_text(
+        "import json, os\n"
+        'json.dump({"temp_std": 1.2}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n'
+    )
+    custom_sidecar = repo / "configs" / "custom.bth.toml"
+    custom_sidecar.parent.mkdir(parents=True)
+    custom_sidecar.write_text(_OUTCOME_SIDECAR)
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+
+    cli = CyclopticRunner()
+    res = cli.invoke(
+        app,
+        ["run", "--sidecar", "configs/custom.bth.toml", "--", sys.executable, str(script)],
+    )
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["outcome"] == "pass"
+
+    runs = list_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].sidecar_mode == "declared"
+    assert runs[0].sidecar_path == "configs/custom.bth.toml"
+    assert runs[0].outcome == "pass"
+
+    # Negative control 1: --sidecar + --no-sidecar conflicts
+    conflict = run_tool(
+        script_path=str(script),
+        project_slug="testproj",
+        catalog_dir=str(tmp_catalog),
+        no_sidecar=True,
+        sidecar=str(custom_sidecar),
+    )
+    assert "error" in conflict
+
+    # Negative control 2: missing explicit --sidecar fails before running script
+    marker = repo / "ran.txt"
+    script_marker = repo / "scripts" / "scratch" / "marker.py"
+    script_marker.write_text(f"open({str(marker)!r}, 'w').write('ran')\n")
+    missing_res = cli.invoke(
+        app,
+        ["run", "--sidecar", "configs/does_not_exist.bth.toml", str(script_marker)],
+    )
+    assert missing_res.exit_code != 0
+    assert not marker.exists()
+
+
+def test_cluster_sbatch_wrapper_run_evaluates_sidecar_outcome_and_relative_path(
+    tmp_path: Path, monkeypatch
+):
+    """#2243 & #2225: Simulate SLURM sbatch wrapper (no .git, BTH_WORKSPACE_ROOT set, SLURM_JOB_ID set)
+    and verify outcome evaluates to 'pass' (not 'unknown') with workspace-relative sidecar_path."""
+    from bathos.cli_cyclopts import app
+    from bathos.query import list_runs
+    from tests._cyclopts_runner import CyclopticRunner
+
+    remote_repo = tmp_path / "remote_checkout"
+    exp_dir = remote_repo / "scripts" / "experiments"
+    exp_dir.mkdir(parents=True)
+    cat_dir = remote_repo / ".bth" / "catalog"
+    init_catalog(cat_dir)
+
+    (remote_repo / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "/laptop/path/testproj"\ncatalog_dir = "{cat_dir}"\n'
+    )
+    script = exp_dir / "cluster_exp.py"
+    script.write_text(
+        "import json, os\n"
+        'json.dump({"temp_std": 2.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n'
+    )
+    sidecar = exp_dir / "cluster_exp.bth.toml"
+    sidecar.write_text(_OUTCOME_SIDECAR)
+
+    monkeypatch.chdir(remote_repo)
+    monkeypatch.setenv("SLURM_JOB_ID", "777001")
+    monkeypatch.setenv("SLURM_ARRAY_TASK_ID", "3")
+    monkeypatch.setenv("BTH_WORKSPACE_ROOT", str(remote_repo))
+    monkeypatch.setenv("BTH_PROJECT_ROOT", str(remote_repo))
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+
+    cli = CyclopticRunner()
+    res = cli.invoke(
+        app,
+        ["run", "--sidecar", "scripts/experiments/cluster_exp.bth.toml", "--", sys.executable, str(script)],
+    )
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["outcome"] == "pass"
+
+    runs = list_runs(cat_dir)
+    assert len(runs) == 1
+    assert runs[0].outcome == "pass"
+    assert runs[0].slurm_job_id == "777001"
+    assert runs[0].slurm_array_task_id == "3"
+    assert runs[0].sidecar_mode == "declared"
+    assert runs[0].sidecar_path == "scripts/experiments/cluster_exp.bth.toml"
+
+
+def test_runner_external_sidecar_keeps_absolute_path(tmp_catalog: Path, tmp_path: Path):
+    """#2225: sidecar outside repo/workspace root preserves absolute sidecar_path."""
+    init_catalog(tmp_catalog)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".bth.toml").write_text(f'[project]\nslug = "testproj"\nroot = "{repo}"\n')
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    ext_sidecar = outside_dir / "ext.bth.toml"
+    ext_sidecar.write_text(_OUTCOME_SIDECAR)
+    script = repo / "run_ext.py"
+    script.write_text(
+        "import json, os\n"
+        'json.dump({"temp_std": 1.0}, open(os.environ["BTH_RESULTS_PATH"], "w"))\n'
+    )
+
+    rc = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=repo,
+        sidecar_path=ext_sidecar,
+    )
+    assert rc == 0
+    from bathos.query import list_runs
+
+    runs = list_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].sidecar_path == str(ext_sidecar.resolve())
+
+
+def test_bth_run_explicit_sidecar_wrapper_and_invalid_sidecar(
+    tmp_catalog: Path, tmp_path: Path, monkeypatch
+):
+    """#2243: wrapper invocation (`python -c`) with --sidecar evaluates outcome; invalid sidecar
+    and CLI --sidecar + --no-sidecar fail before executing the subprocess."""
+    from bathos.cli_cyclopts import app
+    from bathos.query import list_runs
+    from tests._cyclopts_runner import CyclopticRunner
+
+    init_catalog(tmp_catalog)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".bth.toml").write_text(
+        f'[project]\nslug = "testproj"\nroot = "{repo}"\ncatalog_dir = "{tmp_catalog}"\n'
+    )
+    custom_sidecar = repo / "configs" / "wrapper.bth.toml"
+    custom_sidecar.parent.mkdir(parents=True)
+    custom_sidecar.write_text(_OUTCOME_SIDECAR)
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+    monkeypatch.setenv("BTH_PROJECT_SLUG", "testproj")
+
+    cli = CyclopticRunner()
+    inline_code = (
+        "import json, os; "
+        'json.dump({"temp_std": 2.5}, open(os.environ["BTH_RESULTS_PATH"], "w"))'
+    )
+    res = cli.invoke(
+        app,
+        [
+            "run",
+            "--sidecar",
+            "configs/wrapper.bth.toml",
+            "--",
+            sys.executable,
+            "-c",
+            inline_code,
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["outcome"] == "pass"
+
+    runs = list_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].sidecar_path == "configs/wrapper.bth.toml"
+    assert runs[0].outcome == "pass"
+
+    # Negative control: invalid sidecar fails before spawning subprocess
+    marker = repo / "should_not_run.txt"
+    bad_sidecar = repo / "configs" / "bad.bth.toml"
+    bad_sidecar.write_text("[experiment\nbroken toml\n")
+    bad_res = cli.invoke(
+        app,
+        [
+            "run",
+            "--sidecar",
+            "configs/bad.bth.toml",
+            "--",
+            sys.executable,
+            "-c",
+            f"open({str(marker)!r}, 'w').write('ran')",
+        ],
+    )
+    assert bad_res.exit_code != 0
+    assert not marker.exists()
+
+    # Negative control: CLI --sidecar + --no-sidecar conflicts before spawning
+    conflict_res = cli.invoke(
+        app,
+        [
+            "run",
+            "--sidecar",
+            "configs/wrapper.bth.toml",
+            "--no-sidecar",
+            "--",
+            sys.executable,
+            "-c",
+            f"open({str(marker)!r}, 'w').write('ran')",
+        ],
+    )
+    assert conflict_res.exit_code != 0
+    assert not marker.exists()

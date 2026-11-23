@@ -228,6 +228,68 @@ class TestRunSqlTool:
         with pytest.raises(Exception):
             run_sql_tool(catalog_dir="/nonexistent/path", sql="SELECT * FROM nonexistent")
 
+    def test_run_sql_and_siblings_accept_project_root_when_cwd_missing(
+        self, tmp_path, sample_run, monkeypatch
+    ):
+        """#3582: project_root resolves catalog_dir from .bth.toml even when server cwd is deleted."""
+        import errno
+
+        from bathos.catalog import init_catalog, write_run
+        from bathos.compact import compact
+        from bathos.mcp import (
+            _get_catalog_dir,
+            mcp_find_runs_tool,
+            mcp_get_run_tool,
+            mcp_list_runs_tool,
+            mcp_run_sql_tool,
+        )
+
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        cat_dir = repo / "custom_cat"
+        init_catalog(cat_dir)
+        (repo / ".bth.toml").write_text(
+            f'[project]\nslug = "testproj"\nroot = "{repo}"\ncatalog_dir = "{cat_dir}"\n'
+        )
+        write_run(sample_run, cat_dir)
+        compact(cat_dir)
+
+        monkeypatch.delenv("BTH_CATALOG_DIR", raising=False)
+        monkeypatch.setattr(
+            Path,
+            "cwd",
+            staticmethod(lambda: (_ for _ in ()).throw(FileNotFoundError(errno.ENOENT, "deleted"))),
+        )
+
+        # Missing cwd without project_root/catalog_dir falls back cleanly instead of [Errno 2].
+        assert _get_catalog_dir(None) == Path.home() / ".bth" / "catalog"
+
+        sql_res = asyncio.run(
+            mcp_run_sql_tool(sql="SELECT id FROM runs", project_root=str(repo))
+        )
+        assert sql_res["ok"] is True, sql_res
+        assert sql_res["rows"] == [[sample_run.id]]
+
+        ls_res = asyncio.run(mcp_list_runs_tool(project_root=str(repo)))
+        assert ls_res["ok"] is True and ls_res["count"] == 1
+
+        find_res = asyncio.run(mcp_find_runs_tool(pattern="testproj", project_root=str(repo)))
+        assert find_res["ok"] is True and find_res["count"] == 1
+
+        get_res = asyncio.run(mcp_get_run_tool(run_id=sample_run.id, project_root=str(repo)))
+        assert get_res["ok"] is True and get_res["id"] == sample_run.id
+
+    def test_run_sql_nonexistent_project_root_surfaces_missing_path(self, tmp_path):
+        """#3582: nonexistent project_root surfaces invalid_param + missing_path via traced_tool."""
+        from bathos.mcp import mcp_run_sql_tool
+
+        missing = tmp_path / "does_not_exist"
+        res = asyncio.run(mcp_run_sql_tool(sql="SELECT 1", project_root=str(missing)))
+        assert res["ok"] is False
+        assert res["error_code"] == "invalid_param"
+        assert res["missing_path"] == str(missing)
+        assert str(missing) in res["error"]
+
 
 class TestCompactTool:
     """Test compact MCP tool."""

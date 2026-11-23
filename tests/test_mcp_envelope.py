@@ -194,3 +194,31 @@ def test_bearings_errors_outside_errors_py_keep_their_codes(event_mock, module, 
 
     result = asyncio.run(raising_tool())
     assert result["ok"] is False and result["error_code"] == code
+
+
+def test_traced_tool_surfaces_missing_path_on_file_not_found(event_mock):  # noqa: ARG001
+    """#3582: FileNotFoundError must surface invalid_param + path context, never opaque internal."""
+    import errno
+    import os
+
+    @traced_tool
+    async def missing_with_path():
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), "/missing/repo/root")
+
+    res = asyncio.run(missing_with_path())
+    assert res["ok"] is False
+    assert res["error_code"] == BathosErrorCode.INVALID_PARAM.value
+    assert res["missing_path"] == "/missing/repo/root"
+    assert "/missing/repo/root" in res["error"]
+    assert "/missing/repo/root" in res["resolution_hint"]
+
+    @traced_tool
+    async def missing_without_path():
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+
+    res_no_path = asyncio.run(missing_without_path())
+    assert res_no_path["ok"] is False
+    assert res_no_path["error_code"] == BathosErrorCode.INVALID_PARAM.value
+    assert "missing_path" not in res_no_path
+    assert "cwd" in res_no_path["error"]
+    assert "project_root" in res_no_path["resolution_hint"]

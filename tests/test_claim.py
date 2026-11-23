@@ -2040,5 +2040,119 @@ def test_register_claim_flag_on_emits_claim_bound_event_only(
     reset_writers_for_test()
 
 
+class TestPortableSidecarResolutionInClaim:
+    """#2225: review_coverage_check and contradicted_citations use resolve_sidecar_for_run."""
+
+    def test_resolves_relative_frozen_and_legacy_remote_sidecars(self, tmp_path, monkeypatch):
+        import hashlib
+
+        import duckdb
+
+        from bathos.claim import contradicted_citations, review_coverage_check
+        from bathos.sidecar import snapshot_sidecar_file
+
+        class _Claim:
+            hypotheses = [{"id": "H1"}, {"id": "H2"}, {"id": "H3"}]
+            confounds = []
+            discriminability = [
+                {
+                    "hypothesis_a": "H1",
+                    "hypothesis_b": "H2",
+                    "planned_run_label": "fail",
+                    "predicted_outcome": "H2",
+                }
+            ]
+
+        def _sc(bears_on: str) -> str:
+            return (
+                '[experiment]\nhypothesis = "h"\n'
+                f'[[review.literature]]\nref = "10.1/{bears_on}"\nclaim = "c"\n'
+                f'bears_on = "{bears_on}"\ndisposition = "supports"\n'
+                '[outcomes.pass]\ncondition = "x < 5"\ndecision = "go"\nreasoning = "r"\n'
+                '[outcomes.fail]\ncondition = "x >= 5"\ndecision = "stop"\nreasoning = "r"\n'
+                'is_residual = true\n[result_schema]\nx = "float"\n'
+            )
+
+        ws = tmp_path / "workspace"
+        (ws / "scripts" / "experiments").mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        cat_dir = tmp_path / "catalog"
+        cat_dir.mkdir()
+        db = duckdb.connect(":memory:")
+        db.execute(
+            "CREATE TABLE runs (id VARCHAR, sidecar_path VARCHAR, sidecar_sha256 VARCHAR, outcome VARCHAR)"
+        )
+        db.execute("CREATE TABLE campaign_runs (campaign_id VARCHAR, run_id VARCHAR)")
+
+        # 1. Relative sidecar_path resolved under workspace_root
+        rel_sc = ws / "scripts" / "experiments" / "r1.bth.toml"
+        rel_sc.write_text(_sc("H1"), encoding="utf-8")
+        rel_sha = hashlib.sha256(rel_sc.read_bytes()).hexdigest()
+        db.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, ?)",
+            ["r1", "scripts/experiments/r1.bth.toml", rel_sha, "fail"],
+        )
+        db.execute("INSERT INTO campaign_runs VALUES (?, ?)", ["camp", "r1"])
+
+        # 2. Disappeared /tmp worktree sidecar recovered from catalog frozen snapshot
+        gone_sc = tmp_path / "tmp_wt" / "r2.bth.toml"
+        gone_sc.parent.mkdir()
+        gone_sc.write_text(_sc("H2"), encoding="utf-8")
+        gone_sha = hashlib.sha256(gone_sc.read_bytes()).hexdigest()
+        snapshot_sidecar_file(gone_sc, cat_dir, sha256=gone_sha, run_id="r2")
+        gone_sc.unlink()
+        db.execute("INSERT INTO runs VALUES (?, ?, ?, ?)", ["r2", str(gone_sc), gone_sha, "pass"])
+        db.execute("INSERT INTO campaign_runs VALUES (?, ?)", ["camp", "r2"])
+
+        # 3. Legacy remote cluster absolute path matched by workspace suffix + sha256
+        local_h3 = ws / "scripts" / "experiments" / "r3.bth.toml"
+        local_h3.write_text(_sc("H3"), encoding="utf-8")
+        h3_sha = hashlib.sha256(local_h3.read_bytes()).hexdigest()
+        db.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, ?)",
+            ["r3", "/remote/cluster/proj/scripts/experiments/r3.bth.toml", h3_sha, "pass"],
+        )
+        db.execute("INSERT INTO campaign_runs VALUES (?, ?)", ["camp", "r3"])
+
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
+        cov = review_coverage_check(db, "camp", _Claim(), workspace_root=ws)
+        assert cov["verdict"] == "covered"
+        assert cov["sidecars_read"] == 3
+        assert cov["sidecars_unreadable"] == 0
+
+        cc = contradicted_citations(db, "camp", _Claim(), workspace_root=ws)
+        assert cc["supports_seen"] == 3
+        assert len(cc["contradicted"]) == 1
+        assert cc["contradicted"][0]["run_id"] == "r1"
+
+    def test_missing_sidecar_without_snapshot_reports_unreadable(self, tmp_path):
+        import duckdb
+
+        from bathos.claim import review_coverage_check
+
+        class _Claim:
+            hypotheses = [{"id": "H1"}]
+            confounds = []
+
+        db = duckdb.connect(":memory:")
+        db.execute(
+            "CREATE TABLE runs (id VARCHAR, sidecar_path VARCHAR, sidecar_sha256 VARCHAR, outcome VARCHAR)"
+        )
+        db.execute("CREATE TABLE campaign_runs (campaign_id VARCHAR, run_id VARCHAR)")
+        db.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, ?)",
+            ["missing", "/no/such/host/scripts/missing.bth.toml", "deadbeef", "pass"],
+        )
+        db.execute("INSERT INTO campaign_runs VALUES (?, ?)", ["camp", "missing"])
+
+        res = review_coverage_check(db, "camp", _Claim(), workspace_root=tmp_path)
+        assert res["verdict"] == "uncovered"
+        assert res["sidecars_unreadable"] == 1
+        assert res["sidecars_read"] == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

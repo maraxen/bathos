@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from bathos.lock_config import LockConfigError, resolve_lock_settings, select_lo
 from bathos.lock_ref import write_lock_ref
 from bathos.prereg import (
     GateErrorCode,
+    SidecarBundle,
     _gate_failure_payload,
     _stem_has_prior_runs,
     gate_check,
@@ -322,6 +324,7 @@ def _read_result_emission(
     env_var_path: Path,
     script_path: Path | None,
     output_paths: list[str] | None = None,
+    cwd: Path | None = None,
 ) -> ResultEmission:
     """
     Read result emission from, in order:
@@ -363,6 +366,8 @@ def _read_result_emission(
         json_outs = [p for p in output_paths if p.endswith(".json")]
         if len(json_outs) == 1:
             out_path = Path(json_outs[0])
+            if not out_path.is_absolute() and cwd is not None:
+                out_path = cwd / out_path
             if out_path.exists():
                 try:
                     content = out_path.read_text()
@@ -988,15 +993,32 @@ def _is_ephemeral_path(path: str) -> bool:
     return False
 
 
+def _portable_sidecar_path(path: Path, cwd: Path) -> str:
+    """Return a workspace-relative POSIX sidecar path when inside a repo/project root, else str(path)."""
+    from bathos.workspace import resolve_workspace
+
+    resolved = path.resolve()
+    for start in (resolved.parent, cwd):
+        ws = resolve_workspace(start)
+        if ws.source == "cwd":
+            continue
+        try:
+            return resolved.relative_to(ws.fs_root.resolve()).as_posix()
+        except ValueError:
+            continue
+    return str(path)
+
+
 def run_script(
     argv: list[str],
     project_slug: str,
     catalog_dir: Path,
     output_paths: list[str],
     tags: list[str],
-    cwd: Path = Path.cwd(),
+    cwd: Path | None = None,
     agent_mode: str | None = None,
     no_sidecar: bool = False,
+    sidecar_path: str | Path | None = None,
     allow_stale: bool = False,
     derived_from: str | None = None,
     campaign_id: str | None = None,
@@ -1010,6 +1032,7 @@ def run_script(
     (run.started) and held through its last (run.finished) -- so a
     long-running script can never straddle a cut-over mid-process."""
     init_telemetry()
+    effective_cwd = Path.cwd() if cwd is None else cwd
     # Log mode: the unit's outermost exit folds this run's events into index.db
     # (debt #2811); there is no separate ingest call here, so one per command.
     with unit_of_work(catalog_dir):
@@ -1019,9 +1042,10 @@ def run_script(
             catalog_dir,
             output_paths,
             tags,
-            cwd=cwd,
+            cwd=effective_cwd,
             agent_mode=agent_mode,
             no_sidecar=no_sidecar,
+            sidecar_path=sidecar_path,
             allow_stale=allow_stale,
             derived_from=derived_from,
             campaign_id=campaign_id,
@@ -1038,9 +1062,10 @@ def _run_script_impl(
     catalog_dir: Path,
     output_paths: list[str],
     tags: list[str],
-    cwd: Path = Path.cwd(),
+    cwd: Path | None = None,
     agent_mode: str | None = None,
     no_sidecar: bool = False,
+    sidecar_path: str | Path | None = None,
     allow_stale: bool = False,
     derived_from: str | None = None,
     campaign_id: str | None = None,
@@ -1048,6 +1073,7 @@ def _run_script_impl(
     component_sidecar_sha256: str | None = None,
     seed: int | None = None,
 ) -> int:
+    cwd = Path.cwd() if cwd is None else cwd
     # Resolve the lock/ignore settings FIRST, before any run record or event is written: a malformed config or an
     # invalid BTH_LOCK_LOCATION / BTH_IGNORE_OUTPUTS must fail the run cleanly, not leave a started run with no
     # terminal record (spec 261026 P1). Never swallowed with the best-effort pin errors below.
@@ -1123,10 +1149,14 @@ def _run_script_impl(
 
     script_path = _find_script_path(argv, cwd)
 
+    if no_sidecar and sidecar_path:
+        print("Error: cannot pass both --sidecar and --no-sidecar", file=sys.stderr)
+        return 1
+
     # debt #2725: no script bound, yet a .py file that IS under sidecar enforcement is named in
     # argv -> sidecar binding, the prereg gate and outcome evaluation are all silently skipped.
     # Say so rather than proceeding as if nothing were wrong.
-    if script_path is None and not no_sidecar:
+    if script_path is None and not no_sidecar and not sidecar_path:
         unbound = _unbound_enforced_scripts(argv, cwd)
         if unbound:
             print(
@@ -1142,8 +1172,6 @@ def _run_script_impl(
     script_sha256_val = ""
     if script_path is not None and script_path.exists():
         try:
-            import hashlib
-
             h = hashlib.sha256()
             with open(script_path, "rb") as f:
                 while chunk := f.read(8192):
@@ -1155,7 +1183,32 @@ def _run_script_impl(
     # Sidecar resolution
     bundle = None
     sidecar = None
-    if script_path is not None:
+    if sidecar_path:
+        explicit_path = Path(sidecar_path)
+        if not explicit_path.is_absolute():
+            explicit_path = cwd / explicit_path
+        if not explicit_path.is_file():
+            event(
+                "run.error",
+                phase="validate",
+                exc_type="FileNotFoundError",
+                exc_msg=f"Sidecar not found: {explicit_path}",
+            )
+            print(f"Error: sidecar not found: {explicit_path}", file=sys.stderr)
+            return 1
+        resolved_explicit = explicit_path.resolve()
+        bundle = SidecarBundle(
+            path=resolved_explicit,
+            sha256=hashlib.sha256(resolved_explicit.read_bytes()).hexdigest(),
+            found=True,
+        )
+        try:
+            sidecar = parse_sidecar(resolved_explicit)
+        except SidecarError as e:
+            event("run.error", phase="validate", exc_type=type(e).__name__, exc_msg=str(e))
+            print(f"Error: invalid sidecar — {e}", file=sys.stderr)
+            return 1
+    elif script_path is not None:
         bundle = resolve_sidecar(script_path)
         if bundle.found:
             try:
@@ -1301,6 +1354,7 @@ def _run_script_impl(
     requires_waiver_reason: str | None = None
     if enforced:
         assert script_path is not None  # narrowed by `enforced`
+        assert bundle is not None  # narrowed by `sidecar_path` or `script_path is not None`
         gate_result = gate_check(
             script_path=script_path,
             bundle=bundle,
@@ -1374,7 +1428,11 @@ def _run_script_impl(
         slurm_job_id=os.environ.get("SLURM_JOB_ID", ""),
         slurm_array_task_id=os.environ.get("SLURM_ARRAY_TASK_ID", ""),
         sidecar_sha256=bundle.sha256 if bundle and bundle.found else "",
-        sidecar_path=str(bundle.path) if bundle and bundle.path else "",
+        sidecar_path=(
+            _portable_sidecar_path(bundle.path, cwd)
+            if bundle and bundle.found and bundle.path
+            else ""
+        ),
         parent_run_id=derived_from or "",
         agent_mode=resolved_mode,
         sidecar_mode=sidecar_mode_str,
@@ -1769,7 +1827,7 @@ def _run_script_impl(
     event("run.subprocess_exit", exit_code=exit_code, duration_ms=duration_ms)
 
     # Read result emission from BTH_RESULTS_PATH, script-adjacent fallback, or --out
-    result_emission = _read_result_emission(results_temp_path, script_path, output_paths)
+    result_emission = _read_result_emission(results_temp_path, script_path, output_paths, cwd=cwd)
     metadata = result_emission.content
 
     outcome = ""

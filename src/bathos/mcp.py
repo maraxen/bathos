@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
 import functools
 import json
 import os
@@ -243,6 +244,27 @@ def traced_tool(fn):
             return _shape_error(tool_name, BathosErrorCode.SIDECAR_ERROR, e)
         except ExportError as e:
             return _shape_error(tool_name, BathosErrorCode.EXPORT_ERROR, e)
+        except FileNotFoundError as e:
+            missing_path = getattr(e, "filename", None)
+            envelope = _shape_error(tool_name, BathosErrorCode.INVALID_PARAM, e)
+            if missing_path:
+                if str(missing_path) not in envelope["error"]:
+                    envelope["error"] = f"{envelope['error']}: {missing_path}"
+                envelope["missing_path"] = str(missing_path)
+                envelope["resolution_hint"] = (
+                    f"Path does not exist: {missing_path}. Verify catalog_dir, "
+                    "project_root, or cwd and retry."
+                )
+            else:
+                envelope["error"] = (
+                    f"{envelope['error']} (path not specified; if the server cwd was "
+                    "deleted or unavailable, pass catalog_dir or project_root explicitly)"
+                )
+                envelope["resolution_hint"] = (
+                    "Verify the target path exists, or pass catalog_dir / project_root "
+                    "explicitly if the working directory is missing."
+                )
+            return envelope
         except SystemExit as e:
             return _shape_error(tool_name, BathosErrorCode.INTERNAL, e)
         except BaseException as e:
@@ -312,14 +334,32 @@ def require_write_token_when_applying(fn):
     return wrapper
 
 
-def _get_catalog_dir(catalog_dir: str | None = None) -> Path:
-    """Resolve catalog directory from parameter, environment, or .bth.toml."""
+def _get_catalog_dir(
+    catalog_dir: str | None = None,
+    project_root: str | Path | None = None,
+) -> Path:
+    """Resolve catalog directory from parameter, project_root, environment, or .bth.toml."""
     if catalog_dir:
         return Path(catalog_dir)
+    if project_root:
+        root_path = Path(project_root).expanduser()
+        if not root_path.exists():
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(root_path))
+        config_path = find_project_config(root_path)
+        if config_path:
+            cfg = load_project_config(config_path)
+            if cfg.catalog_dir != default_catalog_dir() or not os.environ.get("BTH_CATALOG_DIR"):
+                return cfg.catalog_dir
     override = os.environ.get("BTH_CATALOG_DIR")
     if override:
         return Path(override)
-    config_path = find_project_config(Path.cwd())
+    try:
+        cwd = Path.cwd()
+    except FileNotFoundError:
+        # Server cwd was deleted (e.g. a removed worktree): fall back to default catalog
+        # rather than failing with an uncontextualized [Errno 2].
+        return default_catalog_dir()
+    config_path = find_project_config(cwd)
     if config_path:
         return load_project_config(config_path).catalog_dir
     return default_catalog_dir()
@@ -379,6 +419,7 @@ def list_runs_tool(
     since: str = "",
     status: str = "",
     include_superseded: bool = False,
+    project_root: str = "",
 ) -> dict:
     """List recent runs from catalog.
 
@@ -389,6 +430,7 @@ def list_runs_tool(
         since: Relative time filter, e.g. '7d' or '24h'
         status: Filter by run status
         include_superseded: If True, include void, affected, superseded, and archived runs
+        project_root: Optional project root directory for .bth.toml catalog resolution
 
     Returns:
         Dict with runs array, count, the effective limit, and truncated (True when
@@ -397,7 +439,7 @@ def list_runs_tool(
     from bathos.cli_common import parse_since
     from bathos.validity import compute_distance_from_present, resolve_validity
 
-    cat_dir = _get_catalog_dir(catalog_dir or None)
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
     if project or since or status:
         runs = find_runs(
             cat_dir,
@@ -478,6 +520,7 @@ def find_runs_tool(
     slurm_job: str = "",
     output_file: str = "",
     include_superseded: bool = False,
+    project_root: str = "",
 ) -> dict:
     """Find runs matching filters.
 
@@ -490,6 +533,7 @@ def find_runs_tool(
         slurm_job: Filter by SLURM job ID
         output_file: Filter to runs with a matching output file path (glob pattern)
         include_superseded: If True, include void, affected, superseded, and archived runs
+        project_root: Optional project root directory for .bth.toml catalog resolution
 
     Returns:
         Dict with matching runs
@@ -498,7 +542,7 @@ def find_runs_tool(
     from bathos.query import _filter_runs_by_output_file
     from bathos.validity import compute_distance_from_present, resolve_validity
 
-    cat_dir = _get_catalog_dir(catalog_dir or None)
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
     runs = find_runs(
         cat_dir,
         since=parse_since(since or None),
@@ -551,6 +595,7 @@ def get_run_tool(
     run_id: str = "",
     catalog_dir: str = "",
     include_superseded: bool = False,
+    project_root: str = "",
 ) -> dict:
     """Get details for a specific run.
 
@@ -558,13 +603,14 @@ def get_run_tool(
         catalog_dir: Catalog directory (empty = use default)
         run_id: Run ID to fetch
         include_superseded: If True, allow fetching hidden/void runs
+        project_root: Optional project root directory for .bth.toml catalog resolution
 
     Returns:
         Dict with run details
     """
     if not run_id:
         return {"error": "run_id is required"}
-    cat_dir = _get_catalog_dir(catalog_dir or None)
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
     # Display path only: other get_run callers must not see uncompacted runs.
     from bathos.errors import ResultHiddenError
 
@@ -648,6 +694,7 @@ def run_sql_tool(
     catalog_dir: str = "",
     include_superseded: bool = False,
     allow_hidden: bool = False,
+    project_root: str = "",
 ) -> dict:
     """Execute SQL query against catalog.
 
@@ -656,13 +703,14 @@ def run_sql_tool(
         sql: SQL query string
         include_superseded: If True, suppress warning notice on unmuted runs table
         allow_hidden: Alias for include_superseded
+        project_root: Optional project root directory for .bth.toml catalog resolution
 
     Returns:
         Dict with rows array
     """
     if not sql:
         return {"error": "sql parameter is required"}
-    cat_dir = _get_catalog_dir(catalog_dir or None)
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
     try:
         rows = run_sql(
             sql,
@@ -2934,6 +2982,7 @@ def run_tool(
     derived_from: str = "",
     campaign_id: str = "",
     no_sidecar: bool = False,
+    sidecar: str = "",
     allow_stale: bool = False,
     component_id: str = "",
     component_sidecar_sha256: str = "",
@@ -2952,6 +3001,7 @@ def run_tool(
         derived_from: Parent run ID (for parametric sweeps)
         campaign_id: Campaign ID to associate run with
         no_sidecar: Skip sidecar requirement (for exploratory runs)
+        sidecar: Explicit path to sidecar .bth.toml (overrides adjacent discovery)
         allow_stale: Run anyway despite the sidecar's [status] stale=true flag
         component_id: xtrax composition-node/StageBundle-slot ID this run binds to (B2-08 bridge)
         component_sidecar_sha256: SHA256 of the component-level sidecar for
@@ -2966,6 +3016,8 @@ def run_tool(
     """
     if not script_path:
         return {"error": "script_path parameter is required"}
+    if no_sidecar and sidecar:
+        return {"error": "Cannot specify both sidecar and no_sidecar"}
     if args is None:
         args = []
     output_paths = normalise_output_paths(output_paths)
@@ -3033,8 +3085,10 @@ def run_tool(
             catalog_dir=cat_dir,
             output_paths=output_paths,
             tags=tags,
+            cwd=Path.cwd(),
             agent_mode=agent_mode or None,
             no_sidecar=no_sidecar,
+            sidecar_path=sidecar or None,
             allow_stale=allow_stale,
             derived_from=derived_from or None,
             campaign_id=campaign_id or None,
@@ -3084,6 +3138,7 @@ def run_cli_tool(
     derived_from: str = "",
     campaign_id: str = "",
     no_sidecar: bool = False,
+    sidecar: str = "",
     allow_stale: bool = False,
     component_id: str = "",
     component_sidecar_sha256: str = "",
@@ -3118,6 +3173,7 @@ def run_cli_tool(
         derived_from=derived_from,
         campaign_id=campaign_id,
         no_sidecar=no_sidecar,
+        sidecar=sidecar,
         allow_stale=allow_stale,
         component_id=component_id,
         component_sidecar_sha256=component_sidecar_sha256,
@@ -3463,10 +3519,14 @@ async def mcp_list_runs_tool(
     catalog_dir: str = "",
     limit: int = 10,
     include_superseded: bool = False,
+    project_root: str = "",
 ) -> dict:
     """List recent runs from catalog."""
     return list_runs_tool(
-        catalog_dir=catalog_dir, limit=limit, include_superseded=include_superseded
+        catalog_dir=catalog_dir,
+        limit=limit,
+        include_superseded=include_superseded,
+        project_root=project_root,
     )
 
 
@@ -3477,6 +3537,7 @@ async def mcp_find_runs_tool(
     pattern: str = "",
     tags: list[str] | None = None,
     include_superseded: bool = False,
+    project_root: str = "",
 ) -> dict:
     """Find runs by pattern (project) and/or tags."""
     return find_runs_tool(
@@ -3484,6 +3545,7 @@ async def mcp_find_runs_tool(
         project=pattern,
         tags=tags,
         include_superseded=include_superseded,
+        project_root=project_root,
     )
 
 
@@ -3493,10 +3555,14 @@ async def mcp_get_run_tool(
     catalog_dir: str = "",
     run_id: str = "",
     include_superseded: bool = False,
+    project_root: str = "",
 ) -> dict:
     """Get details for a specific run."""
     return get_run_tool(
-        catalog_dir=catalog_dir, run_id=run_id, include_superseded=include_superseded
+        catalog_dir=catalog_dir,
+        run_id=run_id,
+        include_superseded=include_superseded,
+        project_root=project_root,
     )
 
 
@@ -3749,6 +3815,7 @@ async def mcp_run_sql_tool(
     sql: str = "",
     include_superseded: bool = False,
     allow_hidden: bool = False,
+    project_root: str = "",
 ) -> dict:
     """Execute SQL query against catalog."""
     return run_sql_tool(
@@ -3756,6 +3823,7 @@ async def mcp_run_sql_tool(
         sql=sql,
         include_superseded=include_superseded,
         allow_hidden=allow_hidden,
+        project_root=project_root,
     )
 
 
@@ -4515,6 +4583,7 @@ async def mcp_run_tool(
     derived_from: str = "",
     campaign_id: str = "",
     no_sidecar: bool = False,
+    sidecar: str = "",
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Run a script and record provenance.
@@ -4531,6 +4600,7 @@ async def mcp_run_tool(
         derived_from=derived_from,
         campaign_id=campaign_id,
         no_sidecar=no_sidecar,
+        sidecar=sidecar,
     )
 
 
@@ -5151,7 +5221,10 @@ def _missing_catalog_message(db_path: Path, cat_dir: Path) -> str:
     catalog. The message says so, so the user creates the catalog or removes the key.
     """
     message = f"Catalog database not found at {db_path}"
-    cfg = find_project_config(Path.cwd())
+    try:
+        cfg = find_project_config(Path.cwd())
+    except FileNotFoundError:
+        return message
     if cfg is None:
         return message
     try:

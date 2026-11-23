@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import tomllib
 from contextlib import suppress
@@ -1464,7 +1465,77 @@ def parity_confound_check(
     return {"confounds": result_confounds}
 
 
-def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> dict:
+def _infer_catalog_dir(db, catalog_dir: Path | None, workspace_root) -> Path | None:
+    """Resolve catalog_dir explicitly, from a file-backed DuckDB connection, or BTH_CATALOG_DIR."""
+    if catalog_dir is not None:
+        return Path(catalog_dir)
+    if db is not None:
+        try:
+            for _seq, _name, db_file in db.execute("PRAGMA database_list").fetchall():
+                if db_file and db_file != ":memory:":
+                    return Path(db_file).parent
+        except Exception:
+            pass
+    env_cat = os.environ.get("BTH_CATALOG_DIR")
+    if env_cat:
+        return Path(env_cat)
+    if workspace_root is not None:
+        from bathos.config import find_project_config, load_project_config
+
+        cfg = find_project_config(Path(workspace_root))
+        if cfg is not None:
+            with suppress(Exception):
+                return load_project_config(cfg).catalog_dir
+    return None
+
+
+def _resolve_member_sidecar(
+    db,
+    *,
+    run_id: str,
+    sidecar_path: str,
+    sidecar_sha256: str,
+    workspace_root,
+    catalog_dir: Path | None,
+):
+    """Resolve a run's Sidecar via workspace-relative path, frozen snapshot, or SHA-matched suffix."""
+    from bathos.sidecar import parse_sidecar, resolve_sidecar_for_run
+
+    candidate: str | Path | None = sidecar_path or None
+    if sidecar_path:
+        p = Path(sidecar_path)
+        if workspace_root and not p.is_absolute():
+            candidate = Path(workspace_root) / p
+
+    sc = resolve_sidecar_for_run(
+        candidate,
+        catalog_dir=catalog_dir,
+        sidecar_sha256=sidecar_sha256,
+        run_id=run_id,
+        db=db,
+    )
+    if sc is not None:
+        return sc
+
+    # Legacy cluster runs recorded an absolute remote path (debt #2225). When no frozen
+    # snapshot is present and sha256 is known, locate the matching relative suffix under workspace_root.
+    if sidecar_path and workspace_root and sidecar_sha256:
+        p = Path(sidecar_path)
+        if p.is_absolute():
+            ws_root = Path(workspace_root)
+            for idx in range(1, len(p.parts)):
+                rel_cand = ws_root.joinpath(*p.parts[idx:])
+                if (
+                    rel_cand.is_file()
+                    and hashlib.sha256(rel_cand.read_bytes()).hexdigest() == sidecar_sha256
+                ):
+                    return parse_sidecar(rel_cand)
+    return None
+
+
+def review_coverage_check(
+    db, campaign_id: str, claim, workspace_root=None, catalog_dir=None
+) -> dict:
     """Review Coverage Gate (build-order step 3).
 
     Walks the claim's hypotheses and confounds and requires each to be covered by at least one
@@ -1493,9 +1564,7 @@ def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> d
     `sidecars_unreadable` is reported rather than swallowed: a sidecar that could not be parsed
     is not evidence of absent review, and a caller must be able to tell the two apart.
     """
-    from pathlib import Path
-
-    from bathos.sidecar import covering_id, parse_sidecar
+    from bathos.sidecar import covering_id
 
     required: list[tuple[str, str]] = []
     for h in claim.hypotheses:
@@ -1515,30 +1584,57 @@ def review_coverage_check(db, campaign_id: str, claim, workspace_root=None) -> d
             "sidecars_unreadable": 0,
         }
 
-    rows = db.execute(
-        "SELECT DISTINCT r.sidecar_path FROM runs r "
-        "JOIN campaign_runs cr ON r.id = cr.run_id "
-        "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
-        [campaign_id],
-    ).fetchall()
+    cat_dir = _infer_catalog_dir(db, catalog_dir, workspace_root)
+    try:
+        rows = db.execute(
+            "SELECT r.id, r.sidecar_path, r.sidecar_sha256 FROM runs r "
+            "JOIN campaign_runs cr ON r.id = cr.run_id "
+            "WHERE cr.campaign_id = ? AND ("
+            "(r.sidecar_path IS NOT NULL AND r.sidecar_path != '') "
+            "OR (r.sidecar_sha256 IS NOT NULL AND r.sidecar_sha256 != '')"
+            ")",
+            [campaign_id],
+        ).fetchall()
+    except Exception:
+        rows = [
+            (rid, sp, "")
+            for rid, sp in db.execute(
+                "SELECT r.id, r.sidecar_path FROM runs r "
+                "JOIN campaign_runs cr ON r.id = cr.run_id "
+                "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
+                [campaign_id],
+            ).fetchall()
+        ]
 
     seen_ids: set[str] = set()
+    resolved_keys: set[tuple[str, str]] = set()
     entries_seen = 0
     read = 0
     unreadable = 0
 
-    for (sidecar_path,) in rows:
-        p = Path(sidecar_path)
-        if workspace_root and not p.is_absolute():
-            p = Path(workspace_root) / p
-        if not p.exists():
-            unreadable += 1
+    for run_id, sidecar_path, sidecar_sha256 in rows:
+        sp_str = sidecar_path or ""
+        sha_str = sidecar_sha256 or ""
+        dedup_key = (sp_str, sha_str)
+        if sp_str and dedup_key in resolved_keys:
             continue
         try:
-            sc = parse_sidecar(p)
+            sc = _resolve_member_sidecar(
+                db,
+                run_id=run_id or "",
+                sidecar_path=sp_str,
+                sidecar_sha256=sha_str,
+                workspace_root=workspace_root,
+                catalog_dir=cat_dir,
+            )
         except Exception:
             unreadable += 1
             continue
+        if sc is None:
+            unreadable += 1
+            continue
+        if sp_str:
+            resolved_keys.add(dedup_key)
         read += 1
         if sc.review is None:
             continue
@@ -1608,7 +1704,9 @@ def citation_contradicted(claim, bears_on: str, observed_label: str) -> str:
     return "consistent" if covers else "indeterminate"
 
 
-def contradicted_citations(db, campaign_id: str, claim, workspace_root=None) -> dict:
+def contradicted_citations(
+    db, campaign_id: str, claim, workspace_root=None, catalog_dir=None
+) -> dict:
     """Apply :func:`citation_contradicted` across a campaign's member runs.
 
     Returns ``{"contradicted": [...], "indeterminate": [...], "evaluable": int,
@@ -1618,32 +1716,45 @@ def contradicted_citations(db, campaign_id: str, claim, workspace_root=None) -> 
     distinguishable from one that fired and found nothing. An empty `discriminability` map
     makes every citation indeterminate, and that must not look like a clean bill of health.
     """
-    from pathlib import Path
-
-    from bathos.sidecar import parse_sidecar
-
-    rows = db.execute(
-        "SELECT r.id, r.sidecar_path, r.outcome FROM runs r "
-        "JOIN campaign_runs cr ON r.id = cr.run_id "
-        "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
-        [campaign_id],
-    ).fetchall()
+    cat_dir = _infer_catalog_dir(db, catalog_dir, workspace_root)
+    try:
+        rows = db.execute(
+            "SELECT r.id, r.sidecar_path, r.outcome, r.sidecar_sha256 FROM runs r "
+            "JOIN campaign_runs cr ON r.id = cr.run_id "
+            "WHERE cr.campaign_id = ? AND ("
+            "(r.sidecar_path IS NOT NULL AND r.sidecar_path != '') "
+            "OR (r.sidecar_sha256 IS NOT NULL AND r.sidecar_sha256 != '')"
+            ")",
+            [campaign_id],
+        ).fetchall()
+    except Exception:
+        rows = [
+            (rid, sp, out, "")
+            for rid, sp, out in db.execute(
+                "SELECT r.id, r.sidecar_path, r.outcome FROM runs r "
+                "JOIN campaign_runs cr ON r.id = cr.run_id "
+                "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
+                [campaign_id],
+            ).fetchall()
+        ]
 
     contradicted: list[dict] = []
     indeterminate: list[dict] = []
     supports_seen = 0
 
-    for run_id, sidecar_path, outcome in rows:
-        p = Path(sidecar_path)
-        if workspace_root and not p.is_absolute():
-            p = Path(workspace_root) / p
-        if not p.exists():
-            continue
+    for run_id, sidecar_path, outcome, sidecar_sha256 in rows:
         try:
-            sc = parse_sidecar(p)
+            sc = _resolve_member_sidecar(
+                db,
+                run_id=run_id or "",
+                sidecar_path=sidecar_path or "",
+                sidecar_sha256=sidecar_sha256 or "",
+                workspace_root=workspace_root,
+                catalog_dir=cat_dir,
+            )
         except Exception:
             continue
-        if sc.review is None:
+        if sc is None or sc.review is None:
             continue
         for entry in sc.review.literature:
             if entry.disposition != "supports" or not entry.bears_on:
