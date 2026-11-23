@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import tarfile
 import tomllib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -296,3 +298,412 @@ def archive_doc(
     doc_path.unlink()
 
     return tar_zst_target, manifest_target
+
+
+_UUID_RE = re.compile(
+    r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
+    re.IGNORECASE,
+)
+_RUN_PREFIX_RE = re.compile(r"\brun[:_]\s*([0-9a-f-]{8,36})\b", re.IGNORECASE)
+_RUN_PROSE_RE = re.compile(r"\bRun\s+([0-9a-f]{8,36})\b")
+_CAMPAIGN_PREFIX_RE = re.compile(r"\bcampaign[:_]\s*([A-Za-z0-9_.-]{4,64})\b", re.IGNORECASE)
+_FINDING_PREFIX_RE = re.compile(r"\bfinding[:]\s*([A-Za-z0-9_.-]{3,64})\b", re.IGNORECASE)
+_FINDING_ID_RE = re.compile(r"\b(finding-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4})\b", re.IGNORECASE)
+
+_RUN_FRONTMATTER_KEYS = ("run_id", "run_ids", "runs", "cited_runs", "supporting_runs")
+_CAMPAIGN_FRONTMATTER_KEYS = (
+    "campaign_id",
+    "campaign_ids",
+    "campaigns",
+    "cited_campaigns",
+)
+_FINDING_FRONTMATTER_KEYS = ("finding_id", "finding_ids", "findings", "cited_findings")
+_ACK_FRONTMATTER_KEYS = ("acknowledged_overrides", "acknowledged_postmortems")
+
+
+@dataclass(frozen=True)
+class DocCitations:
+    """Bathos run/campaign/finding citations extracted from a decision document."""
+
+    run_ids: tuple[str, ...] = ()
+    campaign_ids: tuple[str, ...] = ()
+    finding_ids: tuple[str, ...] = ()
+    doc_status: str = ""
+    stated_verdict: str = ""
+    acknowledged_overrides: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FlaggedDecisionDoc:
+    """A decision doc whose cited run/campaign verdict was overridden by a postmortem."""
+
+    doc_path: str
+    doc_status: str
+    cited_kind: str  # "run" | "campaign" | "finding"
+    cited_id: str
+    target_id: str
+    verdict_override: str
+    hypothesis_status: str
+    postmortem_path: str
+    override_kind: str
+    stale_reason: str
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "doc_path": self.doc_path,
+            "doc_status": self.doc_status,
+            "cited_kind": self.cited_kind,
+            "cited_id": self.cited_id,
+            "target_id": self.target_id,
+            "verdict_override": self.verdict_override,
+            "hypothesis_status": self.hypothesis_status,
+            "postmortem_path": self.postmortem_path,
+            "override_kind": self.override_kind,
+            "stale_reason": self.stale_reason,
+            "reason": self.reason,
+        }
+
+
+def _iter_str_values(val: Any) -> list[str]:
+    if isinstance(val, str):
+        s = val.strip()
+        return [s] if s else []
+    if isinstance(val, (list, tuple, set)):
+        out: list[str] = []
+        for item in val:
+            out.extend(_iter_str_values(item))
+        return out
+    return []
+
+
+def extract_doc_citations(content: str) -> DocCitations:
+    """Extract cited run IDs, campaign IDs, finding IDs, and ack metadata from markdown."""
+    meta, body, _ = parse_doc_frontmatter(content)
+
+    run_ids: list[str] = []
+    campaign_ids: list[str] = []
+    finding_ids: list[str] = []
+    ack_ids: list[str] = []
+
+    def _add_unique(bucket: list[str], item: str) -> None:
+        cleaned = item.strip()
+        if cleaned and cleaned not in bucket:
+            bucket.append(cleaned)
+
+    for key in _RUN_FRONTMATTER_KEYS:
+        for val in _iter_str_values(meta.get(key)):
+            # Strip optional "run:" prefix if used in frontmatter
+            if val.lower().startswith("run:"):
+                val = val[4:].strip()
+            _add_unique(run_ids, val.lower() if _UUID_RE.fullmatch(val) else val)
+
+    for key in _CAMPAIGN_FRONTMATTER_KEYS:
+        for val in _iter_str_values(meta.get(key)):
+            if val.lower().startswith("campaign:"):
+                val = val[9:].strip()
+            _add_unique(campaign_ids, val)
+
+    for key in _FINDING_FRONTMATTER_KEYS:
+        for val in _iter_str_values(meta.get(key)):
+            if val.lower().startswith("finding:"):
+                val = val[8:].strip()
+            _add_unique(finding_ids, val)
+
+    for key in _ACK_FRONTMATTER_KEYS:
+        for val in _iter_str_values(meta.get(key)):
+            _add_unique(ack_ids, val)
+
+    # Scan body (and string values in frontmatter excluding ack/supersedes) for inline citations
+    scan_chunks = [body]
+    for k, v in meta.items():
+        if k in (*_ACK_FRONTMATTER_KEYS, "supersedes", "overridden_by_postmortem", "stale_reason"):
+            continue
+        if isinstance(v, str):
+            scan_chunks.append(v)
+        elif isinstance(v, list):
+            scan_chunks.extend(str(x) for x in v if isinstance(x, str))
+
+    joined = "\n".join(scan_chunks)
+    for m in _UUID_RE.finditer(joined):
+        _add_unique(run_ids, m.group(1).lower())
+    for m in _RUN_PREFIX_RE.finditer(joined):
+        raw = m.group(1).lower()
+        if not any(r.startswith(raw) for r in run_ids):
+            _add_unique(run_ids, raw)
+    for m in _RUN_PROSE_RE.finditer(joined):
+        raw = m.group(1).lower()
+        if not any(r.startswith(raw) for r in run_ids):
+            _add_unique(run_ids, raw)
+    for m in _CAMPAIGN_PREFIX_RE.finditer(joined):
+        _add_unique(campaign_ids, m.group(1))
+    for m in _FINDING_PREFIX_RE.finditer(joined):
+        _add_unique(finding_ids, m.group(1))
+    for m in _FINDING_ID_RE.finditer(joined):
+        _add_unique(finding_ids, m.group(1).lower())
+
+    doc_status = str(meta.get("status", "") or "").strip()
+    stated_verdict = str(meta.get("verdict") or meta.get("outcome") or "").strip()
+
+    return DocCitations(
+        run_ids=tuple(run_ids),
+        campaign_ids=tuple(campaign_ids),
+        finding_ids=tuple(finding_ids),
+        doc_status=doc_status,
+        stated_verdict=stated_verdict,
+        acknowledged_overrides=tuple(ack_ids),
+    )
+
+
+def _id_matches(cited: str, target: str) -> bool:
+    c = cited.strip().lower()
+    t = target.strip().lower()
+    if not c or not t:
+        return False
+    if c == t:
+        return True
+    return len(c) >= 8 and t.startswith(c)
+
+
+def _is_acknowledged(
+    citations: DocCitations,
+    cited_id: str,
+    target_id: str,
+    postmortem_path: str,
+) -> bool:
+    for ack in citations.acknowledged_overrides:
+        if _id_matches(ack, target_id) or _id_matches(ack, cited_id):
+            return True
+        if postmortem_path and ack.strip() == postmortem_path:
+            return True
+    return False
+
+
+def _scan_doc_directories(
+    project_root: Path,
+    doc_store: str = "",
+) -> list[Path]:
+    dirs: list[Path] = []
+    resolved_ds, _ = resolve_doc_store(project_root, doc_store)
+    if resolved_ds.is_dir():
+        dirs.append(resolved_ds.resolve())
+    default_docs = (project_root / ".bth" / "docs").resolve()
+    if default_docs.is_dir() and default_docs not in dirs:
+        dirs.append(default_docs)
+    if not doc_store:
+        praxia_decisions = (project_root / ".praxia" / "docs" / "decisions").resolve()
+        if (
+            praxia_decisions.is_dir()
+            and praxia_decisions not in dirs
+            and not any(
+                praxia_decisions == d or praxia_decisions.is_relative_to(d) for d in dirs
+            )
+        ):
+            dirs.append(praxia_decisions)
+    return dirs
+
+
+def flag_overridden_doc(
+    doc_path: Path,
+    flagged_entries: list[FlaggedDecisionDoc],
+    *,
+    project_root: Path | None = None,
+    is_explicit: bool = False,
+) -> None:
+    """Annotate a markdown decision doc's YAML frontmatter as stale/overridden.
+
+    Respects Anti-Goal A5 via ``check_write_allowed`` before mutating disk.
+    """
+    if not flagged_entries:
+        return
+    root = (project_root or doc_path.parent).resolve()
+    check_write_allowed(doc_path, root, is_explicit)
+    content = doc_path.read_text(encoding="utf-8")
+    meta, body, delim = parse_doc_frontmatter(content)
+    meta["stale"] = True
+    meta["stale_reason"] = "; ".join(dict.fromkeys(e.stale_reason for e in flagged_entries))
+    overridden_refs = list(meta.get("overridden_runs") or [])
+    for entry in flagged_entries:
+        ref = entry.target_id or entry.cited_id
+        if ref and ref not in overridden_refs:
+            overridden_refs.append(ref)
+    if overridden_refs:
+        meta["overridden_runs"] = overridden_refs
+    pm_paths = [e.postmortem_path for e in flagged_entries if e.postmortem_path]
+    if pm_paths:
+        meta["overridden_by_postmortem"] = pm_paths[0] if len(pm_paths) == 1 else sorted(set(pm_paths))
+    doc_path.write_text(format_doc_frontmatter(meta, body, delim), encoding="utf-8")
+
+
+def find_overridden_decision_docs(
+    project_root: Path | str,
+    catalog_dir: Path | str | None = None,
+    *,
+    doc_store: str = "",
+    include_superseded: bool = False,
+    flag_docs: bool = False,
+) -> list[FlaggedDecisionDoc]:
+    """Detect decision docs citing runs, campaigns, or findings overridden by a postmortem.
+
+    Read-only by default (``flag_docs=False``). When ``flag_docs=True``, annotates
+    matching docs' frontmatter (enforcing Anti-Goal A5 via ``check_write_allowed``).
+    """
+    from bathos.postmortem import collect_postmortem_overrides
+
+    root = Path(project_root).resolve()
+    overrides = collect_postmortem_overrides(root, catalog_dir=catalog_dir)
+    if not overrides:
+        return []
+
+    doc_dirs = _scan_doc_directories(root, doc_store=doc_store)
+    if not doc_dirs:
+        return []
+
+    _, is_explicit = resolve_doc_store(root, doc_store)
+
+    # Index findings -> supporting runs so docs citing a finding also catch postmortem overrides
+    finding_runs_by_key: dict[str, list[str]] = {}
+    try:
+        from bathos.findings import get_findings_dir, parse_finding_file
+
+        fdir = get_findings_dir(root)
+        if fdir.is_dir():
+            for p in sorted(fdir.glob("*.toml")):
+                try:
+                    f = parse_finding_file(p)
+                    if f.supporting_runs:
+                        if f.id:
+                            finding_runs_by_key[f.id.lower()] = list(f.supporting_runs)
+                        if f.question_slug:
+                            finding_runs_by_key[f.question_slug.lower()] = list(f.supporting_runs)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    flagged: list[FlaggedDecisionDoc] = []
+    seen_md: set[Path] = set()
+
+    for ds in doc_dirs:
+        for md_path in sorted(ds.rglob("*.md")):
+            resolved_md = md_path.resolve()
+            if resolved_md in seen_md or "archive" in md_path.parts:
+                continue
+            seen_md.add(resolved_md)
+            try:
+                content = md_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+
+            citations = extract_doc_citations(content)
+            if not citations.run_ids and not citations.campaign_ids and not citations.finding_ids:
+                continue
+            if not include_superseded and citations.doc_status in ("superseded", "archived"):
+                continue
+
+            try:
+                rel_doc = str(resolved_md.relative_to(root))
+            except ValueError:
+                rel_doc = str(md_path)
+
+            doc_hits: list[FlaggedDecisionDoc] = []
+            doc_hit_keys: set[tuple[str, str, str]] = set()
+
+            def _record_hit(
+                cited_kind: str,
+                cited_id: str,
+                ov: Any,
+                stale_reason: str,
+            ) -> None:
+                if _is_acknowledged(citations, cited_id, ov.target_id, ov.postmortem_path):
+                    return
+                key = (cited_kind, ov.target_id, ov.postmortem_path)
+                if key in doc_hit_keys:
+                    return
+                doc_hit_keys.add(key)
+                doc_hits.append(
+                    FlaggedDecisionDoc(
+                        doc_path=rel_doc,
+                        doc_status=citations.doc_status,
+                        cited_kind=cited_kind,
+                        cited_id=cited_id,
+                        target_id=ov.target_id,
+                        verdict_override=ov.verdict_override,
+                        hypothesis_status=ov.hypothesis_status,
+                        postmortem_path=ov.postmortem_path,
+                        override_kind=ov.override_kind,
+                        stale_reason=stale_reason,
+                        reason=ov.reason,
+                    )
+                )
+
+            for rid in citations.run_ids:
+                for ov in overrides:
+                    if ov.target_type == "run" and _id_matches(rid, ov.target_id):
+                        detail = (
+                            f"verdict_override={ov.verdict_override!r}"
+                            if ov.verdict_override not in ("", "none")
+                            else f"hypothesis_status={ov.hypothesis_status!r}"
+                        )
+                        _record_hit(
+                            "run",
+                            rid,
+                            ov,
+                            f"cited run {rid} overridden by postmortem ({detail})",
+                        )
+
+            for cid in citations.campaign_ids:
+                for ov in overrides:
+                    if ov.target_type == "campaign" and _id_matches(cid, ov.target_id):
+                        detail = (
+                            f"verdict_override={ov.verdict_override!r}"
+                            if ov.verdict_override not in ("", "none")
+                            else f"hypothesis_status={ov.hypothesis_status!r}"
+                        )
+                        _record_hit(
+                            "campaign",
+                            cid,
+                            ov,
+                            f"cited campaign {cid} overridden by postmortem ({detail})",
+                        )
+                    elif ov.target_type == "run" and ov.campaign_id and _id_matches(cid, ov.campaign_id):
+                        detail = (
+                            f"verdict_override={ov.verdict_override!r}"
+                            if ov.verdict_override not in ("", "none")
+                            else f"hypothesis_status={ov.hypothesis_status!r}"
+                        )
+                        _record_hit(
+                            "campaign",
+                            cid,
+                            ov,
+                            f"cited campaign {cid} has member run {ov.target_id[:8]} overridden by postmortem ({detail})",
+                        )
+
+            for fid in citations.finding_ids:
+                s_runs = finding_runs_by_key.get(fid.lower(), [])
+                for s_rid in s_runs:
+                    for ov in overrides:
+                        if ov.target_type == "run" and _id_matches(s_rid, ov.target_id):
+                            detail = (
+                                f"verdict_override={ov.verdict_override!r}"
+                                if ov.verdict_override not in ("", "none")
+                                else f"hypothesis_status={ov.hypothesis_status!r}"
+                            )
+                            _record_hit(
+                                "finding",
+                                fid,
+                                ov,
+                                f"cited finding {fid} rests on run {ov.target_id[:8]} overridden by postmortem ({detail})",
+                            )
+
+            if doc_hits:
+                flagged.extend(doc_hits)
+                if flag_docs:
+                    flag_overridden_doc(
+                        md_path,
+                        doc_hits,
+                        project_root=root,
+                        is_explicit=is_explicit,
+                    )
+
+    return flagged

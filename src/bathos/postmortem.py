@@ -760,3 +760,224 @@ discharges = []
 """
     postmortem_path.write_text(toml_content)
     return postmortem_path
+
+
+@dataclass(frozen=True)
+class PostmortemOverride:
+    """Normalized record of a postmortem override or refutation affecting a run or campaign."""
+
+    target_type: str  # "run" | "campaign"
+    target_id: str
+    verdict_override: str
+    hypothesis_status: str
+    reason: str
+    postmortem_path: str
+    author: str = ""
+    campaign_id: str = ""
+    override_kind: str = "postmortem_verdict_override"
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "verdict_override": self.verdict_override,
+            "hypothesis_status": self.hypothesis_status,
+            "reason": self.reason,
+            "postmortem_path": self.postmortem_path,
+            "author": self.author,
+            "campaign_id": self.campaign_id,
+            "override_kind": self.override_kind,
+        }
+
+
+def is_override_postmortem(postmortem: Postmortem) -> bool:
+    """Return True when a non-draft postmortem overrides or invalidates a verdict."""
+    if postmortem.status == "draft":
+        return False
+    if postmortem.verdict_override not in ("", "none"):
+        return True
+    if postmortem.hypothesis_status == "refuted":
+        return True
+    return any(a.effect == "verdict_changed" for a in postmortem.amendments)
+
+
+def _override_kind_for(postmortem: Postmortem) -> str:
+    if postmortem.verdict_override not in ("", "none"):
+        return "postmortem_verdict_override"
+    if postmortem.hypothesis_status == "refuted":
+        return "postmortem_refuted"
+    return "postmortem_amendment"
+
+
+def collect_postmortem_overrides(
+    workspace_root: Path | str | None = None,
+    catalog_dir: Path | str | None = None,
+) -> list[PostmortemOverride]:
+    """Collect active (non-draft) postmortem overrides from workspace TOMLs and the catalog.
+
+    Scans ``*.bth.postmortem.toml`` under ``workspace_root`` (boundary-aware) and, when
+    ``catalog_dir`` is readable, also reads folded ``runs`` rows with
+    ``postmortem_verdict_override != 'none'`` or ``postmortem_hypothesis_status = 'refuted'``
+    plus campaign membership so run overrides propagate to cited campaigns.
+    """
+    overrides: list[PostmortemOverride] = []
+    seen: set[tuple[str, str, str]] = set()
+    run_to_campaign: dict[str, str] = {}
+
+    if catalog_dir is not None:
+        cd = Path(catalog_dir)
+        try:
+            from bathos.index import catalog_readable, connect_read
+
+            if catalog_readable(cd):
+                con = connect_read(cd, missing="empty", wire_validity=False)
+                try:
+                    tables = {
+                        r[0]
+                        for r in con.execute(
+                            "SELECT table_name FROM duckdb_tables()"
+                        ).fetchall()
+                    }
+                    if "runs" in tables:
+                        for rid, cid in con.execute(
+                            "SELECT id, campaign_id FROM runs WHERE campaign_id IS NOT NULL AND campaign_id != ''"
+                        ).fetchall():
+                            if rid and cid:
+                                run_to_campaign[str(rid)] = str(cid)
+                        if "campaign_runs" in tables:
+                            for cid, rid in con.execute(
+                                "SELECT campaign_id, run_id FROM campaign_runs"
+                            ).fetchall():
+                                if rid and cid and str(rid) not in run_to_campaign:
+                                    run_to_campaign[str(rid)] = str(cid)
+
+                        rows = con.execute(
+                            "SELECT id, campaign_id, COALESCE(postmortem_verdict_override, 'none'), "
+                            "COALESCE(postmortem_hypothesis_status, ''), COALESCE(postmortem_summary, ''), "
+                            "COALESCE(postmortem_path, ''), COALESCE(postmortem_author, ''), "
+                            "COALESCE(postmortem_status, '') "
+                            "FROM runs "
+                            "WHERE COALESCE(postmortem_status, 'submitted') != 'draft' "
+                            "AND (COALESCE(postmortem_verdict_override, 'none') NOT IN ('', 'none') "
+                            "     OR COALESCE(postmortem_hypothesis_status, '') = 'refuted')"
+                        ).fetchall()
+                        for rid, cid, vo, hs, summ, ppath, author, _pm_st in rows:
+                            rid_s = str(rid)
+                            cid_s = str(cid or run_to_campaign.get(rid_s, ""))
+                            vo_s = str(vo or "none")
+                            hs_s = str(hs or "")
+                            ppath_s = str(ppath or "")
+                            kind = (
+                                "postmortem_verdict_override"
+                                if vo_s not in ("", "none")
+                                else "postmortem_refuted"
+                            )
+                            key = ("run", rid_s, ppath_s)
+                            if key not in seen:
+                                seen.add(key)
+                                overrides.append(
+                                    PostmortemOverride(
+                                        target_type="run",
+                                        target_id=rid_s,
+                                        verdict_override=vo_s,
+                                        hypothesis_status=hs_s,
+                                        reason=str(summ or ""),
+                                        postmortem_path=ppath_s,
+                                        author=str(author or ""),
+                                        campaign_id=cid_s,
+                                        override_kind=kind,
+                                    )
+                                )
+                finally:
+                    con.close()
+        except Exception:
+            pass
+
+    if workspace_root is not None:
+        root = Path(workspace_root)
+        if root.exists():
+            root_res = root.resolve()
+            for pm_file in iter_project_files(
+                root, ".bth.postmortem.toml", event_name="postmortem.boundary_pruned"
+            ):
+                try:
+                    pm = parse_postmortem(pm_file)
+                except Exception:
+                    continue
+                if not is_override_postmortem(pm):
+                    continue
+                try:
+                    rel_pm = str(pm_file.resolve().relative_to(root_res))
+                except ValueError:
+                    rel_pm = str(pm_file)
+                reason = pm.summary or pm.root_cause or ""
+                kind = _override_kind_for(pm)
+
+                if pm.run_id:
+                    cid_s = run_to_campaign.get(pm.run_id, "")
+                    if not cid_s and len(pm.run_id) >= 8:
+                        for full_rid, c_val in run_to_campaign.items():
+                            if full_rid.startswith(pm.run_id):
+                                cid_s = c_val
+                                break
+                    key = ("run", pm.run_id, rel_pm)
+                    # Avoid duplicate when catalog row already recorded the same run + path
+                    existing_run_keys = {k for k in seen if k[0] == "run" and k[1] == pm.run_id}
+                    if key not in seen and not any(
+                        k[2] in (rel_pm, "") for k in existing_run_keys
+                    ):
+                        seen.add(key)
+                        overrides.append(
+                            PostmortemOverride(
+                                target_type="run",
+                                target_id=pm.run_id,
+                                verdict_override=pm.verdict_override or "none",
+                                hypothesis_status=pm.hypothesis_status,
+                                reason=reason,
+                                postmortem_path=rel_pm,
+                                author=pm.author,
+                                campaign_id=cid_s,
+                                override_kind=kind,
+                            )
+                        )
+                elif pm.campaign_id:
+                    key = ("campaign", pm.campaign_id, rel_pm)
+                    if key not in seen:
+                        seen.add(key)
+                        overrides.append(
+                            PostmortemOverride(
+                                target_type="campaign",
+                                target_id=pm.campaign_id,
+                                verdict_override=pm.verdict_override or "none",
+                                hypothesis_status=pm.hypothesis_status,
+                                reason=reason,
+                                postmortem_path=rel_pm,
+                                author=pm.author,
+                                campaign_id=pm.campaign_id,
+                                override_kind=kind,
+                            )
+                        )
+
+                for amend in pm.amendments:
+                    if amend.effect == "verdict_changed":
+                        target_run = amend.amends_run_id or pm.run_id
+                        if not target_run:
+                            continue
+                        key = ("run", target_run, rel_pm)
+                        if key not in seen:
+                            seen.add(key)
+                            overrides.append(
+                                PostmortemOverride(
+                                    target_type="run",
+                                    target_id=target_run,
+                                    verdict_override=pm.verdict_override or "none",
+                                    hypothesis_status=pm.hypothesis_status,
+                                    reason=amend.note or reason,
+                                    postmortem_path=rel_pm,
+                                    author=pm.author,
+                                    campaign_id=pm.campaign_id or run_to_campaign.get(target_run, ""),
+                                    override_kind="postmortem_amendment",
+                                )
+                            )
+
+    return overrides

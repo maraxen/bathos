@@ -339,3 +339,61 @@ def get_replaces(
         return [dict(zip(cols, r)) for r in rows]
     finally:
         con.close()
+
+
+def find_stale_or_superseded_docs(
+    workspace_root: Path | str,
+    catalog_dir: Path | str | None = None,
+    *,
+    doc_store: str = "",
+) -> list[dict[str, Any]]:
+    """Return decision docs flagged by postmortem overrides or doc supersession edges."""
+    from bathos.doc_store import find_overridden_decision_docs
+
+    root = Path(workspace_root).resolve()
+    cd = Path(catalog_dir or default_catalog_dir())
+    results = [
+        d.to_dict()
+        for d in find_overridden_decision_docs(root, cd, doc_store=doc_store)
+    ]
+
+    # Also surface any active docs directly superseded via supersession_edges
+    con = connect_read(cd, missing="empty")
+    try:
+        has_table = con.execute(
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'supersession_edges'"
+        ).fetchone()
+        if has_table and has_table[0] > 0:
+            cols_info = [
+                c[1] for c in con.execute("PRAGMA table_info('supersession_edges')").fetchall()
+            ]
+            if "entity_type" in cols_info:
+                rows = con.execute(
+                    "SELECT entity_id, superseded_by_id, reason FROM supersession_edges "
+                    "WHERE entity_type = 'doc' ORDER BY declared_at ASC"
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT from_id, to_id, reason FROM supersession_edges "
+                    "WHERE from_type = 'doc' ORDER BY declared_at ASC"
+                ).fetchall()
+            for ent_id, succ_id, reason in rows:
+                results.append(
+                    {
+                        "doc_path": str(ent_id),
+                        "doc_status": "superseded_by_edge",
+                        "cited_kind": "doc",
+                        "cited_id": str(ent_id),
+                        "target_id": str(succ_id),
+                        "verdict_override": "none",
+                        "hypothesis_status": "",
+                        "postmortem_path": "",
+                        "override_kind": "doc_supersession_edge",
+                        "stale_reason": f"superseded by {succ_id}: {reason}",
+                        "reason": str(reason or ""),
+                    }
+                )
+    finally:
+        con.close()
+
+    return results

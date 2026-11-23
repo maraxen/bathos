@@ -1588,3 +1588,27 @@ def compute_distance_from_present(
         "n_units": None,
         "version_source": validity.version_source,
     }
+
+
+def resolve_postmortem_overrides(
+    run_ids: list[str],
+    catalog_dir: Path | str | None = None,
+    workspace_root: Path | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return active postmortem overrides keyed by run_id (read-only)."""
+    from bathos.postmortem import collect_postmortem_overrides
+
+    if not run_ids:
+        return {}
+    cd = catalog_dir or os.environ.get("BTH_CATALOG_DIR") or default_catalog_dir()
+    overrides = collect_postmortem_overrides(workspace_root=workspace_root, catalog_dir=cd)
+    by_run: dict[str, list[dict[str, Any]]] = {}
+    for rid in run_ids:
+        rid_l = rid.lower()
+        for ov in overrides:
+            if ov.target_type != "run":
+                continue
+            tid_l = ov.target_id.lower()
+            if tid_l == rid_l or (len(tid_l) >= 8 and rid_l.startswith(tid_l)) or (len(rid_l) >= 8 and tid_l.startswith(rid_l)):
+                by_run.setdefault(rid, []).append(ov.to_dict())
+    return by_run

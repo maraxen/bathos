@@ -650,3 +650,39 @@ def list_findings(
         results.append(f)
 
     return results
+
+
+def find_findings_with_overridden_runs(
+    catalog_dir: Path | str | None = None,
+    workspace_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Return active findings whose supporting_runs include a postmortem-overridden run."""
+    from bathos.postmortem import collect_postmortem_overrides
+
+    ws_root = Path(workspace_root).resolve() if workspace_root else resolve_workspace().fs_root
+    cd = Path(catalog_dir or default_catalog_dir())
+    overrides = [
+        ov for ov in collect_postmortem_overrides(ws_root, catalog_dir=cd) if ov.target_type == "run"
+    ]
+    if not overrides:
+        return []
+
+    affected: list[dict[str, Any]] = []
+    for f in list_findings(catalog_dir=cd, workspace_root=ws_root, include_superseded=False):
+        matched_overrides: list[dict[str, str]] = []
+        for s_run in f.supporting_runs:
+            sr_l = s_run.lower()
+            for ov in overrides:
+                tid_l = ov.target_id.lower()
+                if sr_l == tid_l or (len(sr_l) >= 8 and tid_l.startswith(sr_l)) or (len(tid_l) >= 8 and sr_l.startswith(tid_l)):
+                    matched_overrides.append(ov.to_dict())
+        if matched_overrides:
+            affected.append(
+                {
+                    "finding_id": f.id,
+                    "question_slug": f.question_slug,
+                    "status": f.active_status or f.status,
+                    "overridden_runs": matched_overrides,
+                }
+            )
+    return affected
