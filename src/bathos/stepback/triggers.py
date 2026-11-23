@@ -313,10 +313,12 @@ def evaluate_entropy_collapse(
     window_size: int = 5,
     entropy_threshold_nats: float = 0.35,
     anchor_run_id: str | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate outcome-entropy collapse trigger (T_entropy_collapse).
 
-    Fires if N >= 5 and Shannon entropy (in nats) across window < threshold (0.35 nats) or == 0.
+    Fires if N >= 5 and Shannon entropy (in nats) across window < threshold (0.35 nats) or == 0,
+    unless the window consists of observed/exploratory runs or exploratory mode is active.
     """
     active_runs = _filter_active_runs(runs, anchor_run_id)
     n = len(active_runs)
@@ -342,6 +344,7 @@ def evaluate_entropy_collapse(
                 out = outcomes_dict.get("verdict") or outcomes_dict.get("label")
         outcomes.append(str(out).lower().strip() if out is not None else "")
 
+    w_runs = active_runs[-window_size:]
     w_k = outcomes[-window_size:]
     k = len(w_k)
     if k < 5:
@@ -355,12 +358,38 @@ def evaluate_entropy_collapse(
             "window_size": window_size,
         }
 
+    w_epistemic: list[str] = []
+    for r in w_runs:
+        ec = _get_item_attr(r, "epistemic_class")
+        if ec is None:
+            md = _get_item_attr(r, "metadata")
+            if isinstance(md, dict):
+                ec = md.get("epistemic_class")
+        w_epistemic.append(str(ec).lower().strip() if ec is not None else "")
+
     counts = Counter(w_k)
     entropy_nats = 0.0
     for c in counts.values():
         p = c / k
         if p > 0:
             entropy_nats -= p * math.log(p)
+
+    is_all_observed_outcomes = all(o == "observed" for o in w_k)
+    is_observed_epistemic = all(ec in ("observed", "exploratory") for ec in w_epistemic)
+    is_exploratory_mode = str(mode or "").lower().strip() in ("exploration", "exploratory")
+
+    if is_all_observed_outcomes or is_observed_epistemic or is_exploratory_mode:
+        return {
+            "trigger": "entropy_collapse",
+            "fired": False,
+            "reason": "exploratory_or_observed_window",
+            "entropy_nats": round(entropy_nats, 4),
+            "threshold_nats": entropy_threshold_nats,
+            "window_size": k,
+            "outcome_counts": dict(counts),
+            "annotation": None,
+            "message": None,
+        }
 
     fired = (entropy_nats < entropy_threshold_nats) or (entropy_nats == 0.0)
 
@@ -462,6 +491,55 @@ def evaluate_metric_plateau(
     }
 
 
+_POSITIVE_PROGRESS_OUTCOMES = frozenset({"pass", "promising", "headroom_confirmed", "sound"})
+
+
+def _has_exploratory_progress(
+    campaign: Any, member_runs: list[Any], recent_window: int = 10
+) -> bool:
+    """Return True if an exploratory campaign shows measurable recent progress."""
+    progress = _get_item_attr(campaign, "clause_progress")
+    if isinstance(progress, list) and len(progress) >= 2:
+        start_idx = -min(recent_window, len(progress))
+        if progress[-1] > progress[start_idx]:
+            return True
+
+    if _get_item_attr(campaign, "has_progress") or _get_item_attr(campaign, "made_progress"):
+        return True
+
+    recent_runs = member_runs[-recent_window:]
+    if any(
+        _get_item_attr(r, "clause_resolved")
+        or _get_item_attr(r, "progress")
+        or _get_item_attr(r, "made_progress")
+        for r in recent_runs
+    ):
+        return True
+
+    metrics = [
+        val for val in (_resolve_numeric_metric(r) for r in member_runs) if val is not None
+    ]
+    if len(metrics) >= 6:
+        split = min(recent_window, len(metrics) // 2)
+        recent_m = metrics[-split:]
+        prev_m = metrics[-2 * split : -split]
+        if prev_m and recent_m:
+            mean_prev = sum(prev_m) / len(prev_m)
+            mean_recent = sum(recent_m) / len(recent_m)
+            if abs(mean_recent - mean_prev) > max(0.05 * abs(mean_prev), 1e-6):
+                return True
+
+    prior_runs = member_runs[:-recent_window] if len(member_runs) > recent_window else []
+
+    def _effective_outcome(run: Any) -> str:
+        val = _get_item_attr(run, "tentative_outcome") or _get_item_attr(run, "outcome")
+        return str(val).lower().strip() if val is not None else ""
+
+    prior_positive = any(_effective_outcome(r) in _POSITIVE_PROGRESS_OUTCOMES for r in prior_runs)
+    recent_positive = any(_effective_outcome(r) in _POSITIVE_PROGRESS_OUTCOMES for r in recent_runs)
+    return recent_positive and not prior_positive
+
+
 def evaluate_campaign_staleness(
     campaign: Any,
     member_runs: list[Any],
@@ -473,7 +551,7 @@ def evaluate_campaign_staleness(
     Fires on:
     1. Temporal Abandonment: status == "open" and idle >= 14 days.
     2. Hypothesis Wheel-Spinning: status == "open", active claim registered, N >= 15, and Delta U_10 == 0.
-    3. Uncapped Exploratory Drift: mode == "exploration", N >= 25, and no conclusion.
+    3. Uncapped Exploratory Drift: mode == "exploration", N >= 25, status == "open", and no measurable progress.
     """
     if isinstance(member_runs, dict):
         member_runs = list(member_runs.values())
@@ -528,8 +606,13 @@ def evaluate_campaign_staleness(
                 fired = True
                 reasons.append("hypothesis_wheel_spinning")
 
-    # Rule 3: Uncapped Exploratory Drift
-    if mode == "exploration" and n_runs >= 25 and status == "open":
+    # Rule 3: Uncapped Exploratory Drift (fires only without measurable recent progress)
+    if (
+        mode == "exploration"
+        and n_runs >= 25
+        and status == "open"
+        and not _has_exploratory_progress(campaign, member_runs)
+    ):
         fired = True
         reasons.append("uncapped_exploratory_drift")
 
@@ -816,8 +899,12 @@ def evaluate_all_triggers(
     res_near_bound = evaluate_near_bound_hits(
         member_runs, window_size=window_size, anchor_run_id=anchor_id, sidecar=sidecar
     )
+    camp_mode = _get_item_attr(campaign, "mode")
     res_entropy = evaluate_entropy_collapse(
-        member_runs, window_size=window_size, anchor_run_id=anchor_id
+        member_runs,
+        window_size=window_size,
+        anchor_run_id=anchor_id,
+        mode=str(camp_mode) if camp_mode is not None else None,
     )
     res_plateau = evaluate_metric_plateau(
         member_runs, window_size=window_size, anchor_run_id=anchor_id, sidecar=sidecar

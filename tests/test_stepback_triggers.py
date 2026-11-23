@@ -1,6 +1,7 @@
 """Tests for System-Evaluated Event Triggers (spec 261027 Section 2)."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from bathos.stepback.triggers import (
     evaluate_all_triggers,
@@ -203,12 +204,116 @@ def test_campaign_staleness():
     assert res_spin["fired"]
     assert "hypothesis_wheel_spinning" in res_spin["reasons"]
 
-    # 3. Uncapped Exploratory Drift: mode="exploration", 25 runs, open
+    # 3. Uncapped Exploratory Drift: mode="exploration", 25 runs, open (no progress -> fires)
     camp_explore = {"status": "open", "mode": "exploration"}
     explore_runs = [{"ended_at": now.isoformat()} for _ in range(25)]
     res_drift = evaluate_campaign_staleness(camp_explore, explore_runs, now_dt=now)
     assert res_drift["fired"]
     assert "uncapped_exploratory_drift" in res_drift["reasons"]
+
+
+def test_entropy_collapse_quiet_on_observed_and_exploratory_windows():
+    now = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+
+    # All-observed outcome labels (standard exploratory runner.py output) must NOT fire "Unproductive rut"
+    observed_runs = [{"outcome": "observed"} for _ in range(6)]
+    res_obs = evaluate_entropy_collapse(observed_runs)
+    assert not res_obs["fired"]
+    assert res_obs["message"] is None
+
+    # Runs tagged epistemic_class="observed" (even without outcome="observed") must stay quiet
+    epistemic_obs = [{"outcome": "inconclusive", "epistemic_class": "observed"} for _ in range(5)]
+    res_ep_obs = evaluate_entropy_collapse(epistemic_obs)
+    assert not res_ep_obs["fired"]
+    assert res_ep_obs["message"] is None
+
+    # Runs tagged epistemic_class="exploratory" must stay quiet
+    epistemic_exp = [{"outcome": "marginal", "epistemic_class": "exploratory"} for _ in range(5)]
+    res_ep_exp = evaluate_entropy_collapse(epistemic_exp)
+    assert not res_ep_exp["fired"]
+    assert res_ep_exp["message"] is None
+
+    # Exploratory mode suppresses "Unproductive rut" via both direct call and evaluate_all_triggers
+    res_mode = evaluate_entropy_collapse([{"outcome": "fail"}] * 5, mode="exploration")
+    assert not res_mode["fired"]
+    assert res_mode["message"] is None
+
+    all_exp = evaluate_all_triggers(
+        {"status": "open", "mode": "exploration", "created_at": now.isoformat()},
+        [{"outcome": "observed", "ended_at": now.isoformat()} for _ in range(6)],
+        now_dt=now,
+    )
+    assert "entropy_collapse" not in all_exp["active_triggers"]
+    assert all_exp["fired"] is False
+
+    # Mutation check: confirmatory failure rut MUST still fire "Unproductive rut"
+    conf_fail = [{"outcome": "fail", "epistemic_class": "confirmatory"} for _ in range(5)]
+    res_conf_fail = evaluate_entropy_collapse(conf_fail, mode="confirmation")
+    assert res_conf_fail["fired"] is True
+    assert res_conf_fail["annotation"] == "fixation_negative"
+    assert res_conf_fail["message"] == "Unproductive rut; recommend pivot or stop."
+
+
+def test_campaign_staleness_rule3_checks_exploratory_progress():
+    now = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
+    camp_explore = {"status": "open", "mode": "exploration"}
+
+    # 1. Improving metric across 25 exploratory runs -> actual progress -> stays quiet
+    improving_runs = [
+        {"ended_at": now.isoformat(), "outcome": "observed", "metric": 0.1 + 0.03 * i}
+        for i in range(25)
+    ]
+    res_improving = evaluate_campaign_staleness(camp_explore, improving_runs, now_dt=now)
+    assert not res_improving["fired"]
+    assert "uncapped_exploratory_drift" not in res_improving["reasons"]
+
+    # 2. Clause progress or recent clause_resolved -> stays quiet
+    camp_clause_prog = {
+        "status": "open",
+        "mode": "exploration",
+        "clause_progress": [0, 0, 1, 1, 2],
+    }
+    base_runs = [{"ended_at": now.isoformat(), "outcome": "observed"} for _ in range(25)]
+    assert not evaluate_campaign_staleness(camp_clause_prog, base_runs, now_dt=now)["fired"]
+
+    resolved_runs: list[dict[str, Any]] = [dict(r) for r in base_runs]
+    resolved_runs[-1] = {"ended_at": now.isoformat(), "outcome": "observed", "clause_resolved": True}
+    assert not evaluate_campaign_staleness(camp_explore, resolved_runs, now_dt=now)["fired"]
+
+    # 3. Tentative outcome breakthrough in recent window -> stays quiet
+    outcome_prog_runs = [
+        {"ended_at": now.isoformat(), "outcome": "observed", "tentative_outcome": "marginal"}
+        for _ in range(22)
+    ] + [
+        {"ended_at": now.isoformat(), "outcome": "observed", "tentative_outcome": "promising"}
+        for _ in range(3)
+    ]
+    assert not evaluate_campaign_staleness(camp_explore, outcome_prog_runs, now_dt=now)["fired"]
+
+    # 4. Mutation/stagnation checks: flat, plateaued-after-early-gain, or oscillating -> MUST fire
+    flat_metric_runs = [
+        {"ended_at": now.isoformat(), "outcome": "observed", "metric": 10.0}
+        for _ in range(25)
+    ]
+    res_flat = evaluate_campaign_staleness(camp_explore, flat_metric_runs, now_dt=now)
+    assert res_flat["fired"]
+    assert "uncapped_exploratory_drift" in res_flat["reasons"]
+
+    early_then_flat = [
+        {"ended_at": now.isoformat(), "outcome": "observed", "metric": float(i) if i < 5 else 5.0}
+        for i in range(25)
+    ]
+    res_plateaued = evaluate_campaign_staleness(camp_explore, early_then_flat, now_dt=now)
+    assert res_plateaued["fired"]
+    assert "uncapped_exploratory_drift" in res_plateaued["reasons"]
+
+    oscillating_runs = [
+        {"ended_at": now.isoformat(), "outcome": "observed", "metric": 1.0 if i % 2 == 0 else 2.0}
+        for i in range(25)
+    ]
+    res_osc = evaluate_campaign_staleness(camp_explore, oscillating_runs, now_dt=now)
+    assert res_osc["fired"]
+    assert "uncapped_exploratory_drift" in res_osc["reasons"]
 
 
 def test_evaluate_all_triggers_aggregation():
