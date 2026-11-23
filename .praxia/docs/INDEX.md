@@ -1,4 +1,4 @@
-# agent-a3507d8df4756150c Internal Docs
+# bathos Internal Docs
 
 Superseded and archived docs: [HISTORY.md](HISTORY.md).
 
@@ -17,6 +17,7 @@ Superseded and archived docs: [HISTORY.md](HISTORY.md).
 ## Plans
 - [261111_bearings-slice3-shadow](plans/261111_bearings-slice3-shadow.md) — Plan for wiring Bearings into cisternal shadow mode: at-work labels from bth run, expanded binary subjects, mode-state TOMLs, isolation test, shadow log location.
 - [261104_bearings-slice1-charter](plans/261104_bearings-slice1-charter.md) — Build plan for Bearings slice 1 (AC-1, AC-2, AC-3 ext half): charter file, human-only hash-bound confirmation, purpose-ledger pivot, folds; dispatch brief for agy.
+- [261104_bearings-slice2-packet-reading](plans/261104_bearings-slice2-packet-reading.md) — Build plan for Bearings slice 2 (AC-4, AC-5, AC-3 atom half): deterministic blind packet read from a git ref, citation-checked reading record, separate mapper step that produces mapped/unmapped/silent items (superseded; Bearings v1 shipped in v0.15.0 PR #161).
 - [260828_cyclopts-migration-milestone-2-scope](plans/260828_cyclopts-migration-milestone-2-scope.md) — Cyclopts CLI migration — Milestone 2 scope (backlog
 - [260805_deferred-item-triage-reconcile-the-handoff-backlog](plans/260805_deferred-item-triage-reconcile-the-handoff-backlog.md) — Scope for a one-time sweep of 42 deferred handoff entries plus a session-close reconciliation step, after Postgres evidence showed the defect is stale handoffs rather than untracked work
 - [260710_asr-rigor-ports-sprint-composition](plans/260710_asr-rigor-ports-sprint-composition.md) — port asr's C1–C5 rigor mechanisms into bathos core: BP-1 C3 concentration lint (`linter.py`), BP-2 C1 `[confounds.synthetic_recovery]` gate (`claim.py` AC-13 + `parity.py` submit-gate templates), BP-3 C5 negative-claim check (`validate_claim`); C2 needs a schema field (Appendix A), C4 stays in asr (Appendix B)
@@ -65,6 +66,7 @@ Superseded and archived docs: [HISTORY.md](HISTORY.md).
 ## Actuation Surfaces
 
 ## Audits
+- [261022_locked-worktrees-uncommitted](audits/261022_locked-worktrees-uncommitted.md) — Locked worktrees in this repo found holding modified tracked files during the 261022 disk audit; nothing touched, owner to commit or discard
 - [261111_bearings-slice3-two-surface-review](audits/261111_bearings-slice3-two-surface-review.md) — Cursor (correctness, merge) and Antigravity (measurement) review of slice 3 shadow gates and the main merge; verified findings and verdicts
 - [261110_bearings-ac9-two-surface-review](audits/261110_bearings-ac9-two-surface-review.md) — Two-surface review of the AC-9 commits on wt/261104_bearings-ac7; slug leaks and two scoring defects confirmed
 - [261106_p1-dryrun-counts](audits/261106_p1-dryrun-counts.md)
@@ -74,6 +76,8 @@ Superseded and archived docs: [HISTORY.md](HISTORY.md).
 - [261015_exploratory-mode-contract-adversarial-review](audits/261015_exploratory-mode-contract-adversarial-review.md) — Spec-challenger findings C1-C25 and spec-defender rulings for specs/261015_exploratory-mode-contract.md, run sequentially
 
 ## Research
+- [261028_success-modes-catalog](research/261028_success-modes-catalog.md) — Fourteen success modes paired with failure modes from protein-science sessions (abstain, escalate, step back, pilot, pooling unit, batch confound, ...), with triggers, performed imitations, scoring and bathos coverage gaps
+- [261027_advisor-checkpoints-step-back-research](research/261027_advisor-checkpoints-step-back-research.md) — Notebook-grounded findings and lessons from praxia/bathos history on advisor-style step-back checkpoints, checks satisfied without their intent, mutation-style check evaluation, and forecast scoring of hypotheses
 - [261106_bearings-ac7d-literature-notes](research/261106_bearings-ac7d-literature-notes.md) — Pre-score notes on planted-partition detectability limits, framing how an AC-7d pass or fail will be read
 - [261106_validity-prior-art](research/261106_validity-prior-art.md) — Phase 2 Prior Art Research for bathos task 261106_archive-supersession: external invalidation and supersession patterns across 9 domains (MLOps, DataLad, W3C PROV, Bazel/Nix, Retraction Watch, GRADE, 21 CFR Part 11, OSV, ADR), in-depth evaluation of in-house prototypes in tev_design, asr, and praxia, empirical count verifications, and architectural recommendations for the Phase 3 specification.
 - [261106_validity-surfaces-recon](research/261106_validity-surfaces-recon.md) — Comprehensive code reconnaissance verifying Section 3 evidence rows, mapping all D3 read/write surfaces to exact path:line insertion points, root-causing null dependency_provenance, and inventorying reusable machinery in bathos.
@@ -99,6 +103,7 @@ Superseded and archived docs: [HISTORY.md](HISTORY.md).
 - [260520_prereg-nonrepudiation-design](preregistration/260520_prereg-nonrepudiation-design.md)
 
 ## Reference
+- [261013_duckdb-storage-version-split](reference/261013_duckdb-storage-version-split.md) — Why bth sql/show/get_run can fail with "version number 69" on a machine where nothing is wrong, how to diagnose it in one command, and why bathos now declares prerelease = "allow"
 
 ## Roadmaps
 

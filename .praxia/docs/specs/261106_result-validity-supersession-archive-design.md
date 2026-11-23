@@ -1,7 +1,7 @@
 ---
 title: "Result validity, supersession and archive: stop stale readings reaching agents"
 description: "Design (pre-spec) for task 261106_archive-supersession: instrument defect ranges with version backfill from uv.lock, hidden-by-default reads/cites for void/affected/superseded/archived results, evidence tiers incl. spike, distance-from-present annotations, a lightweight findings register with supersession edges, session-start current-beliefs view, and a batch archive sweep with a self-contained doc store that can be pointed at .praxia/docs. Phased: P1 stop the leak, P2 findings + tiers, P3 archive sweep."
-status: DRAFT_PENDING_OWNER_REVIEW
+status: superseded
 task_id: 261106_archive-supersession
 authors:
   - "Claude Opus 5.5 (brainstorming session, decisions by the owner)"

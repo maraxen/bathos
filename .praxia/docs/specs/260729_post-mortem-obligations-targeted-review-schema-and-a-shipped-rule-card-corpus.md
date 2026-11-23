@@ -1,7 +1,7 @@
 ---
 title: Post-mortem obligations, targeted review schema, and a shipped rule-card corpus
 description: Unifies post-mortem workflow hooks, a [review] sidecar block for targeted literature/implementation review, and a machine-addressable reference corpus shipped in agent_assets/
-status: draft
+status: implemented
 task_id: 260729_bathos-postmortem-corpora
 date: '260729'
 backlog_ids: ''

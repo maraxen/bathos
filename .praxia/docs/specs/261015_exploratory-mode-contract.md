@@ -1,7 +1,8 @@
 ---
 title: 'Exploratory-mode contract: pre-register the question, not a verdict'
 description: Operationalize exploration vs calibration vs validation in bathos so exploratory runs stop inventing pass/marginal/fail thresholds, with a gated promotion path to confirmatory
-status: draft
+status: partial
+status_note: "S1+S2 shipped; S3 (observations.py/appraisal.py, bth observe/appraise), S4 ([holdout]/--from-observation), and S5 (run:<id>:<field>) unbuilt."
 task_id: 261015_exploratory-mode-contract
 date: '261015'
 backlog_ids: ''

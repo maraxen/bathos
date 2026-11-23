@@ -1,7 +1,8 @@
 ---
 title: Retire bth compact latency via the runlog cut-over, with an interim get_run stopgap
 description: Do not build an incremental legacy compact; finish delivery step 5 of the project-local run log (260925) behind its blockers, and add a cool-fragment fallback to get_run meanwhile (debts 2344, 2110, 1685, 1647, 1993)
-status: draft
+status: partial
+status_note: "Code shipped; live ~/.bth/catalog operational cutover Step 5 (cutover.json) outside repo code."
 task_id: 261012_incremental-compact
 date: '261012'
 backlog_ids: ''

@@ -1,7 +1,7 @@
 ---
 title: "Result Validity, Supersession, and Archive: Production Specification"
 description: "Comprehensive production specification for task 261106_archive-supersession: instrument defect ranges with version backfill from uv.lock and metadata, read-time validity filtering & refusal gates across 13 surfaces, evidence tiers including spike, distance-from-present annotations, a lightweight findings register with supersession edges, session-start current beliefs view, batch archive sweeps, praxia-compatible document store, and backfill migration for asr and tev_design."
-status: REVIEWED_SPEC
+status: implemented
 task_id: 261106_archive-supersession
 phase: 3
 authors:

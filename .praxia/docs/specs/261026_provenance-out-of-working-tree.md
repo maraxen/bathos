@@ -1,7 +1,7 @@
 ---
 title: Keep bth run provenance out of the working tree
 description: 'Spec for debt #3049: move the per-run sidecar lock into the git object store, untrack legacy manifest/lock files, and warn when bookkeeping would dirty the tree.'
-status: draft
+status: implemented
 task_id: 261026_provenance-out-of-working-tree
 date: '261026'
 backlog_ids: ''

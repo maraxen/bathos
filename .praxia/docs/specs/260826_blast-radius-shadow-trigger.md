@@ -2,7 +2,7 @@
 title: Blast-radius shadow-mode git-hook trigger
 task_id: 260826_blast-radius-shadow-trigger
 date: 260826
-status: draft
+status: implemented
 brainstorm_session: true
 invest_overrides: []
 ---

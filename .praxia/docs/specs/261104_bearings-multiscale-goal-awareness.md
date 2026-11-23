@@ -1,7 +1,7 @@
 ---
 title: "Bearings v1: multi-scale goal awareness for science agents"
 description: "Owner-confirmed project charter, purpose ledger and blind cold reader over runs and docs, observe-only, with pre-registered shadow exit"
-status: draft
+status: implemented
 task_id: "261104_multiscale-goal-awareness"
 session_id: "9000eadf"
 topic: "How should bathos give science agents working awareness of multiple scales of goals (run, campaign, claim, project aim, portfolio) and integrate reflection discipline, so that they stop getting lost in rabbit holes? Go beyond the campaign-scoped step-back feature. Must stay compatible with future adversarial collaboration, argumentation schemes and multiverse analysis work."

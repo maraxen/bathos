@@ -2,7 +2,7 @@
 title: Blast-radius assessment for bathos-tracked experiments
 task_id: 260826_blast-radius-assessment-skill
 date: 260826
-status: draft
+status: implemented
 brainstorm_session: true
 invest_overrides:
   - dimension: Small

@@ -1,7 +1,7 @@
 ---
 title: 'Output tiering: warm, cold and mirror copies of run outputs, recorded and verified by bathos'
 description: Standard for where a run's output files live (warm local path, checksummed cold archive, mirror), how bathos records and verifies each copy, and how `bth warm` restores them; reuses myxcel profiles and transport, folds in naurmalade's coldify wrapper, and notes the already-fixed reap log-mode bug
-status: draft
+status: implemented
 task_id: 261023_bathos-output-tiering
 date: '261023'
 backlog_ids: ''

@@ -1,7 +1,7 @@
 ---
 title: "Step-Back Reviews for Bathos Campaigns: System Triggers, Dual Review Paths, Reviewer Independence, Escalation Ladders, and Anti-Rubber-Stamp Meta-Signals"
 description: "Exhaustive architectural specification for Task 261027_step-back-reviews: automated event triggers with mathematical guard clauses, 5-dimension scored rubric with hierarchical gap-free evaluation and hard-floor veto, 5 qualitative cognitive modes with campaign domain evidence citations, authenticated reviewer independence constraints, 4-tier escalation ladder terminating at the human chair with unconditional FastMCP refusal and TTY/chair-token enforcement, meta-signals 15-18 with dispatch-telemetry guards, Cyclopts CLI/FastMCP tooling parity, DuckDB schema v19 migration, and advisor brief matrix integration."
-status: APPROVED_SPEC
+status: implemented
 task_id: 261027_step-back-reviews
 authors:
   - "Worker Agent (worker_phase2_spec_1)"

@@ -1,5 +1,7 @@
 # Scientific-Validity Gates: Invariants, Differential Assertions, and Sanity Pre-Flight (debt #200)
 
+**Status:** partial — `[differential]` (#1071) and `[observe].sanity` shipped; `[invariants]` and confirmatory `[sanity]` remain unbuilt.
+
 ## 1. Summary
 
 Every gate bathos enforces today checks **process completion** (sidecar exists, is

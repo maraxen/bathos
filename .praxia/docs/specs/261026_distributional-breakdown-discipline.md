@@ -1,7 +1,7 @@
 ---
 title: Distributional breakdown, amendments and fork records for aggregate verdicts
 description: 'Spec for debt #3045: [breakdown] sidecar block + aggregate-verdict lint, postmortem [[amendments]], postmortem [fork] for marginal results; warn everywhere, refuse when claim-bound.'
-status: draft
+status: implemented
 task_id: 261026_distributional-breakdown-debt
 date: '261026'
 backlog_ids: ''
