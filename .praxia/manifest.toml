@@ -79,6 +79,10 @@ name     = "bathos-step-back"
 path     = "agent_assets/skills/bathos-step-back/SKILL.md"
 
 [[plugin.skills]]
+name     = "bathos-progress-report"
+path     = "agent_assets/skills/bathos-progress-report/SKILL.md"
+
+[[plugin.skills]]
 name     = "prose-biosafe"
 path     = "agent_assets/skills/prose-biosafe/SKILL.md"
 
