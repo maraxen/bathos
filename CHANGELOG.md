@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-23
+
+### Added
+- **Stoichiometry stage-graph, reagent amortization & strict citation verification (`#6687`, `#6688`):** stage-graph dependency ordering, reagent amortization, and `verify_citations --strict-coords` coordinate/quote checks.
+- **Skills & skill smoke tests (`#4379`):** `bathos-progress-report` advisor progress report skill (registered in manifest and plugin bundle) plus literature-parity skill smoke tests (`tests/test_lit_parity_skill.py`) and progress-report skill smoke tests (`tests/test_progress_report_skill.py`).
+- **Postmortem-override decision-doc flagging (`#3494`):** detect and flag decision docs in `doc_store` that cite runs/verdicts later overridden by a postmortem.
+
+### Fixed
+- **Blast-radius status & read fallback (`#3563`, AC-18):** prevent false `'clean'` blast status on `'unverifiable'` rows, log-mode gaps, or DB errors, and route mixed-config RW fallback through `connect_read`.
+- **Stepback triggers (`#3236`):** suppress false `entropy_collapse` triggers on `observed`/exploratory windows and require progress in campaign staleness rule 3.
+- **Unresolved outcome & result JSON validation (`#3326`, `#3327`):** surface `outcome=unknown`/`error` instead of silent exit-0 in `runner.py` and validate emitted result JSON against `result_schema`/conditions in `validate.py`.
+- **C2 catalog, sidecar & repair/ingest hardening (`#3051`, `#3118`, `#2819`):** reconcile orphan `campaign_runs` rows and register campaign rows before `compact`, freeze campaign member sidecars at registration, harden `runlog/ingest.py` lock handling, and implement `backup_warm` in `repair.py`.
+
 ## [0.15.0] - 2026-11-13
 
 ### Added

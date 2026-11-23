@@ -10,12 +10,13 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-11-13)
+## Current Status (as of 2026-11-23)
 
-**Latest: v0.15.0 (2026-11-13) — 4,991 tests collected on `ddcb3456`.**
+**Latest: v0.16.0 (2026-11-23) — 5,152 tests collected.**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of recent versions:
 
+- **Sprint hygiene, integrity gates & C2 catalog hardening (`v0.16.0`)** — stoichiometry stage-graph/reagents/`verify_citations --strict-coords` (`#6687`/`#6688`), `bathos-progress-report` skill + literature-parity skill smoke tests (`#4379`), blast-status false-clean & `connect_read` fallback (`#3563`), stepback trigger fixes (`#3236`), postmortem-override decision-doc flagging (`#3494`), unresolved outcome & result JSON validation (`#3326`/`#3327`), and C2 catalog/sidecar/repair/ingest hardening (`#3051`/`#3118`/`#2819`)
 - **Bearings v1 (`v0.15.0`)** — multi-scale goal awareness (observe-only), human-confirmed project charters (`bth charter confirm`), deterministic blind packets and reading records (`PacketLeakError`), AC-9 `[charter] purpose` labels, and shadow mode (`cisternal>=0.1.7`, `shadow.label`, `bth sync` shadow support)
 - **Result Validity, Supersession & Archive (`v0.14.0`)** — `.bth/instruments/*.toml` defect & estimand-change registries, `version_resolver.py`, `validity_cache.db`, `--include-invalid`, `.bth/findings/*.toml` lifecycle (`bth finding create/list/show/settle/supersede/reopen`), `bth-session-start-hook`, `bth archive-sweep`, doc store archival, and `bth telemetry-rotate`
 - **Runlog, Provenance & Preflight (`v0.13.x`)** — `bth lock` (`materialize`/`relocate`/`untrack`/`push`/`fetch`), `[breakdown]` distributional discipline & `near_bound` obligations, postmortem `format = 2` (`[fork]`/`[[amendments]]`), `bth backfill-declarations`, `[provenance] track_packages`, `[requires]`/`[budget]` `bth preflight`, strict unaffiliated project refusal & non-git checkout binding
