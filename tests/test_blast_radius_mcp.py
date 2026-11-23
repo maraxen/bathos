@@ -120,3 +120,59 @@ def test_assess_tool_dependency_anchor_and_campaign_propagation(repo, catalog_di
     assert result["anchor_kind"] == "dependency"
     assert result["flagged_count"] == 1
     assert result["campaign_flagged_count"] == 1
+
+
+def test_status_tool_reports_unverifiable_and_surfaces_db_errors(catalog_dir, tmp_path):
+    import duckdb
+
+    from bathos.blast_radius import BlastRadiusRecord, append_ledger_record
+    from bathos.index import init_index_schema
+    from bathos.mcp import get_blast_radius_status_tool
+
+    # 1. Legacy catalog with an 'unverifiable' ledger entry -> must report 'unverifiable'
+    append_ledger_record(
+        BlastRadiusRecord(
+            entity_type="campaign",
+            entity_id="camp-unv",
+            to_state="unverifiable",
+            reason="DIRTY_RUN",
+        ),
+        catalog_dir,
+    )
+    res = get_blast_radius_status_tool(
+        catalog_dir=str(catalog_dir), entity_type="campaign", entity_id="camp-unv"
+    )
+    assert "error" not in res
+    assert res["status"] == "unverifiable"
+
+    # 2. Log-mode catalog with 'unverifiable' in index.db -> must report 'unverifiable'
+    log_cat = tmp_path / "log_catalog"
+    log_cat.mkdir()
+    (log_cat / "cutover.json").write_text('{"mode": "log"}\n')
+    con = duckdb.connect(str(log_cat / "index.db"))
+    try:
+        init_index_schema(con)
+        con.execute(
+            "INSERT INTO blast_radius_ledger "
+            "(id, entity_type, entity_id, from_state, to_state, amended_at) "
+            "VALUES ('id-unv', 'run', 'run-log-unv', 'clean', 'unverifiable', "
+            "'2026-11-01T00:00:00+00:00')"
+        )
+    finally:
+        con.close()
+    res_log = get_blast_radius_status_tool(
+        catalog_dir=str(log_cat), entity_type="run", entity_id="run-log-unv"
+    )
+    assert "error" not in res_log
+    assert res_log["status"] == "unverifiable"
+
+    # 3. Corrupt DB -> must surface explicit error and never return 'clean'
+    corrupt_cat = tmp_path / "corrupt_catalog"
+    corrupt_cat.mkdir()
+    (corrupt_cat / "bathos.db").write_bytes(b"corrupt db bytes")
+    res_err = get_blast_radius_status_tool(
+        catalog_dir=str(corrupt_cat), entity_type="run", entity_id="run-any"
+    )
+    assert "error" in res_err
+    assert res_err["status"] != "clean"
+    assert res_err["status"] == "unknown"

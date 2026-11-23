@@ -1594,15 +1594,26 @@ def get_blast_radius_status_tool(
         Dict with entity_type, entity_id, and status
         (clean/affected/unverifiable/cleared).
     """
+    import duckdb
+
     from bathos.blast_radius import fold_blast_radius_state
 
     if not entity_type or not entity_id:
         return {"error": "entity_type and entity_id are required"}
     cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        status = fold_blast_radius_state(cat_dir, entity_type, entity_id)
+    except (duckdb.Error, OSError) as exc:
+        return {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "unknown",
+            "error": f"blast-radius ledger query failed: {exc}",
+        }
     return {
         "entity_type": entity_type,
         "entity_id": entity_id,
-        "status": fold_blast_radius_state(cat_dir, entity_type, entity_id),
+        "status": status,
     }
 
 

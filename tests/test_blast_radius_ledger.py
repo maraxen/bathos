@@ -287,10 +287,12 @@ def test_append_ledger_record_flag_on_emits_event_only(catalog_dir, monkeypatch)
     )
     append_ledger_record(record, catalog_dir, cwd=catalog_dir.parent)
 
-    # No legacy fragment, no legacy warm row.
+    # No legacy fragment, no legacy warm bathos.db; in log mode, emit_or_legacy
+    # ingests into index.db and fold_blast_radius_state reads index.db (#3563).
     frag = catalog_dir / "blast_radius" / f"blast_radius_{record.id}.parquet"
     assert not frag.exists()
-    assert fold_blast_radius_state(catalog_dir, "run", "run-flagon") == "clean"
+    assert not (catalog_dir / "bathos.db").exists()
+    assert fold_blast_radius_state(catalog_dir, "run", "run-flagon") == "affected"
 
     lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
     recorded = [line for line in lines if line["kind"] == "blast_radius.recorded"]
@@ -299,3 +301,112 @@ def test_append_ledger_record_flag_on_emits_event_only(catalog_dir, monkeypatch)
     assert recorded[0]["data"]["entity_id"] == "run-flagon"
     assert recorded[0]["data"]["to_state"] == "affected"
     reset_writers_for_test()
+
+
+class TestTechDebt3563UnverifiableAndDbErrors:
+    """Regression tests for tech_debt #3563: unverifiable rows and DuckDB errors
+    must never silently collapse to 'clean'."""
+
+    def test_unverifiable_rows_reported_across_legacy_log_mode_and_fragments(
+        self, catalog_dir, monkeypatch
+    ):
+        import duckdb
+
+        from bathos.blast_radius import (
+            fold_blast_radius_state_using_conn,
+            write_ledger_fragment,
+        )
+        from bathos.index import init_index_schema
+
+        # 1. Warm legacy bathos.db row with to_state="unverifiable"
+        append_ledger_record(
+            BlastRadiusRecord(
+                entity_type="campaign",
+                entity_id="camp-unv-legacy",
+                to_state="unverifiable",
+                reason="dirty member run",
+            ),
+            catalog_dir,
+        )
+        assert fold_blast_radius_state(catalog_dir, "campaign", "camp-unv-legacy") == "unverifiable"
+        ro = duckdb.connect(str(catalog_dir / "bathos.db"), read_only=True)
+        try:
+            assert (
+                fold_blast_radius_state_using_conn(ro, "campaign", "camp-unv-legacy")
+                == "unverifiable"
+            )
+        finally:
+            ro.close()
+
+        # 2. Cool-tier fragment only (when bathos.db is absent or lacks the table)
+        frag_cat = catalog_dir.parent / "frag_only_cat"
+        frag_cat.mkdir()
+        write_ledger_fragment(
+            BlastRadiusRecord(
+                entity_type="run",
+                entity_id="run-unv-frag",
+                to_state="unverifiable",
+                reason="missing lock hash",
+            ),
+            frag_cat,
+        )
+        assert fold_blast_radius_state(frag_cat, "run", "run-unv-frag") == "unverifiable"
+
+        # 3. Log mode (cutover.json + index.db): must read index.db, not an empty bathos.db
+        log_cat = catalog_dir.parent / "log_cat"
+        log_cat.mkdir()
+        (log_cat / "cutover.json").write_text('{"mode": "log"}\n')
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(log_cat))
+        idx_con = duckdb.connect(str(log_cat / "index.db"))
+        try:
+            init_index_schema(idx_con)
+            idx_con.execute(
+                "INSERT INTO blast_radius_ledger "
+                "(id, entity_type, entity_id, from_state, to_state, amended_at) "
+                "VALUES ('rec-1', 'campaign', 'camp-unv-log', 'clean', 'unverifiable', "
+                "'2026-11-01T00:00:00+00:00')"
+            )
+        finally:
+            idx_con.close()
+
+        assert fold_blast_radius_state(log_cat, "campaign", "camp-unv-log") == "unverifiable"
+
+    def test_duckdb_errors_do_not_silently_return_clean(self, catalog_dir):
+        import duckdb
+
+        from bathos.blast_radius import (
+            fold_blast_radius_state_using_conn,
+            latest_ledger_record_using_conn,
+        )
+
+        # Missing table genuinely means no ledger records exist yet -> None / "clean"
+        empty_mem = duckdb.connect(":memory:")
+        try:
+            assert latest_ledger_record_using_conn(empty_mem, "run", "r1") is None
+            assert fold_blast_radius_state_using_conn(empty_mem, "run", "r1") == "clean"
+        finally:
+            empty_mem.close()
+
+        # Closed connection raises duckdb.Error instead of silently folding to "clean"
+        closed_con = duckdb.connect(":memory:")
+        closed_con.close()
+        with pytest.raises(duckdb.Error):
+            latest_ledger_record_using_conn(closed_con, "run", "r1")
+        with pytest.raises(duckdb.Error):
+            fold_blast_radius_state_using_conn(closed_con, "run", "r1")
+
+        # Broken/unexpected schema on blast_radius_ledger raises instead of returning "clean"
+        bad_schema_con = duckdb.connect(":memory:")
+        try:
+            bad_schema_con.execute("CREATE TABLE blast_radius_ledger (bogus INT)")
+            with pytest.raises(duckdb.Error):
+                fold_blast_radius_state_using_conn(bad_schema_con, "run", "r1")
+        finally:
+            bad_schema_con.close()
+
+        # Corrupt bathos.db raises duckdb.Error instead of returning "clean"
+        corrupt_cat = catalog_dir.parent / "corrupt_cat"
+        corrupt_cat.mkdir()
+        (corrupt_cat / "bathos.db").write_bytes(b"not a valid duckdb database")
+        with pytest.raises(duckdb.Error):
+            fold_blast_radius_state(corrupt_cat, "run", "r1")

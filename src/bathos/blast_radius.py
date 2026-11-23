@@ -375,14 +375,72 @@ def _fetch_latest_record(con, entity_type: str, entity_id: str) -> BlastRadiusRe
     return _row_to_record(columns, row)
 
 
+def _is_missing_ledger_table(exc: BaseException) -> bool:
+    """True only when DuckDB reports that `blast_radius_ledger` does not exist.
+
+    Mirrors `bathos.query._is_missing_runs_table` (debt #2812): other
+    `duckdb.Error`s (corrupt DB, closed connection, IO/lock failure, bad schema)
+    must surface rather than silently returning "no record" -> "clean" (#3563).
+    """
+    msg = str(exc)
+    return (
+        isinstance(exc, duckdb.CatalogException)
+        and bool(re.search(r"\bblast_radius_ledger\b", msg, re.IGNORECASE))
+        and "does not exist" in msg.lower()
+    )
+
+
+def _latest_record_from_fragments(
+    catalog_dir: Path | str, entity_type: str, entity_id: str
+) -> BlastRadiusRecord | None:
+    """Latest-by-`amended_at` ledger record from cool-tier Parquet fragments."""
+    matching = [
+        r
+        for r in read_ledger_fragments(catalog_dir)
+        if r.entity_type == entity_type and r.entity_id == entity_id
+    ]
+    if not matching:
+        return None
+    return max(matching, key=lambda r: (r.amended_at, r.id))
+
+
 def latest_ledger_record(
     catalog_dir: Path | str, entity_type: str, entity_id: str
 ) -> BlastRadiusRecord | None:
     """Return the latest-by-`amended_at` ledger record for `(entity_type, entity_id)`,
     or `None` if no record exists."""
-    con = _connect(catalog_dir)
+    from bathos.runlog.mode import is_log_mode
+
+    cat = Path(catalog_dir)
+    if is_log_mode(cat):
+        con = connect_read(cat, read_only=True)
+        try:
+            return _fetch_latest_record(con, entity_type, entity_id)
+        except duckdb.Error as exc:
+            if _is_missing_ledger_table(exc):
+                return None
+            raise
+        finally:
+            con.close()
+
+    db_path = cat / "bathos.db"
+    if not db_path.exists():
+        return _latest_record_from_fragments(cat, entity_type, entity_id)
+
+    try:
+        con = connect_read(cat, read_only=True)
+    except duckdb.ConnectionException as exc:
+        # Same-process caller already holds bathos.db open read-write;
+        # DuckDB forbids mixing read_only configs on the same file.
+        if "different configuration" not in str(exc).lower():
+            raise
+        con = duckdb.connect(str(db_path), read_only=False)
     try:
         return _fetch_latest_record(con, entity_type, entity_id)
+    except duckdb.Error as exc:
+        if _is_missing_ledger_table(exc):
+            return _latest_record_from_fragments(cat, entity_type, entity_id)
+        raise
     finally:
         con.close()
 
@@ -397,15 +455,16 @@ def latest_ledger_record_using_conn(
     `bathos.db` (e.g. `campaigns.review_campaign`, opened read-only by the CLI/
     MCP `campaign review` path) MUST use this instead of `latest_ledger_record`,
     which would crash with `duckdb.ConnectionException` in that situation
-    (confirmed via direct reproduction). Best-effort: a read-only connection
-    can't run this module's own migration ALTERs, so a pre-migration table
-    (missing `matched_clauses`/`shadow_verdict`) or a missing ledger table
-    entirely is treated as "no record" rather than raised.
+    (confirmed via direct reproduction). Best-effort only for a missing
+    `blast_radius_ledger` table; any other `duckdb.Error` propagates instead of
+    silently folding to `"clean"` (#3563).
     """
     try:
         return _fetch_latest_record(con, entity_type, entity_id)
-    except duckdb.Error:
-        return None
+    except duckdb.Error as exc:
+        if _is_missing_ledger_table(exc):
+            return None
+        raise
 
 
 def fold_blast_radius_state(catalog_dir: Path | str, entity_type: str, entity_id: str) -> str:
@@ -417,14 +476,18 @@ def fold_blast_radius_state(catalog_dir: Path | str, entity_type: str, entity_id
     ratchet, so a plain default string is the right shape for callers).
     """
     latest = latest_ledger_record(catalog_dir, entity_type, entity_id)
-    return latest.to_state if latest is not None else "clean"
+    if latest is None:
+        return "clean"
+    return latest.to_state or "unverifiable"
 
 
 def fold_blast_radius_state_using_conn(con, entity_type: str, entity_id: str) -> str:
     """Like `fold_blast_radius_state`, but via `latest_ledger_record_using_conn` --
     see that function's docstring for why this exists."""
     latest = latest_ledger_record_using_conn(con, entity_type, entity_id)
-    return latest.to_state if latest is not None else "clean"
+    if latest is None:
+        return "clean"
+    return latest.to_state or "unverifiable"
 
 
 def _fold_state_using_conn(con: duckdb.DuckDBPyConnection, entity_type: str, entity_id: str) -> str:
@@ -440,7 +503,9 @@ def _fold_state_using_conn(con: duckdb.DuckDBPyConnection, entity_type: str, ent
     `flag_blast_radius` to reuse one connection across a batch -- debt #1475).
     """
     latest = _fetch_latest_record(con, entity_type, entity_id)
-    return latest.to_state if latest is not None else "clean"
+    if latest is None:
+        return "clean"
+    return latest.to_state or "unverifiable"
 
 
 @dataclass(frozen=True)

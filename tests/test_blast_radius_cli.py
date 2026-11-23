@@ -173,3 +173,31 @@ class TestBlastRadiusHookCmds:
         monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
         result = runner.invoke(app, ["blast-radius", "shadow-check", first_sha])
         assert result.exit_code == 0, result.output
+
+
+def test_query_blast_status_reports_unverifiable_and_fails_on_db_error(
+    catalog_dir, tmp_path, monkeypatch
+):
+    from bathos.blast_radius import BlastRadiusRecord, append_ledger_record
+
+    append_ledger_record(
+        BlastRadiusRecord(
+            entity_type="run",
+            entity_id="run-unv-cli",
+            to_state="unverifiable",
+            reason="UNKNOWN_CODE",
+        ),
+        catalog_dir,
+    )
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+    ok_res = runner.invoke(app, ["query", "blast-status", "run", "run-unv-cli"])
+    assert ok_res.exit_code == 0, ok_res.output
+    assert json.loads(ok_res.output)["status"] == "unverifiable"
+
+    corrupt_cat = tmp_path / "corrupt_cli_cat"
+    corrupt_cat.mkdir()
+    (corrupt_cat / "bathos.db").write_bytes(b"corrupt db bytes")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(corrupt_cat))
+    err_res = runner.invoke(app, ["query", "blast-status", "run", "run-unv-cli"])
+    assert err_res.exit_code != 0
+    assert "clean" not in err_res.output.lower()
