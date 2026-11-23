@@ -18,6 +18,7 @@ from pathlib import Path
 
 import duckdb
 
+from bathos.campaigns import create_campaign
 from bathos.catalog import init_catalog, write_run
 from bathos.claim import parse_claim, run_union_gate, validate_claim
 from bathos.compact import compact
@@ -58,12 +59,23 @@ hypothesis_ids = ["H_primary", "H_null"]
 """
 
 
+def _create_test_campaign(catalog_dir: Path, name: str) -> str:
+    """Initialize catalog warm DB and register a campaign row (#3051)."""
+    init_catalog(catalog_dir)
+    compact(catalog_dir)
+    db = duckdb.connect(str(catalog_dir / "bathos.db"))
+    try:
+        camp = create_campaign(db, name=name, project_slug="testproj", mode="exploration")
+        return camp.id
+    finally:
+        db.close()
+
+
 def test_union_gate_reads_claim_discriminates_after_compact(
     tmp_catalog: Path, sample_run: Run, tmp_path: Path
 ):
     """Union Gate must see claim_discriminates after cool→warm compact (B1 fix regression)."""
-    init_catalog(tmp_catalog)
-    campaign_id = "camp-2276-union-gate-test"
+    campaign_id = _create_test_campaign(tmp_catalog, "camp-2276-union-gate-test")
 
     run = dataclasses.replace(
         sample_run,
@@ -98,8 +110,7 @@ def test_union_gate_confounded_when_discriminates_null_after_compact(
     tmp_catalog: Path, sample_run: Run, tmp_path: Path
 ):
     """Document pre-B1 failure mode: NULL claim_discriminates → Union Gate confounded."""
-    init_catalog(tmp_catalog)
-    campaign_id = "camp-2276-null-discriminates"
+    campaign_id = _create_test_campaign(tmp_catalog, "camp-2276-null-discriminates")
 
     run = dataclasses.replace(
         sample_run,
