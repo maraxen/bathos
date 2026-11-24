@@ -93,6 +93,55 @@ class ReapStats:
     skipped_count: int
 
 
+def _query_slurm_job_details(job_id: str) -> tuple[str | None, str | None, str | None]:
+    """Query SLURM job state and exit code using sacct -X.
+
+    Args:
+        job_id: SLURM job ID
+
+    Returns:
+        Tuple of (state, exit_code, error_or_none) where:
+        - state is the job state (e.g., "RUNNING", "COMPLETED") or None if not found
+        - exit_code is the sacct ExitCode string (e.g., "0:15") if available, else None
+        - error_or_none is None if successful, or an error type if the query failed
+    """
+    try:
+        result = subprocess.run(
+            [
+                "sacct",
+                "-X",
+                "-j",
+                job_id,
+                "--format=State,ExitCode",
+                "--parsable2",
+                "--noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            # Non-zero exit = error
+            return None, None, "sacct_error"
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            # Empty output = no record found
+            return None, None, "sacct_no_record"
+        first = lines[0]
+        if "|" in first:
+            parts = [p.strip() for p in first.split("|")]
+            state = parts[0]
+            exit_code = parts[1] if len(parts) > 1 and parts[1] else None
+        else:
+            state = first
+            exit_code = None
+        if not state:
+            return None, None, "sacct_no_record"
+        return state, exit_code, None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None, None, "sacct_error"
+
+
 def _query_slurm_job(job_id: str) -> tuple[str | None, str | None]:
     """Query SLURM job state using sacct -X.
 
@@ -104,23 +153,18 @@ def _query_slurm_job(job_id: str) -> tuple[str | None, str | None]:
         - state is the job state (e.g., "RUNNING", "COMPLETED") or None if not found
         - error_or_none is None if successful, or an error type if the query failed
     """
-    try:
-        result = subprocess.run(
-            ["sacct", "-X", "-j", job_id, "--format=State", "--noheader"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            # Non-zero exit = error
-            return None, "sacct_error"
-        state = result.stdout.strip()
-        if not state:
-            # Empty output = no record found
-            return None, "sacct_no_record"
-        return state, None
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None, "sacct_error"
+    state, _exit_code, error = _query_slurm_job_details(job_id)
+    return state, error
+
+
+_ORIG_QUERY_SLURM_JOB = _query_slurm_job
+
+
+def _format_sacct_reason(state: str, exit_code: str | None) -> str:
+    """Format a sacct terminal state (and optional ExitCode) as a reap reason."""
+    if exit_code:
+        return f"sacct:{state} (exit={exit_code})"
+    return f"sacct:{state}"
 
 
 def _is_live_process_on_host(hostname: str, argv: list[str]) -> bool:
@@ -168,6 +212,7 @@ def reap_runs(
     *,
     cwd: Path | None = None,
     reconcile_warm: bool = True,
+    slurm_only: bool = False,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
     """Reap orphaned runs by marking them abandoned.
 
@@ -190,6 +235,8 @@ def reap_runs(
             every existing caller); `bth migrate --to-log` step 1 is the only
             caller passing `False`. Has no effect when the flag is on: the
             flag-on path never touches the warm tier at all.
+        slurm_only: If True, only treat SLURM runs whose `sacct` query confirms
+            a terminal state as reap candidates (safe mode for auto-reaping).
 
     Returns:
         (candidates_list, skipped_list) where skipped_list has (run, skip_reason) tuples
@@ -219,6 +266,7 @@ def reap_runs(
             revert_ids=revert_ids,
             cwd=cwd,
             reconcile_warm=reconcile_warm,
+            slurm_only=slurm_only,
         )
 
 
@@ -264,6 +312,68 @@ def _ledger_from_folded_runs(all_runs: list[Run]) -> dict[str, dict]:
     return ledger
 
 
+def _classify_reap_candidates(
+    all_runs: list[Run],
+    *,
+    now: datetime,
+    older_than_h: float,
+    slurm_only: bool = False,
+) -> tuple[list[Run], list[tuple[Run, str]], dict[str, str], dict[str, tuple[str, str | None]]]:
+    """Classify running runs into reap candidates vs skipped, capturing sacct exit reasons."""
+    cutoff_time = now - timedelta(hours=older_than_h)
+    candidates: list[Run] = []
+    skipped: list[tuple[Run, str]] = []
+    candidate_reasons: dict[str, str] = {}
+    candidate_sacct: dict[str, tuple[str, str | None]] = {}
+
+    for run in all_runs:
+        if run.status != "running":
+            skipped.append((run, "not_running"))
+            continue
+
+        if run.timestamp >= cutoff_time:
+            skipped.append((run, "too_recent"))
+            continue
+
+        if run.slurm_job_id:
+            if _query_slurm_job is _ORIG_QUERY_SLURM_JOB:
+                state, slurm_exit_code, error = _query_slurm_job_details(run.slurm_job_id)
+            else:
+                state, error = _query_slurm_job(run.slurm_job_id)
+                slurm_exit_code = None
+
+            if error:
+                if error == "sacct_error":
+                    skipped.append((run, "sacct_error"))
+                elif error == "sacct_no_record":
+                    if slurm_only:
+                        skipped.append((run, "auto_reap_requires_sacct_terminal"))
+                    else:
+                        age_hours = (now - run.timestamp).total_seconds() / 3600
+                        if age_hours >= SACCT_NO_RECORD_REAP_H:
+                            candidates.append(run)
+                            candidate_reasons[run.id] = "sacct_no_record"
+                        else:
+                            skipped.append((run, "sacct_no_record"))
+            elif state in ("RUNNING", "PENDING", "CONFIGURING", "RESIZING"):
+                skipped.append((run, "slurm_nonterminal"))
+            else:
+                assert state is not None
+                candidates.append(run)
+                candidate_reasons[run.id] = _format_sacct_reason(state, slurm_exit_code)
+                candidate_sacct[run.id] = (state, slurm_exit_code)
+        else:
+            if slurm_only:
+                skipped.append((run, "auto_reap_requires_sacct_terminal"))
+            elif _is_live_process_on_host(run.hostname, run.argv):
+                skipped.append((run, "same_host_live_process"))
+            else:
+                candidates.append(run)
+                candidate_reasons[run.id] = "orphan_window_exceeded"
+
+    return candidates, skipped, candidate_reasons, candidate_sacct
+
+
 def _reap_runs_impl(
     catalog_dir: Path,
     *,
@@ -273,6 +383,7 @@ def _reap_runs_impl(
     revert_ids: list[str] | None,
     cwd: Path | None,
     reconcile_warm: bool = True,
+    slurm_only: bool = False,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
     flag_on = current_mode()
 
@@ -284,85 +395,52 @@ def _reap_runs_impl(
         ledger = read_reap_ledger(catalog_dir) if revert else {}
 
     now = datetime.now(UTC)
-    cutoff_time = now - timedelta(hours=older_than_h)
+    candidates: list[Run] = []
+    skipped: list[tuple[Run, str]] = []
+    candidate_reasons: dict[str, str] = {}
+    candidate_sacct: dict[str, tuple[str, str | None]] = {}
 
-    candidates = []
-    skipped = []
+    if revert:
+        for run in all_runs:
+            if revert_ids and run.id in revert_ids:
+                if run.id not in ledger:
+                    skipped.append((run, "no_ledger_entry"))
+                    continue
 
-    for run in all_runs:
-        # Handle revert case
-        if revert and revert_ids and run.id in revert_ids:
-            if run.id not in ledger:
-                # No ledger entry: cannot revert
-                skipped.append((run, "no_ledger_entry"))
-                continue
+                ledger_record = ledger[run.id]
+                prior_status = ledger_record.get("prior_status")
 
-            ledger_record = ledger[run.id]
-            prior_status = ledger_record.get("prior_status")
+                if prior_status and run.status == "abandoned":
+                    run.status = prior_status
 
-            if prior_status and run.status == "abandoned":
-                run.status = prior_status
+                    if apply:
+                        if flag_on:
+                            # run.reap_reverted (AC-25): the event replaces BOTH the
+                            # write_run status rewrite and the ledger-JSON move.
+                            emit_event(
+                                kind="run.reap_reverted",
+                                entity=[run.id],
+                                data=ledger_record,
+                                cwd=cwd,
+                            )
+                        else:
+                            write_run(run, catalog_dir)
+                            ledger_dir = catalog_dir / "reaped" / run.project_slug
+                            ledger_path = ledger_dir / f"{run.id}.json"
+                            reverted_dir = ledger_dir / "reverted"
+                            reverted_dir.mkdir(parents=True, exist_ok=True)
+                            ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+                            reverted_path = reverted_dir / f"{run.id}.{ts}.json"
+                            os.replace(ledger_path, reverted_path)
 
-                if apply:
-                    if flag_on:
-                        # run.reap_reverted (AC-25): the event replaces BOTH the
-                        # write_run status rewrite and the ledger-JSON move.
-                        emit_event(
-                            kind="run.reap_reverted",
-                            entity=[run.id],
-                            data=ledger_record,
-                            cwd=cwd,
-                        )
-                    else:
-                        write_run(run, catalog_dir)
-                        # Move ledger to reverted/
-                        ledger_dir = catalog_dir / "reaped" / run.project_slug
-                        ledger_path = ledger_dir / f"{run.id}.json"
-                        reverted_dir = ledger_dir / "reverted"
-                        reverted_dir.mkdir(parents=True, exist_ok=True)
-                        ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-                        reverted_path = reverted_dir / f"{run.id}.{ts}.json"
-                        os.replace(ledger_path, reverted_path)
-
-                candidates.append(run)
-            continue
-
-        # Skip non-running
-        if run.status != "running":
-            skipped.append((run, "not_running"))
-            continue
-
-        # Check age
-        if run.timestamp >= cutoff_time:
-            skipped.append((run, "too_recent"))
-            continue
-
-        # Check SLURM liveness if job ID present
-        if run.slurm_job_id:
-            state, error = _query_slurm_job(run.slurm_job_id)
-            if error:
-                # Error or no record
-                if error == "sacct_error":
-                    skipped.append((run, "sacct_error"))
-                elif error == "sacct_no_record":
-                    age_hours = (now - run.timestamp).total_seconds() / 3600
-                    if age_hours >= SACCT_NO_RECORD_REAP_H:
-                        # Old enough to reap
-                        candidates.append(run)
-                    else:
-                        skipped.append((run, "sacct_no_record"))
-            elif state in ("RUNNING", "PENDING", "CONFIGURING", "RESIZING"):
-                # Non-terminal
-                skipped.append((run, "slurm_nonterminal"))
-            else:
-                # Terminal state: COMPLETED, FAILED, CANCELLED*, TIMEOUT, etc.
-                candidates.append(run)
-        else:
-            # No SLURM job, check for live process
-            if _is_live_process_on_host(run.hostname, run.argv):
-                skipped.append((run, "same_host_live_process"))
-            else:
-                candidates.append(run)
+                    candidates.append(run)
+    else:
+        candidates, skipped, candidate_reasons, candidate_sacct = _classify_reap_candidates(
+            all_runs,
+            now=now,
+            older_than_h=older_than_h,
+            slurm_only=slurm_only,
+        )
 
     # Apply reaping if requested
     if apply:
@@ -372,34 +450,16 @@ def _reap_runs_impl(
             if not flag_on and reconcile_warm:
                 reconcile_warm_tier(catalog_dir)
         else:
-            # Reap path: write reaped runs with ledger entries
-            # Track which runs were reaped via sacct_no_record
-            sacct_no_record_runs = set()
-
-            # First pass: identify sacct_no_record runs
-            for run in all_runs:
-                if run.id not in [c.id for c in candidates]:
-                    continue
-                if run.slurm_job_id:
-                    state, error = _query_slurm_job(run.slurm_job_id)
-                    if error == "sacct_no_record":
-                        age_hours = (now - run.timestamp).total_seconds() / 3600
-                        if age_hours >= SACCT_NO_RECORD_REAP_H:
-                            sacct_no_record_runs.add(run.id)
-
             # Write reaped runs and ledger entries
             for run in candidates:
-                # Determine reason
-                reason = "orphan_window_exceeded"
-                if run.id in sacct_no_record_runs:
-                    reason = "sacct_no_record"
+                reason = candidate_reasons.get(run.id, "orphan_window_exceeded")
 
                 # Mark as abandoned
                 run.status = "abandoned"
 
                 reaped_at = datetime.now(UTC).isoformat()
 
-                ledger_record = {
+                ledger_record: dict = {
                     "run_id": run.id,
                     "project_slug": run.project_slug,
                     "reaped_at": reaped_at,
@@ -407,6 +467,11 @@ def _reap_runs_impl(
                     "window_h": older_than_h,
                     "prior_status": "running",
                 }
+                if run.id in candidate_sacct:
+                    sacct_state, sacct_exit_code = candidate_sacct[run.id]
+                    ledger_record["sacct_state"] = sacct_state
+                    if sacct_exit_code is not None:
+                        ledger_record["sacct_exit_code"] = sacct_exit_code
 
                 if flag_on:
                     # run.reaped (AC-25): replaces the write_run status rewrite,
@@ -425,6 +490,74 @@ def _reap_runs_impl(
                 reconcile_warm_tier(catalog_dir)
 
     return candidates, skipped
+
+
+def find_stale_running_runs(
+    catalog_dir: Path,
+    *,
+    older_than_h: float = 24,
+    slurm_only: bool = False,
+) -> list[dict]:
+    """Read-only helper returning stale `status='running'` runs eligible for reaping.
+
+    Includes SLURM `sacct` state/exit-code details when `slurm_job_id` is present
+    (#2238). Never mutates fragments, ledger files, or event logs.
+    """
+    from bathos.runlog.mode import is_log_mode
+
+    all_runs = (
+        _read_all_runs_from_index(catalog_dir)
+        if is_log_mode(catalog_dir)
+        else read_runs(catalog_dir)
+    )
+    now = datetime.now(UTC)
+    candidates, _skipped, candidate_reasons, candidate_sacct = _classify_reap_candidates(
+        all_runs,
+        now=now,
+        older_than_h=older_than_h,
+        slurm_only=slurm_only,
+    )
+    results: list[dict] = []
+    for run in candidates:
+        sacct_state, sacct_exit_code = candidate_sacct.get(run.id, (None, None))
+        results.append(
+            {
+                "run_id": run.id,
+                "project_slug": run.project_slug,
+                "slurm_job_id": run.slurm_job_id,
+                "age_hours": (now - run.timestamp).total_seconds() / 3600,
+                "reason": candidate_reasons.get(run.id, "orphan_window_exceeded"),
+                "sacct_state": sacct_state,
+                "sacct_exit_code": sacct_exit_code,
+            }
+        )
+    return results
+
+
+def auto_reap_stale_runs(
+    catalog_dir: Path,
+    *,
+    older_than_h: float = 24,
+    apply: bool = False,
+    slurm_only: bool = True,
+    cwd: Path | None = None,
+    reconcile_warm: bool = True,
+) -> tuple[list[Run], list[tuple[Run, str]]]:
+    """Safe opt-in auto-reap entry point (#2238).
+
+    Defaults to `apply=False` (dry-run) and `slurm_only=True` so automated
+    callers only reap runs whose SLURM job is confirmed terminal by `sacct`
+    (never `sacct_error`, `sacct_no_record`, or unverified remote-host runs).
+    """
+    return reap_runs(
+        catalog_dir,
+        older_than_h=older_than_h,
+        dry_run=not apply,
+        apply=apply,
+        cwd=cwd,
+        reconcile_warm=reconcile_warm,
+        slurm_only=slurm_only,
+    )
 
 
 def reconcile_warm_tier(catalog_dir: Path) -> None:

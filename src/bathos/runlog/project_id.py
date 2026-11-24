@@ -9,6 +9,7 @@ only reads the id off the resolved main root.
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import tempfile
 import uuid
@@ -20,6 +21,8 @@ from pathlib import Path
 import tomlkit
 
 from .mode import RunLogError
+
+logger = logging.getLogger(__name__)
 
 
 def projects_registry() -> Path:
@@ -166,7 +169,16 @@ def _registry_lock() -> Iterator[None]:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-_registered_this_process: set[str] = set()
+_registered_this_process: dict[str, tuple[str, tuple[int, int, int, int] | None]] = {}
+
+
+def _registry_stat_sig() -> tuple[int, int, int, int] | None:
+    path = projects_registry()
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return None
 
 
 def register_main_root(main_root: Path) -> bool:
@@ -180,9 +192,13 @@ def register_main_root(main_root: Path) -> bool:
     """
     main_root = main_root.resolve()
     key = str(main_root)
+    pid = read_project_id(main_root / ".bth.toml")
     # Keyed on the registry path too, so a redirected HOME is a different cache entry.
+    # Also keyed on the current `.bth.toml` id and registry stat signature so a stale
+    # id update in either file is never short-circuited in-process (#3508).
     cache_key = f"{projects_registry()}::{key}"
-    if cache_key in _registered_this_process:
+    stat_sig = _registry_stat_sig()
+    if pid is not None and stat_sig is not None and _registered_this_process.get(cache_key) == (pid, stat_sig):
         return False
     with _registry_lock():
         doc = _load_registry()
@@ -193,13 +209,32 @@ def register_main_root(main_root: Path) -> bool:
         pid = read_project_id(main_root / ".bth.toml")
         for entry in roots_table:
             if entry.get("root") == key:
+                existing_raw = entry.get("project_id")
+                existing_pid = str(existing_raw) if existing_raw else None
                 # A root registered before it had an id (e.g. by the writer)
-                # picks the id up on a later registration.
-                if pid and not entry.get("project_id"):
+                # picks the id up on a later registration, and a stale
+                # project_id mismatch with `.bth.toml` is refreshed (#3508).
+                if pid and existing_pid != pid:
+                    if existing_pid is not None:
+                        logger.warning(
+                            "Updating stale project_id in %s for %s: %s -> %s",
+                            projects_registry(),
+                            key,
+                            existing_pid,
+                            pid,
+                        )
                     entry["project_id"] = pid
                     _write_registry(doc)
-                if entry.get("project_id"):
-                    _registered_this_process.add(cache_key)
+                elif existing_pid is not None and pid is None:
+                    logger.warning(
+                        "Stale project_id in %s for %s (%s), but %s has no [project] id",
+                        projects_registry(),
+                        key,
+                        existing_pid,
+                        main_root / ".bth.toml",
+                    )
+                if pid and str(entry.get("project_id") or "") == pid:
+                    _registered_this_process[cache_key] = (pid, _registry_stat_sig())
                 return False
         entry = tomlkit.table()
         entry["root"] = key
@@ -210,16 +245,28 @@ def register_main_root(main_root: Path) -> bool:
     # Cache only an entry that carries its id, so a later call after the id
     # is assigned still reaches the fill-in above.
     if pid:
-        _registered_this_process.add(cache_key)
+        _registered_this_process[cache_key] = (pid, _registry_stat_sig())
     return True
 
 
-def list_registered_roots() -> list[Path]:
+def list_registered_entries() -> list[tuple[Path, str | None]]:
+    """Return `(root, project_id)` pairs from `~/.bth/projects.toml`."""
     doc = _load_registry()
     roots_table = doc.get("roots")
     if roots_table is None:
         return []
-    return [Path(entry["root"]) for entry in roots_table if entry.get("root")]
+    out: list[tuple[Path, str | None]] = []
+    for entry in roots_table:
+        root = entry.get("root")
+        if not root:
+            continue
+        pid = entry.get("project_id")
+        out.append((Path(str(root)), str(pid) if pid else None))
+    return out
+
+
+def list_registered_roots() -> list[Path]:
+    return [root for root, _pid in list_registered_entries()]
 
 
 def prune_vanished_roots() -> list[Path]:

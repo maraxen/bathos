@@ -1472,3 +1472,114 @@ def test_compact_index_constraint_error_is_actionable_and_non_destructive(
     finally:
         con.close()
     assert "idx_test_unique_host" in names
+
+
+def test_compact_raises_compaction_locked_error_when_lock_held(
+    tmp_catalog: Path, sample_run: Run
+):
+    """deferred:compaction-race: legacy `compact()` acquires `compact.lock` via
+    `fcntl.flock` and raises `CompactionLockedError` if another process holds it."""
+    import subprocess
+    import sys
+
+    import pytest
+
+    from bathos.compact import CompactionLockedError, compact_lock_path
+
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+    lock_path = compact_lock_path(tmp_catalog)
+
+    holder_code = f"""
+import fcntl, os, sys
+fd = os.open({str(lock_path)!r}, os.O_CREAT | os.O_RDWR, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.write("LOCKED\\n")
+sys.stdout.flush()
+sys.stdin.read()
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", holder_code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        ready = proc.stdout.readline().strip()
+        assert ready == "LOCKED"
+
+        with pytest.raises(CompactionLockedError, match="compact\\.lock"):
+            compact(tmp_catalog, lock_timeout_s=0.1)
+
+        # Must not have created bathos.db while lock was held.
+        assert not (tmp_catalog / "bathos.db").exists()
+    finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        proc.wait(timeout=5)
+
+    # Once the holder releases the lock, compact() succeeds normally.
+    result = compact(tmp_catalog, lock_timeout_s=1.0)
+    assert result.ingested == 1
+    assert (tmp_catalog / "bathos.db").exists()
+
+
+def test_compact_holds_lock_during_warm_db_critical_section(
+    tmp_catalog: Path, sample_run: Run, monkeypatch
+):
+    """Verify `compact()` keeps `compact.lock` exclusively locked through the
+    warm-tier `bathos.db` write critical section (not only `_fragment_count`)."""
+    import fcntl
+    import os
+    import subprocess
+    import sys
+
+    import bathos.compact as compact_mod
+    from bathos.compact import compact_lock_path
+
+    init_catalog(tmp_catalog)
+    write_run(sample_run, tmp_catalog)
+    lock_path = compact_lock_path(tmp_catalog)
+    real_ingest_anchors = compact_mod._ingest_anchor_fragments
+    observed_contended: list[bool] = []
+
+    def _probe_lock_during_warm_write(con, catalog_dir):
+        probe_code = f"""
+import errno, fcntl, os, sys
+fd = os.open({str(lock_path)!r}, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.stdout.write("ACQUIRED\\n")
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as exc:
+        if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+            sys.stdout.write("LOCKED\\n")
+        else:
+            raise
+finally:
+    os.close(fd)
+"""
+        proc = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        observed_contended.append(proc.stdout.strip() == "LOCKED")
+        return real_ingest_anchors(con, catalog_dir)
+
+    monkeypatch.setattr(compact_mod, "_ingest_anchor_fragments", _probe_lock_during_warm_write)
+
+    result = compact(tmp_catalog)
+    assert result.ingested == 1
+    assert observed_contended == [True]
+
+    # After compact() returns, the advisory lock must be released.
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)

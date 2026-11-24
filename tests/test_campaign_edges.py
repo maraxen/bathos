@@ -211,3 +211,192 @@ def test_add_run_edge_flag_on_emits_event_only(warm_db, tmp_catalog: Path, monke
         "type": "run",
     }
     reset_writers_for_test()
+
+
+# ---------------------------------------------------------------------------
+# #2079: MCP tools for campaign_edges and run_edges
+# ---------------------------------------------------------------------------
+
+
+class TestCampaignAndRunEdgeMcpTools:
+    def test_campaign_and_run_edges_mcp_roundtrip_legacy(self, warm_db, tmp_catalog: Path, monkeypatch):
+        import asyncio
+
+        from bathos import mcp_auth
+        from bathos.mcp import (
+            mcp_add_campaign_edge_tool,
+            mcp_add_run_edge_tool,
+            mcp_get_campaign_parents_tool,
+            mcp_get_run_parents_tool,
+        )
+
+        # Close warm_db fixture connection before opening writable connections via MCP tools.
+        warm_db.close()
+        token_file = tmp_catalog.parent / "mcp_token"
+        monkeypatch.setenv("BTH_MCP_TOKEN_PATH", str(token_file))
+        monkeypatch.setattr(mcp_auth, "_stdio_transport", False)
+        token = mcp_auth.get_or_create_token()
+
+        res1 = asyncio.run(
+            mcp_add_campaign_edge_tool(
+                child_campaign_id="c-child",
+                parent_campaign_id="c-parent-b",
+                catalog_dir=str(tmp_catalog),
+                token=token,
+            )
+        )
+        assert res1["ok"] is True
+        res2 = asyncio.run(
+            mcp_add_campaign_edge_tool(
+                child_campaign_id="c-child",
+                parent_campaign_id="c-parent-a",
+                catalog_dir=str(tmp_catalog),
+                token=token,
+            )
+        )
+        assert res2["ok"] is True
+
+        parents = asyncio.run(
+            mcp_get_campaign_parents_tool(campaign_id="c-child", catalog_dir=str(tmp_catalog))
+        )
+        assert parents["ok"] is True
+        assert parents["parents"] == ["c-parent-a", "c-parent-b"]
+        assert parents["count"] == 2
+
+        # Cycle rejection returns structured campaign_error envelope.
+        cycle = asyncio.run(
+            mcp_add_campaign_edge_tool(
+                child_campaign_id="c-parent-a",
+                parent_campaign_id="c-child",
+                catalog_dir=str(tmp_catalog),
+                token=token,
+            )
+        )
+        assert cycle["ok"] is False
+        assert cycle["error_code"] == "campaign_error"
+
+        # Run edges round-trip + cycle rejection.
+        r1 = asyncio.run(
+            mcp_add_run_edge_tool(
+                child_run_id="r-child",
+                parent_run_id="r-parent",
+                catalog_dir=str(tmp_catalog),
+                token=token,
+            )
+        )
+        assert r1["ok"] is True
+        r_parents = asyncio.run(
+            mcp_get_run_parents_tool(run_id="r-child", catalog_dir=str(tmp_catalog))
+        )
+        assert r_parents["ok"] is True
+        assert r_parents["parents"] == ["r-parent"]
+
+        r_cycle = asyncio.run(
+            mcp_add_run_edge_tool(
+                child_run_id="r-parent",
+                parent_run_id="r-child",
+                catalog_dir=str(tmp_catalog),
+                token=token,
+            )
+        )
+        assert r_cycle["ok"] is False
+        assert r_cycle["error_code"] == "campaign_error"
+
+    def test_campaign_and_run_edges_mcp_auth_and_validation(self, warm_db, tmp_catalog: Path, monkeypatch):
+        import asyncio
+
+        from bathos import mcp_auth
+        from bathos.mcp import mcp_add_campaign_edge_tool, mcp_get_campaign_parents_tool
+
+        warm_db.close()
+        token_file = tmp_catalog.parent / "mcp_token"
+        monkeypatch.setenv("BTH_MCP_TOKEN_PATH", str(token_file))
+        monkeypatch.setattr(mcp_auth, "_stdio_transport", False)
+        token = mcp_auth.get_or_create_token()
+
+        unauth = asyncio.run(
+            mcp_add_campaign_edge_tool(
+                child_campaign_id="c1",
+                parent_campaign_id="c2",
+                catalog_dir=str(tmp_catalog),
+            )
+        )
+        assert unauth["ok"] is False
+        assert unauth["error_code"] == "auth_error"
+
+        missing_param = asyncio.run(
+            mcp_add_campaign_edge_tool(
+                child_campaign_id="",
+                parent_campaign_id="c2",
+                catalog_dir=str(tmp_catalog),
+                token=token,
+            )
+        )
+        assert missing_param["ok"] is False
+        assert missing_param["error_code"] == "invalid_param"
+
+        missing_get = asyncio.run(
+            mcp_get_campaign_parents_tool(campaign_id="", catalog_dir=str(tmp_catalog))
+        )
+        assert missing_get["ok"] is False
+        assert missing_get["error_code"] == "invalid_param"
+
+    def test_campaign_and_run_edges_mcp_log_mode_roundtrip(
+        self, tmp_catalog: Path, monkeypatch
+    ):
+        import asyncio
+
+        from bathos import mcp_auth
+        from bathos.mcp import (
+            mcp_add_campaign_edge_tool,
+            mcp_add_run_edge_tool,
+            mcp_get_campaign_parents_tool,
+            mcp_get_run_parents_tool,
+        )
+        from bathos.runlog.mode import cutover_marker_path
+        from bathos.runlog.writer import reset_writers_for_test
+
+        tmp_catalog.mkdir(parents=True, exist_ok=True)
+        cutover_marker_path(tmp_catalog).write_text('{"at":"2026-01-01T00:00:00Z","segments":[]}')
+        monkeypatch.setenv("BTH_LOG_MODE", "1")
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+        token_file = tmp_catalog.parent / "mcp_token"
+        monkeypatch.setenv("BTH_MCP_TOKEN_PATH", str(token_file))
+        monkeypatch.setattr(mcp_auth, "_stdio_transport", False)
+        token = mcp_auth.get_or_create_token()
+
+        proj = tmp_catalog.parent
+        assert asyncio.run(
+            mcp_add_campaign_edge_tool(
+                child_campaign_id="lc-child",
+                parent_campaign_id="lc-parent",
+                catalog_dir=str(tmp_catalog),
+                project_root=str(proj),
+                token=token,
+            )
+        )["ok"] is True
+        assert asyncio.run(
+            mcp_get_campaign_parents_tool(
+                campaign_id="lc-child",
+                catalog_dir=str(tmp_catalog),
+                project_root=str(proj),
+            )
+        )["parents"] == ["lc-parent"]
+
+        assert asyncio.run(
+            mcp_add_run_edge_tool(
+                child_run_id="lr-child",
+                parent_run_id="lr-parent",
+                catalog_dir=str(tmp_catalog),
+                project_root=str(proj),
+                token=token,
+            )
+        )["ok"] is True
+        assert asyncio.run(
+            mcp_get_run_parents_tool(
+                run_id="lr-child",
+                catalog_dir=str(tmp_catalog),
+                project_root=str(proj),
+            )
+        )["parents"] == ["lr-parent"]
+        reset_writers_for_test()

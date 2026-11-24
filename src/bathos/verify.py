@@ -356,6 +356,28 @@ def _duplicate_project_id_findings() -> list[dict]:
     ]
 
 
+def _stale_project_id_findings() -> list[dict]:
+    """#3508: detect stale `project_id` mismatches between `~/.bth/projects.toml`
+    and `<root>/.bth.toml`."""
+    from bathos.runlog.project_id import list_registered_entries, read_project_id
+
+    findings: list[dict] = []
+    for root, registry_pid in list_registered_entries():
+        if not root.exists():
+            continue
+        toml_pid = read_project_id(root / ".bth.toml")
+        if registry_pid != toml_pid:
+            findings.append(
+                {
+                    "type": "stale_project_id",
+                    "root": str(root),
+                    "registry_project_id": registry_pid,
+                    "toml_project_id": toml_pid,
+                }
+            )
+    return findings
+
+
 def _quarantine_findings(catalog_dir: Path) -> list[dict]:
     """AC-24: "a quarantined line" and "an `eid_conflict`" -- every row of
     the folded index's `quarantine` table, split by `reason` (spec Line
@@ -1357,6 +1379,7 @@ def verify_runlog(catalog_dir: Path) -> VerifyResult:
 
     findings: list[dict] = []
     findings.extend(_duplicate_project_id_findings())
+    findings.extend(_stale_project_id_findings())
 
     if is_log_mode(catalog_dir):
         findings.extend(_quarantine_findings(catalog_dir))

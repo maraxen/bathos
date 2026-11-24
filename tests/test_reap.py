@@ -737,3 +737,181 @@ def test_reap_ignores_tmp_fragment_sibling(temp_catalog):
         temp_catalog, older_than_h=24, dry_run=True, apply=False
     )
     assert "tmpreap" not in [c.id for c in candidates]
+
+
+# --- #2238: sacct exit reasons, stale-running helper, safe auto-reap ----------
+
+
+def test_reap_records_sacct_exit_reason_and_code_legacy(temp_catalog, monkeypatch):
+    """#2238: terminal sacct states and ExitCode are recorded in ledger and warm metadata."""
+    from bathos.compact import compact
+    from bathos.query import list_runs
+    from bathos.reap import read_reap_ledger, reap_runs
+
+    run_cancel = create_run("run_cancel", age_hours=25, status="running", slurm_job_id="17295962")
+    run_fail = create_run("run_fail", age_hours=25, status="running", slurm_job_id="17295963")
+    write_run(run_cancel, temp_catalog)
+    write_run(run_fail, temp_catalog)
+    compact(temp_catalog)
+
+    real_run = subprocess.run
+
+    def mock_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "sacct":
+            assert "-X" in cmd
+            if "17295962" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "CANCELLED+|0:15\n", "")
+            if "17295963" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "FAILED|1:0\n", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    candidates, _ = reap_runs(temp_catalog, older_than_h=24, dry_run=False, apply=True)
+    assert {c.id for c in candidates} == {"run_cancel", "run_fail"}
+
+    ledger = read_reap_ledger(temp_catalog)
+    assert ledger["run_cancel"]["reason"] == "sacct:CANCELLED+ (exit=0:15)"
+    assert ledger["run_cancel"]["sacct_state"] == "CANCELLED+"
+    assert ledger["run_cancel"]["sacct_exit_code"] == "0:15"
+    assert ledger["run_fail"]["reason"] == "sacct:FAILED (exit=1:0)"
+    assert ledger["run_fail"]["sacct_state"] == "FAILED"
+    assert ledger["run_fail"]["sacct_exit_code"] == "1:0"
+
+    warm = {r.id: json.loads(r.metadata or "{}") for r in list_runs(temp_catalog)}
+    assert warm["run_cancel"]["reaped"]["reason"] == "sacct:CANCELLED+ (exit=0:15)"
+    assert warm["run_fail"]["reaped"]["reason"] == "sacct:FAILED (exit=1:0)"
+
+
+def test_reap_records_sacct_exit_reason_in_log_mode(temp_catalog, monkeypatch):
+    """#2238: sacct exit reason flows through `run.reaped` into folded `metadata.reaped`."""
+    from bathos.index import connect_read
+    from bathos.reap import reap_runs
+    from bathos.runlog.emit import emit_event, run_event_data
+    from bathos.runlog.ingest import run_ingest
+    from bathos.runlog.mode import cutover_marker_path
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(temp_catalog))
+    cutover_marker_path(temp_catalog).write_text(
+        json.dumps({"at": "2026-01-01T00:00:00Z", "bathos": "test", "attempt": "1", "segments": []})
+    )
+
+    run = create_run("run_timeout_log", age_hours=25, status="running", slurm_job_id="88001")
+    emit_event(
+        kind="run.started",
+        entity=[run.id],
+        data=run_event_data(run),
+        cwd=temp_catalog.parent,
+        hard_fail=True,
+    )
+    run_ingest(temp_catalog)
+
+    def mock_run(cmd, *_args, **_kwargs):
+        if "88001" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "TIMEOUT|0:0\n", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    candidates, _ = reap_runs(
+        temp_catalog, older_than_h=24, dry_run=False, apply=True, cwd=temp_catalog.parent
+    )
+    assert [c.id for c in candidates] == ["run_timeout_log"]
+    run_ingest(temp_catalog)
+
+    con = connect_read(temp_catalog)
+    try:
+        row = con.execute("SELECT status, metadata FROM runs WHERE id = ?", [run.id]).fetchone()
+    finally:
+        con.close()
+    assert row is not None
+    assert row[0] == "abandoned"
+    meta = json.loads(row[1])
+    assert meta["reaped"]["reason"] == "sacct:TIMEOUT (exit=0:0)"
+    reset_writers_for_test()
+
+
+def test_find_stale_running_runs_read_only(temp_catalog, monkeypatch):
+    """#2238: `find_stale_running_runs` reports stale candidates without mutating anything."""
+    from bathos.reap import find_stale_running_runs
+
+    run_dead = create_run("run_dead", age_hours=30, status="running", slurm_job_id="7001")
+    run_live = create_run("run_live", age_hours=30, status="running", slurm_job_id="7002")
+    run_local = create_run("run_local", age_hours=30, status="running")
+    write_run(run_dead, temp_catalog)
+    write_run(run_live, temp_catalog)
+    write_run(run_local, temp_catalog)
+
+    def mock_run(cmd, *_args, **_kwargs):
+        if "7001" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "CANCELLED+|0:15\n", "")
+        if "7002" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "RUNNING|0:0\n", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    all_stale = find_stale_running_runs(temp_catalog, older_than_h=24)
+    by_id = {r["run_id"]: r for r in all_stale}
+    assert set(by_id) == {"run_dead", "run_local"}
+    assert by_id["run_dead"]["sacct_state"] == "CANCELLED+"
+    assert by_id["run_dead"]["sacct_exit_code"] == "0:15"
+    assert by_id["run_dead"]["reason"] == "sacct:CANCELLED+ (exit=0:15)"
+    assert by_id["run_local"]["reason"] == "orphan_window_exceeded"
+
+    slurm_only_stale = find_stale_running_runs(temp_catalog, older_than_h=24, slurm_only=True)
+    assert [r["run_id"] for r in slurm_only_stale] == ["run_dead"]
+    # Read-only check: nothing was abandoned on disk.
+    assert all(r.status == "running" for r in read_runs(temp_catalog))
+
+
+def test_auto_reap_stale_runs_safe_defaults_and_slurm_only(temp_catalog, monkeypatch):
+    """#2238: `auto_reap_stale_runs` defaults to dry-run and `slurm_only=True`,
+    reaping only sacct-confirmed terminal jobs while skipping non-SLURM / unconfirmed runs."""
+    from bathos.reap import ReapError, auto_reap_stale_runs, read_reap_ledger
+
+    run_term = create_run("run_term", age_hours=26, status="running", slurm_job_id="8001")
+    run_no_rec = create_run("run_no_rec", age_hours=400, status="running", slurm_job_id="8002")
+    run_err = create_run("run_err", age_hours=26, status="running", slurm_job_id="8003")
+    run_local = create_run("run_local", age_hours=26, status="running")
+    for r in (run_term, run_no_rec, run_err, run_local):
+        write_run(r, temp_catalog)
+
+    def mock_run(cmd, *_args, **_kwargs):
+        if "8001" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "OUT_OF_MEMORY|0:125\n", "")
+        if "8002" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "8003" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "sacct unavailable")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    # Default apply=False is non-mutating.
+    dry_candidates, dry_skipped = auto_reap_stale_runs(temp_catalog)
+    assert [c.id for c in dry_candidates] == ["run_term"]
+    assert {r.id: reason for r, reason in dry_skipped} == {
+        "run_no_rec": "auto_reap_requires_sacct_terminal",
+        "run_err": "sacct_error",
+        "run_local": "auto_reap_requires_sacct_terminal",
+    }
+    assert not read_reap_ledger(temp_catalog)
+
+    # Floor enforced on apply=True.
+    with pytest.raises(ReapError, match="Floor.*24"):
+        auto_reap_stale_runs(temp_catalog, older_than_h=12, apply=True)
+
+    # apply=True reaps only the sacct-confirmed terminal run.
+    applied, _ = auto_reap_stale_runs(temp_catalog, apply=True)
+    assert [c.id for c in applied] == ["run_term"]
+    by_id = {r.id: r for r in read_runs(temp_catalog)}
+    assert by_id["run_term"].status == "abandoned"
+    assert by_id["run_no_rec"].status == "running"
+    assert by_id["run_err"].status == "running"
+    assert by_id["run_local"].status == "running"
+    ledger = read_reap_ledger(temp_catalog)
+    assert ledger["run_term"]["reason"] == "sacct:OUT_OF_MEMORY (exit=0:125)"

@@ -840,3 +840,26 @@ class TestLintVerifyEnvelope:
         assert result["ok"] is False
         assert "error" not in result or result["error"] is None
         assert result["issues"]
+
+
+def test_get_run_tool_exposes_postmortem_verdict_override(tmp_catalog, sample_run):
+    """Companion to #2224: `get_run_tool` surfaces `postmortem_verdict_override`."""
+    import dataclasses
+
+    from bathos.catalog import write_run
+    from bathos.compact import compact
+
+    write_run(sample_run, tmp_catalog)
+    default_out = get_run_tool(catalog_dir=str(tmp_catalog), run_id=sample_run.id)
+    assert default_out["postmortem_verdict_override"] == "none"
+
+    overridden = dataclasses.replace(
+        sample_run,
+        id="run_pm_override",
+        postmortem_verdict_override="fail",
+        outcome="fail",
+    )
+    write_run(overridden, tmp_catalog)
+    compact(tmp_catalog)
+    out = get_run_tool(catalog_dir=str(tmp_catalog), run_id="run_pm_override")
+    assert out["postmortem_verdict_override"] == "fail"

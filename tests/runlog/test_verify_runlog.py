@@ -615,3 +615,48 @@ def test_clean_fixture_yields_zero_findings(tmp_path: Path):
     assert result.ok is True
     assert result.errors == []
     assert result.stats["findings"] == []
+
+
+# --------------------------------------------------------------------------
+# stale_project_id (#3508)
+# --------------------------------------------------------------------------
+
+
+def test_stale_project_id_mismatch_finding_and_refresh(tmp_path: Path):
+    """#3508: `verify_runlog` reports a mismatch between `~/.bth/projects.toml`
+    and `<root>/.bth.toml`, and re-registering clears it."""
+    repo, pid = setup_project(tmp_path, name="stale_proj")
+    new_pid = "99999999-9999-9999-9999-999999999999"
+    write_bth_toml(repo, slug="stale_proj", project_id=new_pid)
+
+    catalog_dir = tmp_path / "catalog"
+    result = verify_runlog(catalog_dir)
+    assert result.ok is False
+    stale = [f for f in result.stats["findings"] if f["type"] == "stale_project_id"]
+    assert len(stale) == 1
+    assert stale[0] == {
+        "type": "stale_project_id",
+        "root": str(repo.resolve()),
+        "registry_project_id": pid,
+        "toml_project_id": new_pid,
+    }
+    assert any("stale_project_id" in err for err in result.errors)
+
+    # Re-registering syncs projects.toml and resolves the finding.
+    register_main_root(repo)
+    clean = verify_runlog(catalog_dir)
+    assert clean.ok is True
+    assert not any(f["type"] == "stale_project_id" for f in clean.stats["findings"])
+
+
+def test_stale_project_id_missing_in_toml_finding(tmp_path: Path):
+    """#3508 negative control: registry has a project_id but `.bth.toml` lost it."""
+    repo, pid = setup_project(tmp_path, name="lost_id_proj")
+    write_bth_toml(repo, slug="lost_id_proj", project_id=None)
+
+    result = verify_runlog(tmp_path / "catalog")
+    assert result.ok is False
+    stale = [f for f in result.stats["findings"] if f["type"] == "stale_project_id"]
+    assert len(stale) == 1
+    assert stale[0]["registry_project_id"] == pid
+    assert stale[0]["toml_project_id"] is None

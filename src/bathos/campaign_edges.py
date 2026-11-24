@@ -71,6 +71,15 @@ def _would_create_cycle(
     return child_id in _ancestors(db, table, child_col, parent_col, parent_id)
 
 
+def _open_read_db(catalog_dir: Path | None):
+    """Open a read-only catalog connection when a caller omitted `db`."""
+    if catalog_dir is None:
+        raise ValueError("Either db or catalog_dir must be provided")
+    from bathos.index import connect_read
+
+    return connect_read(catalog_dir, read_only=True, missing="empty")
+
+
 def add_campaign_edge(
     db,
     child_campaign_id: str,
@@ -95,21 +104,29 @@ def add_campaign_edge(
     """
     from bathos.runlog.emit import emit_or_legacy, unit_of_work
 
-    if _would_create_cycle(
-        db,
-        "campaign_edges",
-        "child_campaign_id",
-        "parent_campaign_id",
-        child_campaign_id,
-        parent_campaign_id,
-    ):
-        msg = (
-            f"adding edge {child_campaign_id!r} -> {parent_campaign_id!r} would create a "
-            "cycle in the campaign DAG"
-        )
-        raise CycleRejectedError(msg)
+    owns_db = db is None
+    read_db = _open_read_db(catalog_dir) if owns_db else db
+    try:
+        if _would_create_cycle(
+            read_db,
+            "campaign_edges",
+            "child_campaign_id",
+            "parent_campaign_id",
+            child_campaign_id,
+            parent_campaign_id,
+        ):
+            msg = (
+                f"adding edge {child_campaign_id!r} -> {parent_campaign_id!r} would create a "
+                "cycle in the campaign DAG"
+            )
+            raise CycleRejectedError(msg)
+    finally:
+        if owns_db:
+            read_db.close()
 
     def _legacy_write() -> None:
+        if db is None:
+            raise ValueError("Legacy edge insert requires an open writable db connection")
         db.execute(
             "INSERT INTO campaign_edges (child_campaign_id, parent_campaign_id) VALUES (?, ?) "
             "ON CONFLICT DO NOTHING",
@@ -126,15 +143,23 @@ def add_campaign_edge(
         )
 
 
-def get_campaign_parents(db, campaign_id: str) -> list[str]:
+def get_campaign_parents(
+    db, campaign_id: str, catalog_dir: Path | None = None
+) -> list[str]:
     """All recorded parent campaign IDs for `campaign_id`, sorted for a deterministic
     round-trip (insertion order is not preserved by this query)."""
-    rows = db.execute(
-        "SELECT parent_campaign_id FROM campaign_edges WHERE child_campaign_id = ? "
-        "ORDER BY parent_campaign_id",
-        [campaign_id],
-    ).fetchall()
-    return [r[0] for r in rows]
+    owns_db = db is None
+    read_db = _open_read_db(catalog_dir) if owns_db else db
+    try:
+        rows = read_db.execute(
+            "SELECT parent_campaign_id FROM campaign_edges WHERE child_campaign_id = ? "
+            "ORDER BY parent_campaign_id",
+            [campaign_id],
+        ).fetchall()
+        return [r[0] for r in rows]
+    finally:
+        if owns_db:
+            read_db.close()
 
 
 def add_run_edge(
@@ -158,15 +183,23 @@ def add_run_edge(
     """
     from bathos.runlog.emit import emit_or_legacy, unit_of_work
 
-    if _would_create_cycle(
-        db, "run_edges", "child_run_id", "parent_run_id", child_run_id, parent_run_id
-    ):
-        msg = (
-            f"adding edge {child_run_id!r} -> {parent_run_id!r} would create a cycle in the run DAG"
-        )
-        raise CycleRejectedError(msg)
+    owns_db = db is None
+    read_db = _open_read_db(catalog_dir) if owns_db else db
+    try:
+        if _would_create_cycle(
+            read_db, "run_edges", "child_run_id", "parent_run_id", child_run_id, parent_run_id
+        ):
+            msg = (
+                f"adding edge {child_run_id!r} -> {parent_run_id!r} would create a cycle in the run DAG"
+            )
+            raise CycleRejectedError(msg)
+    finally:
+        if owns_db:
+            read_db.close()
 
     def _legacy_write() -> None:
+        if db is None:
+            raise ValueError("Legacy edge insert requires an open writable db connection")
         db.execute(
             "INSERT INTO run_edges (child_run_id, parent_run_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
             [child_run_id, parent_run_id],
@@ -182,13 +215,19 @@ def add_run_edge(
         )
 
 
-def get_run_parents(db, run_id: str) -> list[str]:
+def get_run_parents(db, run_id: str, catalog_dir: Path | None = None) -> list[str]:
     """All recorded parent run IDs for `run_id`, sorted for a deterministic round-trip."""
-    rows = db.execute(
-        "SELECT parent_run_id FROM run_edges WHERE child_run_id = ? ORDER BY parent_run_id",
-        [run_id],
-    ).fetchall()
-    return [r[0] for r in rows]
+    owns_db = db is None
+    read_db = _open_read_db(catalog_dir) if owns_db else db
+    try:
+        rows = read_db.execute(
+            "SELECT parent_run_id FROM run_edges WHERE child_run_id = ? ORDER BY parent_run_id",
+            [run_id],
+        ).fetchall()
+        return [r[0] for r in rows]
+    finally:
+        if owns_db:
+            read_db.close()
 
 
 __all__ = [

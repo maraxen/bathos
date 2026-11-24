@@ -1441,3 +1441,209 @@ class TestBackupWarmAndCampaignRunsReconcile:
         rows = con.execute("SELECT campaign_id, run_id FROM campaign_runs").fetchall()
         con.close()
         assert rows == [(full_cid, "run-prefix")]
+
+
+class TestCampaignEventLogBackfill:
+    """#2213: phantom `campaigns` rows (`mode IS NULL`) backfill from event logs when present."""
+
+    def _setup_log_repo(self, tmp_path: Path):
+        import subprocess
+
+        from bathos.runlog.mode import cutover_marker_path
+        from bathos.runlog.project_id import assign_project_id, read_project_id, register_main_root
+
+        repo = tmp_path / "repo"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t.com"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True)
+        (repo / ".bth.toml").write_text('[project]\nname = "repo"\nslug = "repo"\n')
+        assign_project_id(repo)
+        pid = read_project_id(repo / ".bth.toml")
+        register_main_root(repo)
+
+        catalog = tmp_path / "catalog"
+        catalog.mkdir(parents=True)
+        cutover_marker_path(catalog).write_text(
+            json.dumps({"at": "2026-01-01T00:00:00Z", "bathos": "test", "attempt": "1", "segments": []})
+        )
+        return repo, pid, catalog
+
+    def test_backfills_phantom_campaign_from_uningested_creation_event(self, tmp_path: Path):
+        from bathos.index import connect_read, index_db_path
+        from bathos.runlog.envelope import build_envelope
+        from bathos.runlog.ingest import run_ingest
+        from bathos.verify import verify_runlog
+
+        repo, pid, catalog = self._setup_log_repo(tmp_path)
+        common = {
+            "main_root": repo,
+            "worktree_root": repo,
+            "project": "repo",
+            "project_id": pid,
+            "writer": "w1",
+        }
+        log_dir = repo / ".bth" / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        seg1 = log_dir / "seg1.jsonl"
+        seg1.write_text(
+            json.dumps(
+                build_envelope(
+                    kind="run.started",
+                    entity=["run-1"],
+                    data={
+                        "project_slug": "repo",
+                        "campaign_id": "45babe92",
+                        "timestamp": "2026-01-01T00:01:00Z",
+                    },
+                    seq=1,
+                    ts="2026-01-01T00:01:00Z",
+                    eid="e-run-1",
+                    **common,
+                )
+            )
+            + "\n"
+        )
+        run_ingest(catalog)
+
+        # Simulate historical phantom row (`45babe92`, `mode IS NULL`) + orphan campaign_runs row.
+        con = duckdb.connect(str(index_db_path(catalog)))
+        con.execute("INSERT INTO campaigns (id, mode) VALUES ('45babe92', NULL)")
+        con.execute("INSERT INTO campaign_runs VALUES ('45babe92', 'run-1', NULL, NULL)")
+        con.execute("CHECKPOINT")
+        con.close()
+
+        # Later log segment holds the real `campaign.created` event (not yet ingested).
+        seg2 = log_dir / "seg2.jsonl"
+        seg2.write_text(
+            json.dumps(
+                build_envelope(
+                    kind="campaign.created",
+                    entity=["45babe92"],
+                    data={
+                        "id": "45babe92",
+                        "project_slug": "repo",
+                        "name": "recovered-sweep",
+                        "mode": "exploration",
+                        "status": "open",
+                        "started_at": "2026-01-01T00:00:00Z",
+                    },
+                    seq=2,
+                    ts="2026-01-01T00:00:00Z",
+                    eid="e-camp-45babe92",
+                    **common,
+                )
+            )
+            + "\n"
+        )
+
+        dry_actions, _ = scan(catalog, tier="warm")
+        reconcile = [a for a in dry_actions if a.action == "reconcile_campaign_runs"]
+        assert len(reconcile) == 1
+        assert "backfillable" in reconcile[0].detail
+
+        applied = repair(catalog, tier="warm", dry_run=False)
+        assert any(a.action == "reconcile_campaign_runs" and not a.dry_run for a in applied.actions)
+        assert verify_runlog(catalog).ok is True
+
+        con = connect_read(catalog)
+        try:
+            row = con.execute(
+                "SELECT id, mode, name FROM campaigns WHERE id = '45babe92'"
+            ).fetchone()
+            cr_rows = con.execute(
+                "SELECT campaign_id, run_id FROM campaign_runs WHERE campaign_id = '45babe92'"
+            ).fetchall()
+        finally:
+            con.close()
+        assert row == ("45babe92", "exploration", "recovered-sweep")
+        assert cr_rows == [("45babe92", "run-1")]
+
+    def test_backfills_phantom_campaign_from_downstream_events_and_deletes_unbacked(
+        self, tmp_path: Path
+    ):
+        from bathos.index import connect_read, index_db_path
+        from bathos.runlog.envelope import build_envelope
+        from bathos.runlog.ingest import run_ingest
+        from bathos.verify import verify_runlog
+
+        repo, pid, catalog = self._setup_log_repo(tmp_path)
+        common = {
+            "main_root": repo,
+            "worktree_root": repo,
+            "project": "repo",
+            "project_id": pid,
+            "writer": "w1",
+        }
+        log_dir = repo / ".bth" / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        # Only downstream campaign/run events exist for `45babe92` (no `campaign.created`).
+        (log_dir / "seg1.jsonl").write_text(
+            "".join(
+                json.dumps(env) + "\n"
+                for env in (
+                    build_envelope(
+                        kind="campaign.threshold_set",
+                        entity=["45babe92"],
+                        data={"stopping_threshold": 0.05},
+                        seq=1,
+                        ts="2026-01-01T00:00:30Z",
+                        eid="e-thresh",
+                        **common,
+                    ),
+                    build_envelope(
+                        kind="run.started",
+                        entity=["run-seq"],
+                        data={
+                            "project_slug": "repo",
+                            "campaign_id": "45babe92",
+                            "timestamp": "2026-01-01T00:01:00Z",
+                        },
+                        seq=2,
+                        ts="2026-01-01T00:01:00Z",
+                        eid="e-run-seq",
+                        **common,
+                    ),
+                    build_envelope(
+                        kind="campaign.concluded",
+                        entity=["45babe92"],
+                        data={
+                            "concluded_at": "2026-01-01T00:02:00Z",
+                            "outcome_label": "pass",
+                            "conclusion": "done",
+                        },
+                        seq=3,
+                        ts="2026-01-01T00:02:00Z",
+                        eid="e-concl",
+                        **common,
+                    ),
+                )
+            )
+        )
+        run_ingest(catalog)
+
+        # Plant `45babe92` (backed by downstream events) AND `bogus999` (no events anywhere).
+        con = duckdb.connect(str(index_db_path(catalog)))
+        con.execute("INSERT INTO campaigns (id, mode) VALUES ('45babe92', NULL)")
+        con.execute("INSERT INTO campaign_runs VALUES ('45babe92', 'run-seq', NULL, NULL)")
+        con.execute("INSERT INTO campaigns (id, mode) VALUES ('bogus999', NULL)")
+        con.execute("INSERT INTO campaign_runs VALUES ('bogus999', 'run-bogus', NULL, NULL)")
+        con.execute("CHECKPOINT")
+        con.close()
+
+        applied = repair(catalog, tier="warm", dry_run=False)
+        assert any("backfilled from event logs" in a.detail for a in applied.actions)
+        assert verify_runlog(catalog).ok is True
+
+        con = connect_read(catalog)
+        try:
+            row = con.execute(
+                "SELECT id, mode, status, project_slug FROM campaigns WHERE id = '45babe92'"
+            ).fetchone()
+            bogus = con.execute("SELECT id FROM campaigns WHERE id = 'bogus999'").fetchone()
+            cr_rows = con.execute("SELECT campaign_id, run_id FROM campaign_runs").fetchall()
+        finally:
+            con.close()
+        assert row == ("45babe92", "sequential", "concluded", "repo")
+        assert bogus is None
+        assert cr_rows == [("45babe92", "run-seq")]

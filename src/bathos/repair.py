@@ -111,14 +111,18 @@ def scan(
 
             orphan_findings = _orphaned_campaign_run_findings(catalog_dir)
             if orphan_findings:
+                backfill_cands = _collect_campaign_backfill_candidates(catalog_dir)
+                detail = (
+                    f"Reconcile {len(orphan_findings)} orphaned/prefix-mismatched "
+                    "campaign_runs row(s) in index.db"
+                )
+                if backfill_cands:
+                    detail += f" ({len(backfill_cands)} backfillable from event logs)"
                 actions.append(
                     RepairAction(
                         action="reconcile_campaign_runs",
                         path=str(index_db_path(catalog_dir)),
-                        detail=(
-                            f"Reconcile {len(orphan_findings)} orphaned/prefix-mismatched "
-                            "campaign_runs row(s) in index.db"
-                        ),
+                        detail=detail,
                     )
                 )
         elif warm_result.stats.get("orphaned_campaign_runs", 0) > 0:
@@ -811,6 +815,351 @@ def _handle_backup_warm(
     logger.info(action.detail)
 
 
+_CAMPAIGN_BACKFILL_KINDS = frozenset(
+    {
+        "campaign.created",
+        "campaign.imported",
+        "campaign.concluded",
+        "campaign.claim_bound",
+        "campaign.threshold_set",
+        "campaign.claim_bypassed",
+        "campaign.run_added",
+        "campaign_run.imported",
+        "run.started",
+        "run.imported",
+    }
+)
+_CAMPAIGN_CREATION_KINDS = frozenset({"campaign.created", "campaign.imported"})
+_CAMPAIGN_CREATED_FIELDS = (
+    "id",
+    "project_slug",
+    "name",
+    "mode",
+    "status",
+    "started_at",
+    "question",
+    "hypothesis",
+    "parent_campaign_id",
+    "stopping_threshold",
+    "claim_path",
+    "claim_sha256",
+    "claim_mode",
+    "negative_check",
+)
+
+
+def _match_campaign_event(ev: dict, missing_cids: set[str]) -> str | None:
+    """Return the missing campaign id (or prefix) an event relates to, else None."""
+    kind = ev.get("kind")
+    if kind not in _CAMPAIGN_BACKFILL_KINDS:
+        return None
+    entity = ev.get("entity") or []
+    data = ev.get("data") or {}
+    if not isinstance(data, dict):
+        data = {}
+
+    if kind in ("run.started", "run.imported"):
+        cid = data.get("campaign_id")
+        return cid if isinstance(cid, str) and cid in missing_cids else None
+
+    if not entity or not isinstance(entity[0], str):
+        return None
+    ent_cid = entity[0]
+    if ent_cid in missing_cids:
+        return ent_cid
+    if kind in _CAMPAIGN_CREATION_KINDS:
+        for cid in missing_cids:
+            if len(cid) >= 4 and ent_cid.startswith(cid):
+                return cid
+    return None
+
+
+def _resolve_backfill_cwd(
+    catalog_dir: Path, events: list[dict], project_slug: str
+) -> Path:
+    """Pick a project root for `emit_event` from the matched events or registered roots."""
+    for ev in events:
+        main_root = ev.get("main_root")
+        if main_root:
+            root_path = Path(str(main_root))
+            if root_path.is_dir() and (
+                (root_path / ".bth.toml").is_file() or (root_path / ".git").exists()
+            ):
+                return root_path
+
+    if project_slug and project_slug != "unknown":
+        from bathos.config import load_project_config
+        from bathos.runlog.project_id import list_registered_roots
+
+        for root in list_registered_roots():
+            cfg_path = root / ".bth.toml"
+            if not cfg_path.is_file():
+                continue
+            with contextlib.suppress(Exception):
+                if load_project_config(cfg_path).slug == project_slug:
+                    return root
+
+    return catalog_dir
+
+
+def _collect_campaign_backfill_candidates(catalog_dir: Path) -> list[dict]:
+    """Identify phantom/missing campaigns that have backing events in `events` or raw logs (#2213)."""
+    from bathos.index import index_db_path
+    from bathos.runlog.ingest import discover_roots
+
+    if not index_db_path(catalog_dir).exists():
+        return []
+
+    con = connect_read(catalog_dir)
+    try:
+        valid_cids = {
+            r[0]
+            for r in con.execute("SELECT id FROM campaigns WHERE mode IS NOT NULL").fetchall()
+            if r[0]
+        }
+        phantom_cids = {
+            r[0]
+            for r in con.execute("SELECT id FROM campaigns WHERE mode IS NULL").fetchall()
+            if r[0]
+        }
+        orphan_cr_cids = {
+            r[0]
+            for r in con.execute(
+                "SELECT DISTINCT cr.campaign_id FROM campaign_runs cr "
+                "LEFT JOIN campaigns c ON cr.campaign_id = c.id "
+                "WHERE c.id IS NULL OR c.mode IS NULL"
+            ).fetchall()
+            if r[0]
+        }
+        bad_run_cids = {
+            r[0]
+            for r in con.execute(
+                "SELECT DISTINCT r.campaign_id FROM runs r "
+                "LEFT JOIN campaigns c ON r.campaign_id = c.id "
+                "WHERE COALESCE(r.campaign_id, '') <> '' AND (c.id IS NULL OR c.mode IS NULL)"
+            ).fetchall()
+            if r[0]
+        }
+
+        missing_cids = {
+            cid
+            for cid in (phantom_cids | orphan_cr_cids | bad_run_cids)
+            if not (
+                len(cid) >= 4
+                and len([v for v in valid_cids if v.startswith(cid)]) == 1
+            )
+        }
+        if not missing_cids:
+            return []
+
+        db_eids: set[str] = set()
+        events_by_cid: dict[str, list[dict]] = {cid: [] for cid in missing_cids}
+        placeholders = ", ".join("?" for _ in _CAMPAIGN_BACKFILL_KINDS)
+        rows = con.execute(
+            f"SELECT eid, kind, entity, ts, project, main_root, data FROM events "  # noqa: S608
+            f"WHERE kind IN ({placeholders})",
+            list(_CAMPAIGN_BACKFILL_KINDS),
+        ).fetchall()
+        for eid, kind, raw_entity, ts, project, main_root, raw_data in rows:
+            if eid:
+                db_eids.add(str(eid))
+            entity = json.loads(raw_entity) if isinstance(raw_entity, str) else (raw_entity or [])
+            data = json.loads(raw_data) if isinstance(raw_data, str) else (raw_data or {})
+            ev = {
+                "eid": eid,
+                "kind": kind,
+                "entity": entity,
+                "ts": ts or "",
+                "project": project,
+                "main_root": main_root,
+                "data": data,
+                "source": "db",
+            }
+            matched = _match_campaign_event(ev, missing_cids)
+            if matched is not None:
+                events_by_cid[matched].append(ev)
+    finally:
+        con.close()
+
+    # Also scan raw JSONL event logs on disk (covers un-ingested segments or
+    # events in segments whose watermark already moved past them).
+    seen_eids_per_cid: dict[str, set[str]] = {
+        cid: {ev["eid"] for ev in evs if ev.get("eid")}
+        for cid, evs in events_by_cid.items()
+    }
+    for _root_kind, _root_id, log_dir in discover_roots(catalog_dir):
+        if not log_dir.is_dir():
+            continue
+        for seg in sorted(log_dir.glob("*.jsonl")):
+            try:
+                text = seg.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for raw_line in text.splitlines():
+                if not raw_line.strip():
+                    continue
+                try:
+                    obj = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                matched = _match_campaign_event(obj, missing_cids)
+                if matched is None:
+                    continue
+                eid = obj.get("eid")
+                if eid and eid in seen_eids_per_cid[matched]:
+                    continue
+                if eid:
+                    seen_eids_per_cid[matched].add(eid)
+                events_by_cid[matched].append(
+                    {
+                        "eid": eid,
+                        "kind": obj.get("kind"),
+                        "entity": obj.get("entity") or [],
+                        "ts": obj.get("ts") or "",
+                        "project": obj.get("project"),
+                        "main_root": obj.get("main_root"),
+                        "data": obj.get("data") or {},
+                        "source": "disk",
+                    }
+                )
+
+    candidates: list[dict] = []
+    for cid in sorted(missing_cids):
+        evs = sorted(events_by_cid[cid], key=lambda e: (e.get("ts") or "", str(e.get("eid") or "")))
+        if not evs:
+            continue
+
+        creation_evs = [e for e in evs if e.get("kind") in _CAMPAIGN_CREATION_KINDS]
+        target_cid = cid
+        has_uningested = any(
+            e.get("source") == "disk" and e.get("eid") not in db_eids for e in evs
+        )
+
+        if creation_evs:
+            # Prefer an unambiguous full campaign ID if creation event came from a prefix match.
+            full_ids = {
+                e["entity"][0]
+                for e in creation_evs
+                if e.get("entity") and isinstance(e["entity"][0], str)
+            }
+            if len(full_ids) == 1:
+                only_id = next(iter(full_ids))
+                if only_id not in valid_cids:
+                    target_cid = only_id
+
+            payload: dict = {}
+            for ev in creation_evs:
+                data = ev.get("data") or {}
+                for field_name in _CAMPAIGN_CREATED_FIELDS:
+                    val = data.get(field_name)
+                    if val is not None and val != "":
+                        payload[field_name] = val
+            payload["id"] = target_cid
+        else:
+            payload = {"id": target_cid}
+
+        if not payload.get("mode"):
+            is_seq = any(
+                e.get("kind") == "campaign.threshold_set"
+                or (
+                    e.get("kind") == "campaign_run.imported"
+                    and (e.get("data") or {}).get("evalue") is not None
+                )
+                or (
+                    e.get("kind") in ("run.started", "run.imported")
+                    and isinstance((e.get("data") or {}).get("sidecar"), dict)
+                    and (e.get("data") or {})["sidecar"].get("popper_stopping_threshold")
+                    is not None
+                )
+                for e in evs
+            )
+            is_conf = any(
+                e.get("kind") in ("campaign.claim_bound", "campaign.claim_bypassed")
+                for e in evs
+            )
+            payload["mode"] = "sequential" if is_seq else ("confirmation" if is_conf else "exploration")
+
+        if not payload.get("project_slug"):
+            slug = next(
+                (
+                    (e.get("data") or {}).get("project_slug") or e.get("project")
+                    for e in evs
+                    if (e.get("data") or {}).get("project_slug") or e.get("project")
+                ),
+                None,
+            )
+            payload["project_slug"] = slug or "unknown"
+
+        if not payload.get("name"):
+            name = next(
+                (
+                    (e.get("data") or {}).get("name")
+                    for e in evs
+                    if (e.get("data") or {}).get("name")
+                ),
+                None,
+            )
+            payload["name"] = name or f"backfilled-{target_cid[:8]}"
+
+        if not payload.get("status"):
+            payload["status"] = "open"
+
+        if not payload.get("started_at"):
+            earliest_ts = next((e.get("ts") for e in evs if e.get("ts")), None)
+            payload["started_at"] = earliest_ts or datetime.now(UTC).isoformat()
+
+        candidates.append(
+            {
+                "phantom_cid": cid,
+                "target_cid": target_cid,
+                "payload": payload,
+                "cwd": _resolve_backfill_cwd(catalog_dir, evs, str(payload["project_slug"])),
+                "has_uningested": has_uningested,
+            }
+        )
+
+    return candidates
+
+
+def _backfill_phantom_campaigns_from_logs(catalog_dir: Path) -> int:
+    """Backfill phantom `campaigns` rows (`mode IS NULL`) from event logs when present (#2213)."""
+    from bathos.runlog.emit import emit_event, unit_of_work
+    from bathos.runlog.ingest import run_ingest
+
+    initial = _collect_campaign_backfill_candidates(catalog_dir)
+    if not initial:
+        return 0
+
+    backfilled = 0
+    if any(c["has_uningested"] for c in initial):
+        run_ingest(catalog_dir)
+        remaining = _collect_campaign_backfill_candidates(catalog_dir)
+        resolved_by_ingest = len({c["phantom_cid"] for c in initial}) - len(
+            {c["phantom_cid"] for c in remaining}
+        )
+        if resolved_by_ingest > 0:
+            backfilled += resolved_by_ingest
+    else:
+        remaining = initial
+
+    if remaining:
+        with unit_of_work(catalog_dir):
+            for cand in remaining:
+                emit_event(
+                    kind="campaign.created",
+                    entity=[cand["target_cid"]],
+                    data=cand["payload"],
+                    cwd=cand["cwd"],
+                    hard_fail=True,
+                )
+                backfilled += 1
+        run_ingest(catalog_dir)
+
+    return backfilled
+
+
 def _handle_reconcile_campaign_runs(action: RepairAction, catalog_dir: Path) -> None:
     """Reconcile orphaned and prefix-mismatched `campaign_runs` rows."""
     from bathos.runlog.mode import is_log_mode
@@ -818,9 +1167,11 @@ def _handle_reconcile_campaign_runs(action: RepairAction, catalog_dir: Path) -> 
     if is_log_mode(catalog_dir):
         from bathos.runlog.ingest import reconcile_index_campaign_runs
 
+        backfilled = _backfill_phantom_campaigns_from_logs(catalog_dir)
         counts = reconcile_index_campaign_runs(catalog_dir)
         action.detail = (
-            f"Reconciled index.db campaign_runs: {counts['reassigned']} reassigned, "
+            f"Reconciled index.db campaign_runs: {backfilled} backfilled from event logs, "
+            f"{counts['reassigned']} reassigned, "
             f"{counts['deleted_orphans']} orphan(s) removed, "
             f"{counts['deleted_phantom_campaigns']} phantom campaign(s) removed"
         )

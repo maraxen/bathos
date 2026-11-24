@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import errno
+import fcntl
 import json
 import logging
+import os
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -918,7 +921,57 @@ def _compact_log_mode(catalog_dir: Path, force_rebuild: bool, start_time: float)
     )
 
 
-def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
+def compact_lock_path(catalog_dir: Path) -> Path:
+    """Return the advisory flock file path for legacy warm-tier compaction."""
+    return catalog_dir / "compact.lock"
+
+
+@contextlib.contextmanager
+def _compact_lock(catalog_dir: Path, *, timeout_s: float | None = 30.0) -> Iterator[None]:
+    """Serialize legacy warm-tier compaction across processes via `fcntl.flock`."""
+    lock_path = compact_lock_path(catalog_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        if timeout_s is None:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    break
+                except OSError as exc:
+                    if exc.errno != errno.EINTR:
+                        raise
+        else:
+            deadline = time.monotonic() + max(0.0, timeout_s)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno == errno.EINTR:
+                        continue
+                    if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise CompactionLockedError(
+                            f"compact() could not acquire advisory lock {lock_path} "
+                            f"within {timeout_s:g}s; another compaction is active"
+                        ) from None
+                    time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def compact(
+    catalog_dir: Path,
+    force_rebuild: bool = False,
+    *,
+    lock_timeout_s: float | None = 30.0,
+) -> CompactResult:
     """Ingest all cool fragments into bathos.db DuckDB database.
 
     - Snapshots file list at start (ignores fragments written after snapshot)
@@ -929,6 +982,8 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     Args:
         catalog_dir: Path to catalog root (contains runs/ and bathos.db target)
         force_rebuild: If True, remove existing bathos.db before compacting (for recovery from corruption)
+        lock_timeout_s: Seconds to wait for the advisory compaction lock before
+            raising `CompactionLockedError` (`None` waits indefinitely).
 
     Returns:
         CompactResult with ingested count, skipped count, and duration
@@ -940,574 +995,575 @@ def compact(catalog_dir: Path, force_rebuild: bool = False) -> CompactResult:
     if is_log_mode(catalog_dir):
         return _compact_log_mode(catalog_dir, force_rebuild, start_time)
 
-    # Count cool files at start for telemetry
-    cool_files = _fragment_count(catalog_dir)
+    with _compact_lock(catalog_dir, timeout_s=lock_timeout_s):
+        # Count cool files at start for telemetry
+        cool_files = _fragment_count(catalog_dir)
 
-    # Read all runs from cool fragments (read_runs_report snapshots the file list
-    # internally). A corrupt/unreadable fragment is skipped and reported here rather
-    # than aborting compact for every project (260827_bathos-catalog-robustness).
-    cool_runs, corrupt_fragments = read_runs_report(catalog_dir)
+        # Read all runs from cool fragments (read_runs_report snapshots the file list
+        # internally). A corrupt/unreadable fragment is skipped and reported here rather
+        # than aborting compact for every project (260827_bathos-catalog-robustness).
+        cool_runs, corrupt_fragments = read_runs_report(catalog_dir)
 
-    # Parse all postmortems in workspace (live fs_root; worktree-aware, spec 260611)
-    from bathos.postmortem import parse_postmortem
-    from bathos.workspace import resolve_workspace
+        # Parse all postmortems in workspace (live fs_root; worktree-aware, spec 260611)
+        from bathos.postmortem import parse_postmortem
+        from bathos.workspace import resolve_workspace
 
-    postmortem_map = {}
-    workspace_root = resolve_workspace().fs_root
+        postmortem_map = {}
+        workspace_root = resolve_workspace().fs_root
 
-    if workspace_root.exists():
-        # Boundary-aware walk (backlog #4233): a bare rglob crossed into vendored
-        # submodules and nested .claude/worktrees/ checkouts. Because this map is
-        # keyed by run_id and feeds verdict_override into the run's recorded
-        # outcome below, a stale copy did not merely duplicate a warning -- it
-        # could silently rewrite a result.
-        for pm_file in iter_project_files(
-            workspace_root, ".bth.postmortem.toml", event_name="compact.boundary_pruned"
-        ):
-            try:
-                pm = parse_postmortem(pm_file)
-                # Drafts are unfinished by definition and must not reach the map:
-                # verdict_override from a half-written postmortem would overwrite the
-                # run's outcome. Campaign-scoped postmortems have run_id == "" and
-                # would all collide on that key, silently overwriting one another.
-                if pm.status == "draft" or not pm.run_id:
-                    continue
-                rel_path = str(pm_file.relative_to(workspace_root))
-                postmortem_map[pm.run_id] = (pm, rel_path)
-            except Exception as e:
-                logger.warning(f"Skipping postmortem parse: {pm_file}: {e}")
-
-    # Get warm-tier row count before compaction (if DB exists)
-    warm_rows_before = 0
-    db_path = catalog_dir / "bathos.db"
-    if db_path.exists() and force_rebuild:
-        _backup_warm_db(db_path)
-        db_path.unlink()
-    if db_path.exists():
-        temp_con = duckdb.connect(str(db_path), read_only=True)
-        try:
-            warm_rows_before = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-        except Exception:
-            warm_rows_before = 0
-        finally:
-            temp_con.close()
-
-    # Emit compact start event
-    event("catalog.compact_start", cool_files=cool_files, warm_rows_before=warm_rows_before)
-
-    # Open DuckDB connection (time the connect call to detect lock waits)
-    t_connect = time.monotonic()
-    try:
-        con = duckdb.connect(str(db_path))
-    except _WARM_INDEX_ERRORS as exc:
-        # e.g. WAL replay hitting a stale index at open time (debt #2010)
-        warm_error = _warm_index_error(exc, db_path)
-        raise warm_error from exc
-    try:
-        waited_ms = (time.monotonic() - t_connect) * 1000
-        if waited_ms > 500:
-            event("catalog.duckdb_lock_wait", waited_ms=int(waited_ms), db_path=str(db_path))
-
-        # Initialize schema meta table if it doesn't exist
-        con.execute("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
-
-        # Initialize schema migrations audit table if it doesn't exist
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS _schema_migrations (
-                warm_version TEXT NOT NULL,
-                migrated_at TIMESTAMPTZ DEFAULT now(),
-                notes TEXT
-            )
-        """)
-
-        # Initialize runs table if it doesn't exist
-        con.execute(_RUNS_TABLE_SCHEMA)
-
-        # Idempotent column additions for columns added after the initial schema.
-        # CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so pre-existing
-        # warm catalogs need explicit ALTER TABLE to gain newer columns.
-        for _runs_alter_sql in [
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_sha256 TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_path TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome_error_reason TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_status TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stage_name TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_discriminates TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_isolates TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS parity_run_type TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS seed BIGINT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_trials BIGINT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_compute_budget DOUBLE",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stdout_sha256 TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_id TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_sidecar_sha256 TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_status TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_off_value TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_on_value TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_effect DOUBLE",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_lock_sha256 TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_dirty_content_id TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_provenance_source TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS epistemic_class TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS tentative_outcome TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent_session TEXT",
-            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_provenance TEXT",
-        ]:
-            with contextlib.suppress(Exception):
-                con.execute(_runs_alter_sql)
-
-        # Initialize campaign tables if they don't exist
-        con.execute(_CAMPAIGNS_TABLE_SCHEMA)
-        con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
-        con.execute(_AMENDMENTS_TABLE_SCHEMA)
-        con.execute(_CAMPAIGN_EDGES_TABLE_SCHEMA)
-        con.execute(_RUN_EDGES_TABLE_SCHEMA)
-
-        # Idempotent column additions for POPPER (handles existing warm DBs)
-        for _alter_sql in [
-            "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS evalue REAL",
-            "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
-            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
-            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_path TEXT",
-            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_sha256 TEXT",
-            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_mode TEXT",
-            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS negative_check TEXT",
-        ]:
-            with contextlib.suppress(Exception):
-                con.execute(_alter_sql)
-
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
-        )
-
-        # DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT
-        # on main): re-derive sidecar_anchors from cool-tier anchor fragments, same as
-        # runs are re-derived from cool_runs below. This runs unconditionally (cheap
-        # no-op if no anchors/ fragments exist) so it also fires on force_rebuild.
-        _ingest_anchor_fragments(con, catalog_dir)
-
-        # S3 (backlog #3491): re-derive trust_ledger from cool-tier ledger fragments,
-        # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
-        # fragments exist, fires on force_rebuild too.
-        _ingest_ledger_fragments(con, catalog_dir)
-
-        # Backlog #4551: re-derive blast_radius_ledger from cool-tier fragments,
-        # same pattern as trust_ledger above. Unconditional, cheap no-op if no
-        # blast_radius/ fragments exist, fires on force_rebuild too.
-        _ingest_blast_radius_fragments(con, catalog_dir)
-
-        # Artifact archival: re-derive archived_items from cool-tier fragments, same
-        # pattern as trust_ledger above. Unconditional, cheap no-op if no
-        # archived_items/ fragments exist, fires on force_rebuild too.
-        _ingest_archived_item_fragments(con, catalog_dir)
-
-        # Step-back reviews & escalations (spec 261027 Section 8.2/8.3): re-derive
-        # stepback_reviews and stepback_escalations from cool-tier fragments.
-        _ingest_stepback_fragments(con, catalog_dir)
-
-        # Track ingested and skipped counts
-        ingested = 0
-        skipped = 0
-        refreshed_count = 0
-
-        # Load the lifecycle columns of every warm run once (instead of one SELECT per
-        # cool run); doubles as the existence check and the refresh baseline.
-        existing_rows: dict[str, tuple] = {
-            row[0]: row[1:]
-            for row in con.execute(
-                "SELECT id, status, exit_code, duration_s, outcome, outcome_error_reason, "
-                "metadata, postmortem_verdict_override, "
-                + ", ".join(_REFRESH_FINISH_COLS)
-                + " FROM runs"
-            ).fetchall()
-        }
-
-        # Ingest each run
-        for run in cool_runs:
-            existing = existing_rows.get(run.id)
-
-            if existing is not None:
-                skipped += 1
-
-                # Refresh the lifecycle columns (debt #2689 / #1647). A cool fragment is
-                # rewritten when a run finishes (running -> completed/failed), but the
-                # row was only ever INSERTed, so warm stayed 'running' forever.
-                pm_entry = postmortem_map.get(run.id)
-                warm_override = existing[6]
-                if pm_entry is not None and pm_entry[0].verdict_override != "none":
-                    # The postmortem block below pins outcome to the override; compare
-                    # against that so an overridden run is not "refreshed" every compact.
-                    cool_outcome = pm_entry[0].verdict_override
-                elif pm_entry is None and warm_override not in (None, "", "none"):
-                    # The override lives only in warm. postmortem_map covers the current
-                    # workspace alone, so a compact run from another project (or a checkout
-                    # lacking the postmortem file) must not revert the recorded verdict.
-                    cool_outcome = existing[3]
-                else:
-                    cool_outcome = run.outcome or None
-                # Observation runs: the override (pinned above) belongs in tentative_outcome, so
-                # the compared outcome is the cool one and the tentative slot carries the override.
-                tentative_idx = 7 + _REFRESH_FINISH_COLS.index("tentative_outcome")
-                cool_tentative = run.tentative_outcome or None
-                if run.epistemic_class in _OBSERVATION_CLASSES:
-                    if pm_entry is not None and pm_entry[0].verdict_override != "none":
-                        cool_tentative = pm_entry[0].verdict_override
-                    elif pm_entry is None and warm_override not in (None, "", "none"):
-                        cool_tentative = existing[tentative_idx] or None
-                    cool_outcome = run.outcome or None
-                # metadata: cool wins, but `reaped` is warm-only (merged in by reap.py
-                # after a rebuild) and must survive.
-                cool_metadata = run.metadata or "{}"
-                if cool_metadata.strip() in ("", "{}") and (existing[5] or "{}").strip() != "{}":
-                    # An empty cool metadata never replaces real warm metadata: `bth repair`
-                    # re-exports warm-only runs to cool without metadata.
-                    cool_metadata = existing[5]
+        if workspace_root.exists():
+            # Boundary-aware walk (backlog #4233): a bare rglob crossed into vendored
+            # submodules and nested .claude/worktrees/ checkouts. Because this map is
+            # keyed by run_id and feeds verdict_override into the run's recorded
+            # outcome below, a stale copy did not merely duplicate a warning -- it
+            # could silently rewrite a result.
+            for pm_file in iter_project_files(
+                workspace_root, ".bth.postmortem.toml", event_name="compact.boundary_pruned"
+            ):
                 try:
-                    warm_meta = json.loads(existing[5] or "{}")
-                    if isinstance(warm_meta, dict) and "reaped" in warm_meta:
-                        cool_meta = json.loads(cool_metadata)
-                        if isinstance(cool_meta, dict) and "reaped" not in cool_meta:
-                            cool_meta["reaped"] = warm_meta["reaped"]
-                            cool_metadata = json.dumps(cool_meta)
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    pass
-                fresh_state = (
-                    run.status,
-                    run.exit_code,
-                    run.duration_s,
-                    cool_outcome,
-                    run.outcome_error_reason or None,
-                    cool_metadata,
-                    # Finish-time columns the runner also rewrites (runner.py finalize).
-                    *(
-                        cool_tentative
-                        if col == "tentative_outcome"
-                        else _cool_finish_value(run, col)
-                        for col in _REFRESH_FINISH_COLS
-                    ),
+                    pm = parse_postmortem(pm_file)
+                    # Drafts are unfinished by definition and must not reach the map:
+                    # verdict_override from a half-written postmortem would overwrite the
+                    # run's outcome. Campaign-scoped postmortems have run_id == "" and
+                    # would all collide on that key, silently overwriting one another.
+                    if pm.status == "draft" or not pm.run_id:
+                        continue
+                    rel_path = str(pm_file.relative_to(workspace_root))
+                    postmortem_map[pm.run_id] = (pm, rel_path)
+                except Exception as e:
+                    logger.warning(f"Skipping postmortem parse: {pm_file}: {e}")
+
+        # Get warm-tier row count before compaction (if DB exists)
+        warm_rows_before = 0
+        db_path = catalog_dir / "bathos.db"
+        if db_path.exists() and force_rebuild:
+            _backup_warm_db(db_path)
+            db_path.unlink()
+        if db_path.exists():
+            temp_con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                warm_rows_before = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            except Exception:
+                warm_rows_before = 0
+            finally:
+                temp_con.close()
+
+        # Emit compact start event
+        event("catalog.compact_start", cool_files=cool_files, warm_rows_before=warm_rows_before)
+
+        # Open DuckDB connection (time the connect call to detect lock waits)
+        t_connect = time.monotonic()
+        try:
+            con = duckdb.connect(str(db_path))
+        except _WARM_INDEX_ERRORS as exc:
+            # e.g. WAL replay hitting a stale index at open time (debt #2010)
+            warm_error = _warm_index_error(exc, db_path)
+            raise warm_error from exc
+        try:
+            waited_ms = (time.monotonic() - t_connect) * 1000
+            if waited_ms > 500:
+                event("catalog.duckdb_lock_wait", waited_ms=int(waited_ms), db_path=str(db_path))
+
+            # Initialize schema meta table if it doesn't exist
+            con.execute("CREATE TABLE IF NOT EXISTS _schema_meta (key TEXT PRIMARY KEY, value TEXT)")
+
+            # Initialize schema migrations audit table if it doesn't exist
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS _schema_migrations (
+                    warm_version TEXT NOT NULL,
+                    migrated_at TIMESTAMPTZ DEFAULT now(),
+                    notes TEXT
                 )
-                # Normalise "" to None for outcome: the postmortem block writes "" for
-                # a run with no sidecar outcome, which must not count as a change.
-                warm_state = (
-                    *existing[:3],
-                    existing[3] or None,
-                    *existing[4:6],
-                    *(_warm_finish_value(c, v) for c, v in zip(_REFRESH_FINISH_COLS, existing[7:])),
-                )
-                if warm_state != fresh_state:
-                    set_cols = [
-                        "status", "exit_code", "duration_s", "outcome",
-                        "outcome_error_reason", "metadata", *_REFRESH_FINISH_COLS,
-                    ]  # fmt: skip
-                    con.execute(
-                        "UPDATE runs SET "
-                        + ", ".join(f"{c} = ?" for c in set_cols)
-                        + " WHERE id = ?",
-                        [*fresh_state, run.id],
-                    )
-                    refreshed_count += 1
+            """)
 
-                # Refresh output_metadata on every compact so the catalog reflects
-                # the current filesystem state (Debt #71). Re-stat is cheap; we only
-                # re-hash files whose mtime changed since the stored snapshot.
-                if run.output_paths:
-                    stored_row = con.execute(
-                        "SELECT output_metadata FROM runs WHERE id = ?", [run.id]
-                    ).fetchone()
-                    stored_json = stored_row[0] if stored_row else "[]"
-                    try:
-                        stored_meta = {m["path"]: m for m in json.loads(stored_json or "[]")}
-                    except (json.JSONDecodeError, TypeError, KeyError):
-                        stored_meta = {}
+            # Initialize runs table if it doesn't exist
+            con.execute(_RUNS_TABLE_SCHEMA)
 
-                    refreshed = []
-                    for output_path in run.output_paths:
-                        prev = stored_meta.get(output_path, {})
-                        fresh = _collect_output_metadata(output_path)
-                        # Re-use stored sha256 if mtime unchanged (skip expensive rehash)
-                        if (
-                            fresh.get("status") == "present"
-                            and prev.get("status") == "present"
-                            and fresh.get("mtime_unix") == prev.get("mtime_unix")
-                            and prev.get("sha256") is not None
-                        ):
-                            fresh["sha256"] = prev["sha256"]
-                        refreshed.append({"path": output_path, **fresh})
+            # Idempotent column additions for columns added after the initial schema.
+            # CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so pre-existing
+            # warm catalogs need explicit ALTER TABLE to gain newer columns.
+            for _runs_alter_sql in [
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_sha256 TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS manifest_path TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome_error_reason TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_status TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stage_name TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_discriminates TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS claim_isolates TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS parity_run_type TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS seed BIGINT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_trials BIGINT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS baseline_hpo_compute_budget DOUBLE",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS stdout_sha256 TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_id TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS component_sidecar_sha256 TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_status TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_off_value TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_on_value TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS differential_effect DOUBLE",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_lock_sha256 TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS adversarial_check_result TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_dirty_content_id TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS git_provenance_source TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS epistemic_class TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS tentative_outcome TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent_session TEXT",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS dependency_provenance TEXT",
+            ]:
+                with contextlib.suppress(Exception):
+                    con.execute(_runs_alter_sql)
 
-                    con.execute(
-                        "UPDATE runs SET output_metadata = ? WHERE id = ?",
-                        [json.dumps(refreshed), run.id],
-                    )
+            # Initialize campaign tables if they don't exist
+            con.execute(_CAMPAIGNS_TABLE_SCHEMA)
+            con.execute(_CAMPAIGN_RUNS_TABLE_SCHEMA)
+            con.execute(_AMENDMENTS_TABLE_SCHEMA)
+            con.execute(_CAMPAIGN_EDGES_TABLE_SCHEMA)
+            con.execute(_RUN_EDGES_TABLE_SCHEMA)
 
-                con.execute(
-                    """
-                    UPDATE runs SET
-                      claim_discriminates = COALESCE(?, claim_discriminates),
-                      claim_isolates = COALESCE(?, claim_isolates),
-                      parity_run_type = COALESCE(?, parity_run_type),
-                      dependency_provenance = COALESCE(?, dependency_provenance)
-                    WHERE id = ?
-                    """,
-                    [
-                        run.claim_discriminates,
-                        run.claim_isolates,
-                        run.parity_run_type,
-                        # A row first ingested by a pre-v18 bathos has NULL here even though
-                        # the fragment carries it (debt #2946 review).
-                        run.dependency_provenance,
-                        run.id,
-                    ],
-                )
+            # Idempotent column additions for POPPER (handles existing warm DBs)
+            for _alter_sql in [
+                "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS evalue REAL",
+                "ALTER TABLE campaign_runs ADD COLUMN IF NOT EXISTS seq_position INTEGER",
+                "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS stopping_threshold REAL",
+                "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_path TEXT",
+                "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_sha256 TEXT",
+                "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS claim_mode TEXT",
+                "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS negative_check TEXT",
+            ]:
+                with contextlib.suppress(Exception):
+                    con.execute(_alter_sql)
 
-                if run.id in postmortem_map:
-                    pm, rel_path = postmortem_map[run.id]
-                    postmortem_verdict_override = pm.verdict_override
-                    postmortem_has_anomalies = any(
-                        v and str(v).lower() != "none"
-                        for v in getattr(pm, "anomalies", {}).values()
-                    )
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_campaigns_mode_status ON campaigns (mode, status)"
+            )
 
-                    curr_outcome = (
-                        con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0]
-                        or ""
-                    )
-                    outcome = (
-                        postmortem_verdict_override
-                        if postmortem_verdict_override != "none"
-                        else curr_outcome
-                    )
+            # DE-RISK SPIKE (gate 2b-A, #3485, branch figure-eda-2bA-durability-spike — NOT
+            # on main): re-derive sidecar_anchors from cool-tier anchor fragments, same as
+            # runs are re-derived from cool_runs below. This runs unconditionally (cheap
+            # no-op if no anchors/ fragments exist) so it also fires on force_rebuild.
+            _ingest_anchor_fragments(con, catalog_dir)
+
+            # S3 (backlog #3491): re-derive trust_ledger from cool-tier ledger fragments,
+            # same pattern as anchors above. Unconditional, cheap no-op if no ledger/
+            # fragments exist, fires on force_rebuild too.
+            _ingest_ledger_fragments(con, catalog_dir)
+
+            # Backlog #4551: re-derive blast_radius_ledger from cool-tier fragments,
+            # same pattern as trust_ledger above. Unconditional, cheap no-op if no
+            # blast_radius/ fragments exist, fires on force_rebuild too.
+            _ingest_blast_radius_fragments(con, catalog_dir)
+
+            # Artifact archival: re-derive archived_items from cool-tier fragments, same
+            # pattern as trust_ledger above. Unconditional, cheap no-op if no
+            # archived_items/ fragments exist, fires on force_rebuild too.
+            _ingest_archived_item_fragments(con, catalog_dir)
+
+            # Step-back reviews & escalations (spec 261027 Section 8.2/8.3): re-derive
+            # stepback_reviews and stepback_escalations from cool-tier fragments.
+            _ingest_stepback_fragments(con, catalog_dir)
+
+            # Track ingested and skipped counts
+            ingested = 0
+            skipped = 0
+            refreshed_count = 0
+
+            # Load the lifecycle columns of every warm run once (instead of one SELECT per
+            # cool run); doubles as the existence check and the refresh baseline.
+            existing_rows: dict[str, tuple] = {
+                row[0]: row[1:]
+                for row in con.execute(
+                    "SELECT id, status, exit_code, duration_s, outcome, outcome_error_reason, "
+                    "metadata, postmortem_verdict_override, "
+                    + ", ".join(_REFRESH_FINISH_COLS)
+                    + " FROM runs"
+                ).fetchall()
+            }
+
+            # Ingest each run
+            for run in cool_runs:
+                existing = existing_rows.get(run.id)
+
+                if existing is not None:
+                    skipped += 1
+
+                    # Refresh the lifecycle columns (debt #2689 / #1647). A cool fragment is
+                    # rewritten when a run finishes (running -> completed/failed), but the
+                    # row was only ever INSERTed, so warm stayed 'running' forever.
+                    pm_entry = postmortem_map.get(run.id)
+                    warm_override = existing[6]
+                    if pm_entry is not None and pm_entry[0].verdict_override != "none":
+                        # The postmortem block below pins outcome to the override; compare
+                        # against that so an overridden run is not "refreshed" every compact.
+                        cool_outcome = pm_entry[0].verdict_override
+                    elif pm_entry is None and warm_override not in (None, "", "none"):
+                        # The override lives only in warm. postmortem_map covers the current
+                        # workspace alone, so a compact run from another project (or a checkout
+                        # lacking the postmortem file) must not revert the recorded verdict.
+                        cool_outcome = existing[3]
+                    else:
+                        cool_outcome = run.outcome or None
+                    # Observation runs: the override (pinned above) belongs in tentative_outcome, so
+                    # the compared outcome is the cool one and the tentative slot carries the override.
+                    tentative_idx = 7 + _REFRESH_FINISH_COLS.index("tentative_outcome")
+                    cool_tentative = run.tentative_outcome or None
                     if run.epistemic_class in _OBSERVATION_CLASSES:
-                        # Spec 261015 §3.2: the override is a tentative label; outcome stays.
-                        outcome = curr_outcome
-                        if postmortem_verdict_override != "none":
-                            con.execute(
-                                "UPDATE runs SET tentative_outcome = ? WHERE id = ?",
-                                [postmortem_verdict_override, run.id],
-                            )
+                        if pm_entry is not None and pm_entry[0].verdict_override != "none":
+                            cool_tentative = pm_entry[0].verdict_override
+                        elif pm_entry is None and warm_override not in (None, "", "none"):
+                            cool_tentative = existing[tentative_idx] or None
+                        cool_outcome = run.outcome or None
+                    # metadata: cool wins, but `reaped` is warm-only (merged in by reap.py
+                    # after a rebuild) and must survive.
+                    cool_metadata = run.metadata or "{}"
+                    if cool_metadata.strip() in ("", "{}") and (existing[5] or "{}").strip() != "{}":
+                        # An empty cool metadata never replaces real warm metadata: `bth repair`
+                        # re-exports warm-only runs to cool without metadata.
+                        cool_metadata = existing[5]
+                    try:
+                        warm_meta = json.loads(existing[5] or "{}")
+                        if isinstance(warm_meta, dict) and "reaped" in warm_meta:
+                            cool_meta = json.loads(cool_metadata)
+                            if isinstance(cool_meta, dict) and "reaped" not in cool_meta:
+                                cool_meta["reaped"] = warm_meta["reaped"]
+                                cool_metadata = json.dumps(cool_meta)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        pass
+                    fresh_state = (
+                        run.status,
+                        run.exit_code,
+                        run.duration_s,
+                        cool_outcome,
+                        run.outcome_error_reason or None,
+                        cool_metadata,
+                        # Finish-time columns the runner also rewrites (runner.py finalize).
+                        *(
+                            cool_tentative
+                            if col == "tentative_outcome"
+                            else _cool_finish_value(run, col)
+                            for col in _REFRESH_FINISH_COLS
+                        ),
+                    )
+                    # Normalise "" to None for outcome: the postmortem block writes "" for
+                    # a run with no sidecar outcome, which must not count as a change.
+                    warm_state = (
+                        *existing[:3],
+                        existing[3] or None,
+                        *existing[4:6],
+                        *(_warm_finish_value(c, v) for c, v in zip(_REFRESH_FINISH_COLS, existing[7:])),
+                    )
+                    if warm_state != fresh_state:
+                        set_cols = [
+                            "status", "exit_code", "duration_s", "outcome",
+                            "outcome_error_reason", "metadata", *_REFRESH_FINISH_COLS,
+                        ]  # fmt: skip
+                        con.execute(
+                            "UPDATE runs SET "
+                            + ", ".join(f"{c} = ?" for c in set_cols)
+                            + " WHERE id = ?",
+                            [*fresh_state, run.id],
+                        )
+                        refreshed_count += 1
+
+                    # Refresh output_metadata on every compact so the catalog reflects
+                    # the current filesystem state (Debt #71). Re-stat is cheap; we only
+                    # re-hash files whose mtime changed since the stored snapshot.
+                    if run.output_paths:
+                        stored_row = con.execute(
+                            "SELECT output_metadata FROM runs WHERE id = ?", [run.id]
+                        ).fetchone()
+                        stored_json = stored_row[0] if stored_row else "[]"
+                        try:
+                            stored_meta = {m["path"]: m for m in json.loads(stored_json or "[]")}
+                        except (json.JSONDecodeError, TypeError, KeyError):
+                            stored_meta = {}
+
+                        refreshed = []
+                        for output_path in run.output_paths:
+                            prev = stored_meta.get(output_path, {})
+                            fresh = _collect_output_metadata(output_path)
+                            # Re-use stored sha256 if mtime unchanged (skip expensive rehash)
+                            if (
+                                fresh.get("status") == "present"
+                                and prev.get("status") == "present"
+                                and fresh.get("mtime_unix") == prev.get("mtime_unix")
+                                and prev.get("sha256") is not None
+                            ):
+                                fresh["sha256"] = prev["sha256"]
+                            refreshed.append({"path": output_path, **fresh})
+
+                        con.execute(
+                            "UPDATE runs SET output_metadata = ? WHERE id = ?",
+                            [json.dumps(refreshed), run.id],
+                        )
 
                     con.execute(
                         """
                         UPDATE runs SET
-                            outcome = ?,
-                            postmortem_status = ?,
-                            postmortem_override = ?,
-                            postmortem_verdict_override = ?,
-                            postmortem_author = ?,
-                            postmortem_path = ?,
-                            postmortem_hypothesis_status = ?,
-                            postmortem_has_anomalies = ?,
-                            postmortem_summary = ?,
-                            postmortem_asset_links = ?
+                          claim_discriminates = COALESCE(?, claim_discriminates),
+                          claim_isolates = COALESCE(?, claim_isolates),
+                          parity_run_type = COALESCE(?, parity_run_type),
+                          dependency_provenance = COALESCE(?, dependency_provenance)
                         WHERE id = ?
                         """,
                         [
-                            outcome,
-                            pm.status,
-                            pm.verdict_override,
-                            pm.verdict_override,
-                            pm.author,
-                            rel_path,
-                            pm.hypothesis_status,
-                            postmortem_has_anomalies,
-                            pm.summary,
-                            json.dumps(pm.asset_links),
+                            run.claim_discriminates,
+                            run.claim_isolates,
+                            run.parity_run_type,
+                            # A row first ingested by a pre-v18 bathos has NULL here even though
+                            # the fragment carries it (debt #2946 review).
+                            run.dependency_provenance,
                             run.id,
                         ],
                     )
-                continue
 
-            # Apply migrations if needed
-            run = _apply_migrations(run)
+                    if run.id in postmortem_map:
+                        pm, rel_path = postmortem_map[run.id]
+                        postmortem_verdict_override = pm.verdict_override
+                        postmortem_has_anomalies = any(
+                            v and str(v).lower() != "none"
+                            for v in getattr(pm, "anomalies", {}).values()
+                        )
 
-            # Apply postmortem updates to run object if present
-            if run.id in postmortem_map:
-                pm, rel_path = postmortem_map[run.id]
-                run.postmortem_status = pm.status
-                run.postmortem_override = pm.verdict_override
-                run.postmortem_verdict_override = pm.verdict_override
-                run.postmortem_author = pm.author
-                run.postmortem_path = rel_path
-                run.postmortem_hypothesis_status = pm.hypothesis_status
-                run.postmortem_has_anomalies = any(
-                    v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values()
+                        curr_outcome = (
+                            con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0]
+                            or ""
+                        )
+                        outcome = (
+                            postmortem_verdict_override
+                            if postmortem_verdict_override != "none"
+                            else curr_outcome
+                        )
+                        if run.epistemic_class in _OBSERVATION_CLASSES:
+                            # Spec 261015 §3.2: the override is a tentative label; outcome stays.
+                            outcome = curr_outcome
+                            if postmortem_verdict_override != "none":
+                                con.execute(
+                                    "UPDATE runs SET tentative_outcome = ? WHERE id = ?",
+                                    [postmortem_verdict_override, run.id],
+                                )
+
+                        con.execute(
+                            """
+                            UPDATE runs SET
+                                outcome = ?,
+                                postmortem_status = ?,
+                                postmortem_override = ?,
+                                postmortem_verdict_override = ?,
+                                postmortem_author = ?,
+                                postmortem_path = ?,
+                                postmortem_hypothesis_status = ?,
+                                postmortem_has_anomalies = ?,
+                                postmortem_summary = ?,
+                                postmortem_asset_links = ?
+                            WHERE id = ?
+                            """,
+                            [
+                                outcome,
+                                pm.status,
+                                pm.verdict_override,
+                                pm.verdict_override,
+                                pm.author,
+                                rel_path,
+                                pm.hypothesis_status,
+                                postmortem_has_anomalies,
+                                pm.summary,
+                                json.dumps(pm.asset_links),
+                                run.id,
+                            ],
+                        )
+                    continue
+
+                # Apply migrations if needed
+                run = _apply_migrations(run)
+
+                # Apply postmortem updates to run object if present
+                if run.id in postmortem_map:
+                    pm, rel_path = postmortem_map[run.id]
+                    run.postmortem_status = pm.status
+                    run.postmortem_override = pm.verdict_override
+                    run.postmortem_verdict_override = pm.verdict_override
+                    run.postmortem_author = pm.author
+                    run.postmortem_path = rel_path
+                    run.postmortem_hypothesis_status = pm.hypothesis_status
+                    run.postmortem_has_anomalies = any(
+                        v and str(v).lower() != "none" for v in getattr(pm, "anomalies", {}).values()
+                    )
+                    run.postmortem_summary = pm.summary
+                    run.postmortem_asset_links = json.dumps(pm.asset_links)
+                    if pm.verdict_override != "none":
+                        # Spec §3.2: exploratory/calibrating runs record an observation, so an
+                        # override is a tentative label only and never replaces outcome.
+                        if run.epistemic_class in ("exploratory", "calibrating"):
+                            run.tentative_outcome = pm.verdict_override
+                        else:
+                            run.outcome = pm.verdict_override
+
+                # Collect output metadata
+                output_metadata = []
+                if run.output_paths:
+                    for output_path in run.output_paths:
+                        meta = _collect_output_metadata(output_path)
+                        output_metadata.append({"path": output_path, **meta})
+
+                # Serialize metadata to JSON
+                output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"
+
+                # Insert into DuckDB
+                con.execute(
+                    """
+                    INSERT INTO runs (
+                        id, project_slug, command, argv, git_hash, git_branch,
+                        git_dirty, timestamp, duration_s, exit_code, status,
+                        output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
+                        sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
+                        script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
+                        postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
+                        claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
+                        stdout_sha256, component_id, component_sidecar_sha256,
+                        differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
+                        adversarial_check_result, git_dirty_content_id, git_provenance_source,
+                        outcome_error_reason,
+                        epistemic_class, tentative_outcome, agent_session, dependency_provenance
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        run.id,
+                        run.project_slug,
+                        run.command,
+                        run.argv,
+                        run.git_hash,
+                        run.git_branch,
+                        run.git_dirty,
+                        run.timestamp,
+                        run.duration_s,
+                        run.exit_code,
+                        run.status,
+                        run.output_paths,
+                        run.tags,
+                        run.schema_version,
+                        run.slurm_job_id,
+                        run.hostname,
+                        run.metadata,
+                        run.outcome or None,  # preserve evaluated outcome label from cool fragment
+                        output_metadata_json,
+                        run.sidecar_sha256,
+                        run.sidecar_path,
+                        run.parent_run_id,
+                        run.agent_mode,
+                        run.sidecar_mode,
+                        run.outcome_is_residual,
+                        run.skill_sha256,
+                        run.campaign_id,
+                        run.script_sha256,
+                        run.postmortem_status,
+                        run.postmortem_override,
+                        run.postmortem_verdict_override,
+                        run.postmortem_author,
+                        run.postmortem_path,
+                        run.postmortem_hypothesis_status,
+                        run.postmortem_has_anomalies,
+                        run.postmortem_summary,
+                        run.postmortem_asset_links,
+                        run.stage_name,
+                        run.claim_discriminates,
+                        run.claim_isolates,
+                        run.parity_run_type,
+                        run.seed,
+                        run.baseline_hpo_trials,
+                        run.baseline_hpo_compute_budget,
+                        run.stdout_sha256,
+                        run.component_id,
+                        run.component_sidecar_sha256,
+                        run.differential_status,
+                        run.differential_off_value,
+                        run.differential_on_value,
+                        run.differential_effect,
+                        run.dependency_lock_sha256,
+                        run.adversarial_check_result,
+                        run.git_dirty_content_id,
+                        run.git_provenance_source,
+                        # Debt #1942: outcome_error_reason is produced in runner.py (exit-code
+                        # guard + evaluate_outcome/adversarial-check error payloads) and already
+                        # round-trips through the cool fragment (schema.py to_arrow/from_arrow_row,
+                        # since v5), but this INSERT never carried it into the warm `runs` table
+                        # even though the column exists (ALTER TABLE above) -- so every run with
+                        # outcome="error" had a NULL warm outcome_error_reason. Least invasive fix:
+                        # add the one missing column/value pair here rather than restructure the
+                        # insert.
+                        run.outcome_error_reason or None,
+                        run.epistemic_class,
+                        run.tentative_outcome,
+                        run.agent_session,
+                        run.dependency_provenance,
+                    ],
                 )
-                run.postmortem_summary = pm.summary
-                run.postmortem_asset_links = json.dumps(pm.asset_links)
-                if pm.verdict_override != "none":
-                    # Spec §3.2: exploratory/calibrating runs record an observation, so an
-                    # override is a tentative label only and never replaces outcome.
-                    if run.epistemic_class in ("exploratory", "calibrating"):
-                        run.tentative_outcome = pm.verdict_override
-                    else:
-                        run.outcome = pm.verdict_override
 
-            # Collect output metadata
-            output_metadata = []
-            if run.output_paths:
-                for output_path in run.output_paths:
-                    meta = _collect_output_metadata(output_path)
-                    output_metadata.append({"path": output_path, **meta})
-
-            # Serialize metadata to JSON
-            output_metadata_json = json.dumps(output_metadata) if output_metadata else "[]"
-
-            # Insert into DuckDB
-            con.execute(
-                """
-                INSERT INTO runs (
-                    id, project_slug, command, argv, git_hash, git_branch,
-                    git_dirty, timestamp, duration_s, exit_code, status,
-                    output_paths, tags, schema_version, slurm_job_id, hostname, metadata, outcome, output_metadata,
-                    sidecar_sha256, sidecar_path, parent_run_id, agent_mode, sidecar_mode, outcome_is_residual, skill_sha256, campaign_id,
-                    script_sha256, postmortem_status, postmortem_override, postmortem_verdict_override, postmortem_author, postmortem_path,
-                    postmortem_hypothesis_status, postmortem_has_anomalies, postmortem_summary, postmortem_asset_links, stage_name,
-                    claim_discriminates, claim_isolates, parity_run_type, seed, baseline_hpo_trials, baseline_hpo_compute_budget,
-                    stdout_sha256, component_id, component_sidecar_sha256,
-                    differential_status, differential_off_value, differential_on_value, differential_effect, dependency_lock_sha256,
-                    adversarial_check_result, git_dirty_content_id, git_provenance_source,
-                    outcome_error_reason,
-                    epistemic_class, tentative_outcome, agent_session, dependency_provenance
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    run.id,
-                    run.project_slug,
-                    run.command,
-                    run.argv,
-                    run.git_hash,
-                    run.git_branch,
-                    run.git_dirty,
-                    run.timestamp,
-                    run.duration_s,
-                    run.exit_code,
+                ingested += 1
+                existing_rows[run.id] = (
                     run.status,
-                    run.output_paths,
-                    run.tags,
-                    run.schema_version,
-                    run.slurm_job_id,
-                    run.hostname,
-                    run.metadata,
-                    run.outcome or None,  # preserve evaluated outcome label from cool fragment
-                    output_metadata_json,
-                    run.sidecar_sha256,
-                    run.sidecar_path,
-                    run.parent_run_id,
-                    run.agent_mode,
-                    run.sidecar_mode,
-                    run.outcome_is_residual,
-                    run.skill_sha256,
-                    run.campaign_id,
-                    run.script_sha256,
-                    run.postmortem_status,
-                    run.postmortem_override,
-                    run.postmortem_verdict_override,
-                    run.postmortem_author,
-                    run.postmortem_path,
-                    run.postmortem_hypothesis_status,
-                    run.postmortem_has_anomalies,
-                    run.postmortem_summary,
-                    run.postmortem_asset_links,
-                    run.stage_name,
-                    run.claim_discriminates,
-                    run.claim_isolates,
-                    run.parity_run_type,
-                    run.seed,
-                    run.baseline_hpo_trials,
-                    run.baseline_hpo_compute_budget,
-                    run.stdout_sha256,
-                    run.component_id,
-                    run.component_sidecar_sha256,
-                    run.differential_status,
-                    run.differential_off_value,
-                    run.differential_on_value,
-                    run.differential_effect,
-                    run.dependency_lock_sha256,
-                    run.adversarial_check_result,
-                    run.git_dirty_content_id,
-                    run.git_provenance_source,
-                    # Debt #1942: outcome_error_reason is produced in runner.py (exit-code
-                    # guard + evaluate_outcome/adversarial-check error payloads) and already
-                    # round-trips through the cool fragment (schema.py to_arrow/from_arrow_row,
-                    # since v5), but this INSERT never carried it into the warm `runs` table
-                    # even though the column exists (ALTER TABLE above) -- so every run with
-                    # outcome="error" had a NULL warm outcome_error_reason. Least invasive fix:
-                    # add the one missing column/value pair here rather than restructure the
-                    # insert.
+                    run.exit_code,
+                    run.duration_s,
+                    run.outcome or None,
                     run.outcome_error_reason or None,
-                    run.epistemic_class,
-                    run.tentative_outcome,
-                    run.agent_session,
-                    run.dependency_provenance,
-                ],
+                    run.metadata,
+                )
+
+            from bathos.campaigns import ingest_cool_campaigns
+
+            ingest_cool_campaigns(con, catalog_dir)
+
+            from bathos.campaigns import CampaignError, link_cool_runs_to_campaigns
+
+            try:
+                link_cool_runs_to_campaigns(con, cool_runs, catalog_dir=catalog_dir)
+            except CampaignError as e:
+                logger.warning("sequential threshold mismatch during compact: %s", e)
+
+            # Update schema_meta table
+            con.execute(
+                "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
+                ["warm_version", CURRENT_SCHEMA_VERSION],
             )
 
-            ingested += 1
-            existing_rows[run.id] = (
-                run.status,
-                run.exit_code,
-                run.duration_s,
-                run.outcome or None,
-                run.outcome_error_reason or None,
-                run.metadata,
+            # Record migration in audit table
+            con.execute(
+                "INSERT INTO _schema_migrations (warm_version, notes) VALUES (?, ?)",
+                [CURRENT_SCHEMA_VERSION, "compact"],
             )
 
-        from bathos.campaigns import ingest_cool_campaigns
-
-        ingest_cool_campaigns(con, catalog_dir)
-
-        from bathos.campaigns import CampaignError, link_cool_runs_to_campaigns
-
-        try:
-            link_cool_runs_to_campaigns(con, cool_runs, catalog_dir=catalog_dir)
-        except CampaignError as e:
-            logger.warning("sequential threshold mismatch during compact: %s", e)
-
-        # Update schema_meta table
-        con.execute(
-            "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
-            ["warm_version", CURRENT_SCHEMA_VERSION],
-        )
-
-        # Record migration in audit table
-        con.execute(
-            "INSERT INTO _schema_migrations (warm_version, notes) VALUES (?, ?)",
-            [CURRENT_SCHEMA_VERSION, "compact"],
-        )
-
-    except _WARM_INDEX_ERRORS as exc:
-        warm_error = _warm_index_error(exc, db_path)
-        raise warm_error from exc
-    finally:
-        con.close()
-
-    duration_s = time.time() - start_time
-    duration_ms = duration_s * 1000
-
-    # Get final warm-tier row count for telemetry
-    warm_rows_after = 0
-    try:
-        temp_con = duckdb.connect(str(db_path), read_only=True)
-        try:
-            warm_rows_after = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+        except _WARM_INDEX_ERRORS as exc:
+            warm_error = _warm_index_error(exc, db_path)
+            raise warm_error from exc
         finally:
-            temp_con.close()
-    except Exception:
+            con.close()
+
+        duration_s = time.time() - start_time
+        duration_ms = duration_s * 1000
+
+        # Get final warm-tier row count for telemetry
         warm_rows_after = 0
+        try:
+            temp_con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                warm_rows_after = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            finally:
+                temp_con.close()
+        except Exception:
+            warm_rows_after = 0
 
-    # Emit compact end event
-    event(
-        "catalog.compact_end",
-        cool_files=cool_files,
-        warm_rows_before=warm_rows_before,
-        warm_rows_after=warm_rows_after,
-        duration_ms=int(duration_ms),
-    )
+        # Emit compact end event
+        event(
+            "catalog.compact_end",
+            cool_files=cool_files,
+            warm_rows_before=warm_rows_before,
+            warm_rows_after=warm_rows_after,
+            duration_ms=int(duration_ms),
+        )
 
-    return CompactResult(
-        ingested=ingested,
-        skipped=skipped,
-        duration_s=duration_s,
-        corrupt_fragments=corrupt_fragments,
-        refreshed=refreshed_count,
-    )
+        return CompactResult(
+            ingested=ingested,
+            skipped=skipped,
+            duration_s=duration_s,
+            corrupt_fragments=corrupt_fragments,
+            refreshed=refreshed_count,
+        )

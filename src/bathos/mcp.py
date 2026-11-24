@@ -651,6 +651,7 @@ def get_run_tool(
         # Verification fields (rule: verify a run by its record, not its exit
         # code). Empty strings are emitted as-is so an unset value is explicit.
         "outcome": run.outcome,
+        "postmortem_verdict_override": run.postmortem_verdict_override,
         "sidecar_mode": run.sidecar_mode,
         "sidecar_path": run.sidecar_path,
         "sidecar_sha256": run.sidecar_sha256,
@@ -8126,6 +8127,276 @@ async def mcp_appraise_tool(
     )
 
 
+def add_campaign_edge_tool(
+    child_campaign_id: str = "",
+    parent_campaign_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+) -> dict:
+    """Record a parent-child derivation edge in `campaign_edges` (#2079)."""
+    if not child_campaign_id:
+        return {
+            "ok": False,
+            "error": "child_campaign_id is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+    if not parent_campaign_id:
+        return {
+            "ok": False,
+            "error": "parent_campaign_id is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    from bathos.campaign_edges import CycleRejectedError, add_campaign_edge
+    from bathos.campaigns import connect_catalog_db
+    from bathos.runlog.emit import unit_of_work
+
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
+    cwd = Path(project_root) if project_root else None
+    with unit_of_work(cat_dir) as log_mode:
+        db = None
+        if not log_mode:
+            db = connect_catalog_db(cat_dir, read_only=False)
+            if db is None:
+                return {
+                    "ok": False,
+                    "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+                }
+        try:
+            add_campaign_edge(
+                db,
+                child_campaign_id,
+                parent_campaign_id,
+                catalog_dir=cat_dir,
+                cwd=cwd,
+            )
+            return {
+                "ok": True,
+                "child_campaign_id": child_campaign_id,
+                "parent_campaign_id": parent_campaign_id,
+                "message": f"Recorded campaign edge {child_campaign_id} -> {parent_campaign_id}",
+            }
+        except CycleRejectedError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
+                "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+            }
+        finally:
+            if db is not None:
+                db.close()
+
+
+def get_campaign_parents_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+) -> dict:
+    """Return sorted parent campaign IDs for `campaign_id` (#2079)."""
+    if not campaign_id:
+        return {
+            "ok": False,
+            "error": "campaign_id is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    from bathos.campaign_edges import get_campaign_parents
+    from bathos.campaigns import connect_catalog_db
+
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
+    db = connect_catalog_db(cat_dir, read_only=True)
+    if db is None:
+        return {
+            "ok": False,
+            "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+        }
+    try:
+        parents = get_campaign_parents(db, campaign_id, catalog_dir=cat_dir)
+        return {
+            "ok": True,
+            "campaign_id": campaign_id,
+            "parents": parents,
+            "count": len(parents),
+        }
+    finally:
+        db.close()
+
+
+def add_run_edge_tool(
+    child_run_id: str = "",
+    parent_run_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+) -> dict:
+    """Record a parent-child derivation edge in `run_edges` (#2079)."""
+    if not child_run_id:
+        return {
+            "ok": False,
+            "error": "child_run_id is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+    if not parent_run_id:
+        return {
+            "ok": False,
+            "error": "parent_run_id is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    from bathos.campaign_edges import CycleRejectedError, add_run_edge
+    from bathos.campaigns import connect_catalog_db
+    from bathos.runlog.emit import unit_of_work
+
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
+    cwd = Path(project_root) if project_root else None
+    with unit_of_work(cat_dir) as log_mode:
+        db = None
+        if not log_mode:
+            db = connect_catalog_db(cat_dir, read_only=False)
+            if db is None:
+                return {
+                    "ok": False,
+                    "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+                }
+        try:
+            add_run_edge(
+                db,
+                child_run_id,
+                parent_run_id,
+                catalog_dir=cat_dir,
+                cwd=cwd,
+            )
+            return {
+                "ok": True,
+                "child_run_id": child_run_id,
+                "parent_run_id": parent_run_id,
+                "message": f"Recorded run edge {child_run_id} -> {parent_run_id}",
+            }
+        except CycleRejectedError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
+                "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+            }
+        finally:
+            if db is not None:
+                db.close()
+
+
+def get_run_parents_tool(
+    run_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+) -> dict:
+    """Return sorted parent run IDs for `run_id` (#2079)."""
+    if not run_id:
+        return {
+            "ok": False,
+            "error": "run_id is required",
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
+        }
+
+    from bathos.campaign_edges import get_run_parents
+    from bathos.campaigns import connect_catalog_db
+
+    cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
+    db = connect_catalog_db(cat_dir, read_only=True)
+    if db is None:
+        return {
+            "ok": False,
+            "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+        }
+    try:
+        parents = get_run_parents(db, run_id, catalog_dir=cat_dir)
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "parents": parents,
+            "count": len(parents),
+        }
+    finally:
+        db.close()
+
+
+@cisternal.tool(registry="bathos", name="add_campaign_edge")
+@traced_tool
+@require_write_token
+async def mcp_add_campaign_edge_tool(
+    child_campaign_id: str = "",
+    parent_campaign_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    """Record a parent-child derivation edge in `campaign_edges` (#2079).
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return add_campaign_edge_tool(
+        child_campaign_id=child_campaign_id,
+        parent_campaign_id=parent_campaign_id,
+        catalog_dir=catalog_dir,
+        project_root=project_root,
+    )
+
+
+@cisternal.tool(registry="bathos", name="get_campaign_parents")
+@traced_tool
+async def mcp_get_campaign_parents_tool(
+    campaign_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+) -> dict:
+    """Return sorted parent campaign IDs for `campaign_id` (#2079)."""
+    return get_campaign_parents_tool(
+        campaign_id=campaign_id,
+        catalog_dir=catalog_dir,
+        project_root=project_root,
+    )
+
+
+@cisternal.tool(registry="bathos", name="add_run_edge")
+@traced_tool
+@require_write_token
+async def mcp_add_run_edge_tool(
+    child_run_id: str = "",
+    parent_run_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token
+) -> dict:
+    """Record a parent-child derivation edge in `run_edges` (#2079).
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return add_run_edge_tool(
+        child_run_id=child_run_id,
+        parent_run_id=parent_run_id,
+        catalog_dir=catalog_dir,
+        project_root=project_root,
+    )
+
+
+@cisternal.tool(registry="bathos", name="get_run_parents")
+@traced_tool
+async def mcp_get_run_parents_tool(
+    run_id: str = "",
+    catalog_dir: str = "",
+    project_root: str = "",
+) -> dict:
+    """Return sorted parent run IDs for `run_id` (#2079)."""
+    return get_run_parents_tool(
+        run_id=run_id,
+        catalog_dir=catalog_dir,
+        project_root=project_root,
+    )
+
+
 if __name__ == "__main__":
     init_server_telemetry()
     app.run()
@@ -8188,6 +8459,10 @@ _WIRED = cisternal.wire(
         "warm_outputs",
         "campaign_add",
         "campaign_show",
+        "add_campaign_edge",
+        "get_campaign_parents",
+        "add_run_edge",
+        "get_run_parents",
         "verify",
         "lint",
         "repair_scan",
