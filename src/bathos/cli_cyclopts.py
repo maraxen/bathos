@@ -2878,5 +2878,57 @@ def parity_scaffold_cmd(
         print(text, end="")
 
 
+@parity_app.command(name="grade")
+def parity_grade_cmd(
+    declaration_path: str,
+    *,
+    parity_store: str = "",
+    catalog_dir: str = "",
+    out: str = "",
+    as_of: str = "",
+    verify: bool = False,
+    no_track: bool = False,
+    json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+) -> None:
+    """Grade a parity declaration against stored ``cell_evidence.v1`` (WP05d)."""
+    from bathos.parity.declare import ParityDeclareError
+    from bathos.parity.grader import ParityVerifyError, grade_parity_record
+    from bathos.parity.schema import ParityValidationError
+    from bathos.parity.sealed_dump import SealedDumpError
+    from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
+
+    try:
+        res = grade_parity_record(
+            declaration_path,
+            parity_store=parity_store or None,
+            catalog_dir=catalog_dir or None,
+            as_of=as_of or None,
+            output_path=out or None,
+            verify=verify,
+            track_run=not no_track,
+        )
+    except (
+        ParityDeclareError,
+        ParityValidationError,
+        ParityVerifyError,
+        SealedDumpError,
+        ParityStoreConfigError,
+        ParityStoreUnavailableError,
+    ) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_out:
+        print(json.dumps(res.result, indent=2, sort_keys=True))
+    elif verify:
+        print(f"VERIFIED: {res.result_path}")
+    else:
+        cl = res.result["clauses"][0]
+        print(
+            f"graded {res.record_id}: {cl['axes']['result']['value']} "
+            f"{'+'.join(k.upper() for k in cl['kinds'])} {cl['passing']}/{cl['required']} -> {res.result_path}"
+        )
+
+
 if __name__ == "__main__":
     app()
