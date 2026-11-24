@@ -1,6 +1,6 @@
 # Scientific-Validity Gates: Invariants, Differential Assertions, and Sanity Pre-Flight (debt #200)
 
-**Status:** partial — `[differential]` (#1071) and `[observe].sanity` shipped; `[invariants]` and confirmatory `[sanity]` remain unbuilt.
+**Status:** implemented — `[differential]` (#1071) and `[observe].sanity` shipped earlier; `[invariants]`, confirmatory `[sanity]`, and `conclude_campaign` assumptions gate shipped in `30a676ab` and `8b23455a`.
 
 ## 1. Summary
 
