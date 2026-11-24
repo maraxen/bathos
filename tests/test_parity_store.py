@@ -133,6 +133,15 @@ class TestParityStoreResolution:
         with pytest.raises(ParityStoreConfigError, match="must be a string"):
             resolve_parity_store(start_dir=proj, env={"XDG_CONFIG_HOME": str(xdg)})
 
+        # S5: malformed pyproject.toml or XDG config raises EVEN when explicit or BTH_PARITY_STORE is set
+        bad_proj = tmp_path / "bad_proj"
+        bad_proj.mkdir()
+        (bad_proj / "pyproject.toml").write_text("[tool.bathos.parity\nbroken =", encoding="utf-8")
+        with pytest.raises(ParityStoreConfigError, match="Malformed pyproject.toml"):
+            resolve_parity_store(explicit=tmp_path / "exp", start_dir=bad_proj, env=_isolated_env(tmp_path))
+        with pytest.raises(ParityStoreConfigError, match="must be a string"):
+            resolve_parity_store(explicit=tmp_path / "exp", start_dir=proj, env={"XDG_CONFIG_HOME": str(xdg)})
+
     def test_nc_unconfigured_refuses_with_full_resolution_trace(self, tmp_path: Path) -> None:
         isolated = tmp_path / "no_cfg"
         isolated.mkdir()
@@ -308,3 +317,20 @@ class TestCliParityWhere:
         proc_lint_fail = _run_bth_cli("parity", "lint-store", str(bad_pkg), cwd=tmp_path)
         assert proc_lint_fail.returncode == 1
         assert "ERROR:" in proc_lint_fail.stderr
+
+        # S4: `bth parity where <path>` resolves from path's directory
+        proj = tmp_path / "anchored_proj"
+        sub = proj / "sub"
+        sub.mkdir(parents=True)
+        (proj / "pyproject.toml").write_text('[project]\nname = "p"\n[tool.bathos.parity]\nstore = ".pstore"\n', encoding="utf-8")
+        decl_file = sub / "demo.parity.bth.toml"
+        decl_file.write_text("# stub\n", encoding="utf-8")
+        proc_path = _run_bth_cli(
+            "parity", "where", str(decl_file), "--json",
+            env_extra={"XDG_CONFIG_HOME": str(tmp_path / "empty_xdg")},
+            cwd=tmp_path,
+        )
+        assert proc_path.returncode == 0
+        parsed = json.loads(proc_path.stdout)
+        assert parsed["source"] == LAYER_PYPROJECT
+        assert Path(parsed["path"]) == (proj / ".pstore").resolve()

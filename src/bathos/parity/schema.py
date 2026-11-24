@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -442,9 +443,14 @@ def _validate_use_entry(
 
     if "floor_multiple" in use:
         fm = use["floor_multiple"]
-        if isinstance(fm, bool) or not isinstance(fm, (int, float)) or fm <= 0:
+        if (
+            isinstance(fm, bool)
+            or not isinstance(fm, (int, float))
+            or not math.isfinite(float(fm))
+            or fm <= 0
+        ):
             issues.append(
-                ValidationIssue(f"{prefix}.floor_multiple", "G01_VALUE", "floor_multiple must be > 0")
+                ValidationIssue(f"{prefix}.floor_multiple", "G01_VALUE", "floor_multiple must be finite and > 0")
             )
         if not _is_nonempty_str(use.get("judgement_id")):
             issues.append(
@@ -770,16 +776,26 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
             )
         for num_f in ("atol", "rtol"):
             val = tol.get(num_f)
-            if val is not None and (isinstance(val, bool) or not isinstance(val, (int, float)) or val < 0):
-                issues.append(ValidationIssue(f"{prefix}.{num_f}", "G01_VALUE", f"{num_f} must be >= 0"))
+            if val is not None and (
+                isinstance(val, bool)
+                or not isinstance(val, (int, float))
+                or not math.isfinite(float(val))
+                or val < 0
+            ):
+                issues.append(ValidationIssue(f"{prefix}.{num_f}", "G01_VALUE", f"{num_f} must be finite and >= 0"))
         basis = tol.get("basis")
         if basis is not None and basis not in TOLERANCE_BASES:
             issues.append(ValidationIssue(f"{prefix}.basis", "G01_ENUM", f"invalid tolerance basis {basis!r}"))
         if basis == "decomposition_floor":
             _require_fields(tol, prefix, ("floor_multiple", "basis_evidence"), issues)
             fm = tol.get("floor_multiple")
-            if fm is not None and (isinstance(fm, bool) or not isinstance(fm, (int, float)) or fm <= 0):
-                issues.append(ValidationIssue(f"{prefix}.floor_multiple", "G01_VALUE", "must be > 0"))
+            if fm is not None and (
+                isinstance(fm, bool)
+                or not isinstance(fm, (int, float))
+                or not math.isfinite(float(fm))
+                or fm <= 0
+            ):
+                issues.append(ValidationIssue(f"{prefix}.floor_multiple", "G01_VALUE", "must be finite and > 0"))
             be = tol.get("basis_evidence")
             if isinstance(be, Mapping):
                 _require_fields(be, f"{prefix}.basis_evidence", ("run_id", "data_tier", "shapes", "dtypes"), issues)
@@ -845,6 +861,35 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
             pr = cell.get("pooling_rule")
             if pr is not None and pr not in POOLING_RULES:
                 issues.append(ValidationIssue(f"{prefix}.pooling_rule", "G01_ENUM", f"invalid pooling_rule {pr!r}"))
+
+            if "dump_keys" in cell:
+                issues.append(
+                    ValidationIssue(
+                        f"{prefix}.dump_keys",
+                        "G01_FORBIDDEN_FIELD",
+                        "dump_keys is forbidden; use reference_members = { ours_key = 'dump_member_key' }",
+                    )
+                )
+            if "reference_members" in cell:
+                rm = cell["reference_members"]
+                if not isinstance(rm, Mapping) or not rm:
+                    issues.append(
+                        ValidationIssue(
+                            f"{prefix}.reference_members",
+                            "G01_VALUE",
+                            "reference_members must be a non-empty table mapping ours_key -> dump_member_key",
+                        )
+                    )
+                else:
+                    for ok, rk in rm.items():
+                        if not _is_nonempty_str(ok) or not _is_nonempty_str(rk):
+                            issues.append(
+                                ValidationIssue(
+                                    f"{prefix}.reference_members",
+                                    "G01_VALUE",
+                                    "reference_members keys and values must be non-empty strings",
+                                )
+                            )
 
             # G02 checks on (reference_kind, parity_kind) and (reference_kind, pairing)
             eff_kind = use_obj.get("parity_kind") if use_obj else None
@@ -1100,8 +1145,25 @@ def validate_result_structure(result: Mapping[str, Any]) -> list[ValidationIssue
         for k in ("as_of", "target_revisions", "drift_run_id", "ledger_high_water_mark", "gate_stages", "comparison_backend"):
             if k not in gi:
                 issues.append(ValidationIssue(f"result.grade_inputs.{k}", "RESULT_MISSING_FIELD", f"missing grade_inputs.{k}"))
+        if "parity_store" in gi and gi["parity_store"] is not None:
+            ps = gi["parity_store"]
+            if not isinstance(ps, Mapping) or not _is_nonempty_str(ps.get("path")) or not _is_nonempty_str(ps.get("layer")):
+                issues.append(ValidationIssue("result.grade_inputs.parity_store", "RESULT_TYPE", "parity_store must have non-empty path and layer"))
+        if "evidence_run_ids_filter" in gi and gi["evidence_run_ids_filter"] is not None:
+            erf = gi["evidence_run_ids_filter"]
+            if not isinstance(erf, list) or any(not isinstance(x, str) for x in erf):
+                issues.append(ValidationIssue("result.grade_inputs.evidence_run_ids_filter", "RESULT_TYPE", "evidence_run_ids_filter must be list of strings or null"))
+        if "overlay_hooks" in gi and gi["overlay_hooks"] is not None:
+            oh = gi["overlay_hooks"]
+            if not isinstance(oh, list) or any(not isinstance(x, str) for x in oh):
+                issues.append(ValidationIssue("result.grade_inputs.overlay_hooks", "RESULT_TYPE", "overlay_hooks must be list of strings"))
     elif gi is not None:
         issues.append(ValidationIssue("result.grade_inputs", "RESULT_TYPE", "grade_inputs must be an object"))
+
+    if "parity_store" in result and result["parity_store"] is not None:
+        ps = result["parity_store"]
+        if not isinstance(ps, Mapping) or not _is_nonempty_str(ps.get("path")) or not _is_nonempty_str(ps.get("layer")):
+            issues.append(ValidationIssue("result.parity_store", "RESULT_TYPE", "parity_store must have non-empty path and layer"))
 
     ev_runs = result.get("evidence_runs")
     if isinstance(ev_runs, list):

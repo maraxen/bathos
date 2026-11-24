@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +23,21 @@ from bathos.parity.badge import (
 )
 from bathos.parity.declare import load_parsed_declaration
 from bathos.parity.evidence import load_cell_evidence_for_record
+from bathos.parity.grader import CellOverlayHook, grade_parity_record
 from bathos.parity.schema import ValidationIssue, canonical_json
 from bathos.parity.store import (
     ParityStore,
     atomic_write_bytes,
     require_parity_store,
+    resolve_start_dir,
     validate_safe_store_segment,
 )
 
 REPORT_SCHEMA_VERSION = "parity_report.v1"
+
+
+class ParityReportVerifyError(RuntimeError):
+    """Raised when report T0->T1->T2->T3 tier chain or bundle verification fails."""
 
 
 def _verified_blob_status(store: ParityStore, sha: str) -> str:
@@ -55,6 +61,8 @@ def build_t3_bundle_manifest(
     result: Mapping[str, Any],
     declaration: Mapping[str, Any],
     store: ParityStore,
+    store_meta: Mapping[str, str] | None = None,
+    write: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Build deterministic T3 bundle manifest (§9.3.3) with `absent` markers for un-stored members."""
     record_id = validate_safe_store_segment(str(result["record_id"]), "record_id")
@@ -221,7 +229,7 @@ def build_t3_bundle_manifest(
         "evidence_runs": [
             {
                 "run_id": r["run_id"],
-                "status": "present" if r.get("status") != "untracked_fixture" else "absent",
+                "status": "present" if r.get("status") not in ("untracked_fixture", "unknown", None, "") else "absent",
                 "validity_state": r.get("validity_state", "current"),
                 "declaration_blob_sha256": r.get("declaration_blob_sha256"),
                 "env_blob_sha256": r.get("env_blob_sha256"),
@@ -236,14 +244,18 @@ def build_t3_bundle_manifest(
         "judgements": judgements_entries,
         "ledger_high_water_mark": result.get("grade_inputs", {}).get("ledger_high_water_mark"),
     }
+    effective_store_meta = store_meta if store_meta is not None else result.get("parity_store")
+    if isinstance(effective_store_meta, Mapping):
+        manifest["parity_store"] = dict(effective_store_meta)
     manifest_bytes = canonical_report_bytes(manifest)
     bundle_sha = hashlib.sha256(manifest_bytes).hexdigest()
-    store.put_bytes(manifest_bytes)
-    bundles_root = (store.root / "bundles").resolve()
-    bundle_index = (bundles_root / f"{record_id}.parity.bundle.json").resolve()
-    if bundles_root not in bundle_index.parents:
-        raise ValueError(f"Bundle index path escapes bundles directory: {record_id!r}")
-    atomic_write_bytes(bundle_index, manifest_bytes)
+    if write:
+        store.put_bytes(manifest_bytes)
+        bundles_root = (store.root / "bundles").resolve()
+        bundle_index = (bundles_root / f"{record_id}.parity.bundle.json").resolve()
+        if bundles_root not in bundle_index.parents:
+            raise ValueError(f"Bundle index path escapes bundles directory: {record_id!r}")
+        atomic_write_bytes(bundle_index, manifest_bytes)
     return bundle_sha, manifest
 
 
@@ -273,6 +285,10 @@ def build_parity_report(
     *,
     decl_path: Path | str | None = None,
     parity_store: Path | str | None = None,
+    catalog_dir: Path | str | None = None,
+    evidence_run_ids: Sequence[str] | None = None,
+    cell_runs: Mapping[str, Sequence[str]] | None = None,
+    overlay_hooks: Sequence[CellOverlayHook] = (),
     output_path: Path | str | None = None,
     optional_sections: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
@@ -296,9 +312,23 @@ def build_parity_report(
             f"Result record_sha256 {result.get('record_sha256')!r} does not match declaration sha256 {decl_sha!r}"
         )
 
-    store, _store_res = require_parity_store(explicit=parity_store, start_dir=rpath.parent)
+    # B2: Refuse forged/stale result.json by replaying deterministic verification before building T2/T3
+    grade_parity_record(
+        dpath,
+        parity_store=parity_store,
+        catalog_dir=catalog_dir,
+        evidence_run_ids=evidence_run_ids,
+        cell_runs=cell_runs,
+        output_path=rpath,
+        verify=True,
+        track_run=False,
+        overlay_hooks=overlay_hooks,
+    )
+
+    store, store_res = require_parity_store(explicit=parity_store, start_dir=resolve_start_dir(dpath))
+    store_meta = {"path": str(store.root), "layer": store_res.source}
     bundle_sha, _t3_manifest = build_t3_bundle_manifest(
-        result=result, declaration=declaration, store=store
+        result=result, declaration=declaration, store=store, store_meta=store_meta
     )
 
     parity_sec = declaration.get("parity", {})
@@ -311,6 +341,11 @@ def build_parity_report(
 
     opt = dict(optional_sections or {})
     cells_sorted = sorted(result.get("cells", []), key=lambda c: str(c["cell_id"]))
+    evidence_level = (
+        "reexecuted"
+        if cells_sorted and all(c.get("evidence_level") == "reexecuted" for c in cells_sorted)
+        else "self_reported"
+    )
 
     # Report body WITHOUT badge (§9.3.3 no hash cycle)
     report_body: dict[str, Any] = {
@@ -319,6 +354,7 @@ def build_parity_report(
         "record_id": result["record_id"],
         "record_sha256": result["record_sha256"],
         "result_sha256": result_sha,
+        "parity_store": store_meta,
         "parity_metadata": {
             "prong": parity_sec.get("prong"),
             "layer_under_test": parity_sec.get("layer_under_test"),
@@ -363,7 +399,7 @@ def build_parity_report(
         "dual_display_result": result.get("dual_display_result"),
         "gates": result["gates"],
         "prior_records_on_pair": result["prior_records_on_pair"],
-        "evidence_level": "self_reported",
+        "evidence_level": evidence_level,
         "bundle_sha256": bundle_sha,
         "generator": {
             "name": "bathos",
@@ -408,6 +444,195 @@ def build_parity_report(
     return out_p, full_report
 
 
+def verify_report_tier_chain_in_memory(report: Mapping[str, Any]) -> None:
+    """Recompute and verify T0 -> T1 -> T2 hash and badge consistency for an in-memory report."""
+    badge = report.get("badge")
+    if not isinstance(badge, Mapping):
+        raise ParityReportVerifyError("TIER_LINK_BROKEN:T0 missing or invalid badge object")
+    report_body = {k: v for k, v in report.items() if k != "badge"}
+    try:
+        h2 = hashlib.sha256(canonical_report_bytes(report_body)).hexdigest()
+        t1 = render_t1(report_body, h2)
+        h1 = hashlib.sha256(t1.encode("utf-8")).hexdigest()
+        t0 = render_t0(report_body, h1)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ParityReportVerifyError(f"TIER_LINK_BROKEN:T2 malformed report body: {exc}") from exc
+
+    if badge.get("t2_sha256") != h2:
+        raise ParityReportVerifyError(
+            f"TIER_LINK_BROKEN:T2 t2_sha256 mismatch: stored={badge.get('t2_sha256')!r}, computed={h2!r}"
+        )
+    if badge.get("t1") != t1:
+        raise ParityReportVerifyError("TIER_LINK_BROKEN:T1 rendered T1 badge mismatch")
+    if badge.get("t1_sha256") != h1:
+        raise ParityReportVerifyError(
+            f"TIER_LINK_BROKEN:T1 t1_sha256 mismatch: stored={badge.get('t1_sha256')!r}, computed={h1!r}"
+        )
+    if badge.get("t0") != t0:
+        raise ParityReportVerifyError("TIER_LINK_BROKEN:T0 rendered T0 badge mismatch")
+    badge_errs = validate_badge(t0, t1, report_body)
+    if badge_errs:
+        raise ParityReportVerifyError(f"TIER_LINK_BROKEN:T0 {'; '.join(badge_errs)}")
+
+
+def verify_parity_report(
+    report_path: Path | str,
+    *,
+    result_path: Path | str | None = None,
+    decl_path: Path | str | None = None,
+    parity_store: Path | str | None = None,
+    catalog_dir: Path | str | None = None,
+    evidence_run_ids: Sequence[str] | None = None,
+    cell_runs: Mapping[str, Sequence[str]] | None = None,
+    overlay_hooks: Sequence[CellOverlayHook] = (),
+) -> dict[str, Any]:
+    """Verify full T0 -> T1 -> T2 -> T3 disclosure chain and optional result/declaration replay."""
+    rpath = Path(report_path).resolve()
+    if not rpath.is_file():
+        raise ParityReportVerifyError(f"Report file not found: {rpath}")
+    try:
+        report = json.loads(rpath.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ParityReportVerifyError(f"Malformed report JSON at {rpath}: {exc}") from exc
+    if not isinstance(report, Mapping):
+        raise ParityReportVerifyError(f"Report JSON at {rpath} must be an object")
+
+    struct_issues = validate_report_structure(report)
+    if struct_issues:
+        raise ParityReportVerifyError(
+            "Report structure validation failed: " + "; ".join(str(i) for i in struct_issues)
+        )
+    verify_report_tier_chain_in_memory(report)
+
+    res_p: Path | None = Path(result_path).resolve() if result_path is not None else None
+    dpath: Path | None = Path(decl_path).resolve() if decl_path is not None else None
+    if rpath.name.endswith(".parity.report.json"):
+        stem = rpath.name[: -len(".parity.report.json")]
+        if res_p is None:
+            cand_res = rpath.parent / f"{stem}.parity.result.json"
+            if cand_res.is_file():
+                res_p = cand_res
+        if dpath is None:
+            cand_decl = rpath.parent / f"{stem}.parity.bth.toml"
+            if cand_decl.is_file():
+                dpath = cand_decl
+    if dpath is None and res_p is not None and res_p.name.endswith(".parity.result.json"):
+        res_stem = res_p.name[: -len(".parity.result.json")]
+        cand_decl = res_p.parent / f"{res_stem}.parity.bth.toml"
+        if cand_decl.is_file():
+            dpath = cand_decl
+
+    if result_path is not None and dpath is None:
+        raise ParityReportVerifyError(
+            f"result_path {res_p} given but companion declaration *.parity.bth.toml not found; pass decl_path"
+        )
+    if decl_path is not None and res_p is None:
+        raise ParityReportVerifyError(
+            f"decl_path {dpath} given but companion result *.parity.result.json not found; pass result_path"
+        )
+
+    store_anchor = resolve_start_dir(dpath if dpath is not None else rpath)
+    store, _store_res = require_parity_store(explicit=parity_store, start_dir=store_anchor)
+
+    bundle_sha = str(report["bundle_sha256"])
+    try:
+        bundle_bytes = store.get_bytes(bundle_sha)
+        t3_manifest = json.loads(bundle_bytes.decode("utf-8"))
+    except (FileNotFoundError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ParityReportVerifyError(
+            f"TIER_LINK_BROKEN:T3 bundle {bundle_sha} missing or corrupt in store {store.root}: {exc}"
+        ) from exc
+    if not isinstance(t3_manifest, Mapping):
+        raise ParityReportVerifyError(f"TIER_LINK_BROKEN:T3 bundle {bundle_sha} must be a JSON object")
+
+    present_count = 0
+    absent_count = 0
+    for section, sha_key in (
+        ("declarations", "sha256"),
+        ("inputs", "sha256"),
+        ("arrays", "bundle_sha256"),
+        ("sealed_dumps", "dump_sha256"),
+        ("env_blobs", "sha256"),
+    ):
+        entries = t3_manifest.get(section, [])
+        if not isinstance(entries, list):
+            raise ParityReportVerifyError(f"TIER_LINK_BROKEN:T3 manifest {section!r} must be a list")
+        for idx, item in enumerate(entries):
+            if not isinstance(item, Mapping):
+                raise ParityReportVerifyError(
+                    f"TIER_LINK_BROKEN:T3 manifest {section}[{idx}] must be an object"
+                )
+            status = item.get("status")
+            if status == "absent":
+                absent_count += 1
+            elif status == "present":
+                member_sha = item.get(sha_key)
+                if not isinstance(member_sha, str) or not member_sha:
+                    raise ParityReportVerifyError(
+                        f"TIER_LINK_BROKEN:T3 manifest {section}[{idx}] missing {sha_key}"
+                    )
+                try:
+                    store.get_bytes(member_sha)
+                except (FileNotFoundError, ValueError) as exc:
+                    raise ParityReportVerifyError(
+                        f"TIER_LINK_BROKEN:T3 present member {section}[{idx}] ({member_sha}) missing or corrupt: {exc}"
+                    ) from exc
+                present_count += 1
+            else:
+                raise ParityReportVerifyError(
+                    f"TIER_LINK_BROKEN:T3 manifest {section}[{idx}] has invalid status {status!r}"
+                )
+
+    result_verified = False
+    if res_p is not None and dpath is not None:
+        if not res_p.is_file():
+            raise ParityReportVerifyError(f"Result file not found: {res_p}")
+        res_bytes = res_p.read_bytes()
+        actual_res_sha = hashlib.sha256(res_bytes).hexdigest()
+        if actual_res_sha != report.get("result_sha256"):
+            raise ParityReportVerifyError(
+                f"TIER_LINK_BROKEN:T2 result_sha256 mismatch: report={report.get('result_sha256')!r}, actual={actual_res_sha!r}"
+            )
+        grade_parity_record(
+            dpath,
+            parity_store=parity_store,
+            catalog_dir=catalog_dir,
+            evidence_run_ids=evidence_run_ids,
+            cell_runs=cell_runs,
+            output_path=res_p,
+            verify=True,
+            track_run=False,
+            overlay_hooks=overlay_hooks,
+        )
+        result_obj = json.loads(res_bytes.decode("utf-8"))
+        _raw_decl, decl_obj = load_parsed_declaration(dpath)
+        recomputed_bundle_sha, _ = build_t3_bundle_manifest(
+            result=result_obj,
+            declaration=decl_obj,
+            store=store,
+            store_meta=report.get("parity_store") if isinstance(report.get("parity_store"), Mapping) else None,
+            write=False,
+        )
+        if recomputed_bundle_sha != bundle_sha:
+            raise ParityReportVerifyError(
+                f"TIER_LINK_BROKEN:T3 bundle_sha256 mismatch: stored={bundle_sha!r}, recomputed={recomputed_bundle_sha!r}"
+            )
+        result_verified = True
+
+    return {
+        "verified": True,
+        "record_id": str(report["record_id"]),
+        "report_path": str(rpath),
+        "t0_verified": True,
+        "t1_sha256": str(report["badge"]["t1_sha256"]),
+        "t2_sha256": str(report["badge"]["t2_sha256"]),
+        "bundle_sha256": bundle_sha,
+        "present_members": present_count,
+        "absent_members": absent_count,
+        "result_verified": result_verified,
+    }
+
+
 def _md_cell(val: Any) -> str:
     return str(val).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
@@ -432,6 +657,7 @@ def _render_gates_summary(gates: list[Mapping[str, Any]]) -> str:
 
 def render_report_markdown(report: Mapping[str, Any]) -> str:
     """Render deterministic Markdown summary + matrix strictly from report JSON (§9.2)."""
+    verify_report_tier_chain_in_memory(report)
     badge = report["badge"]
     tool = report["tool"]
     counts = report["cell_counts"]
@@ -448,6 +674,7 @@ def render_report_markdown(report: Mapping[str, Any]) -> str:
         f"- **T1 Badge:** `{badge['t1']}`",
         f"- **T2 Hash:** `{badge['t2_sha256']}`",
         f"- **T3 Bundle Hash:** `{report['bundle_sha256']}`",
+        f"- **Evidence level:** {report.get('evidence_level', 'self_reported')}",
         f"- **Implementation:** `{tool['name']}@{str(tool['revision'])[:12]}` ({tool['licence']})",
         f"- **Coverage:** {counts['passing']}/{counts['required']} passing "
         f"(not_run={counts['not_run']}, not_covered={counts['not_covered']}, waived={counts['waived']})",
@@ -510,6 +737,7 @@ _VERDICT_COLORS: dict[str, str] = {
 
 def render_report_html(report: Mapping[str, Any]) -> str:
     """Render deterministic self-contained HTML summary + verdict matrix strictly from report JSON (§9.2)."""
+    verify_report_tier_chain_in_memory(report)
     badge = report["badge"]
     tool = report["tool"]
     counts = report["cell_counts"]
@@ -574,6 +802,7 @@ th {{ background: #f6f8fa; }}
 <ul>
   <li><strong>T2 Body SHA-256:</strong> <code>{_e(badge['t2_sha256'])}</code></li>
   <li><strong>T3 Bundle SHA-256:</strong> <code>{_e(report['bundle_sha256'])}</code></li>
+  <li><strong>Evidence level:</strong> {_e(report.get('evidence_level', 'self_reported'))}</li>
   <li><strong>Implementation:</strong> <code>{_e(tool['name'])}@{_e(str(tool['revision'])[:12])}</code></li>
   <li><strong>Coverage:</strong> {_e(counts['passing'])}/{_e(counts['required'])} passing (not_run={_e(counts['not_run'])}, not_covered={_e(counts['not_covered'])}, waived={_e(counts['waived'])})</li>
   <li><strong>Gates:</strong> {_e(_render_gates_summary(report['gates']))}</li>
@@ -672,4 +901,13 @@ def validate_report_structure(report: Mapping[str, Any]) -> list[ValidationIssue
         for gk in ("name", "version", "schema"):
             if not isinstance(gen.get(gk), str) or not str(gen.get(gk)).strip():
                 issues.append(ValidationIssue(f"report.generator.{gk}", "REPORT_GEN", f"generator.{gk} must be non-empty string"))
+    ps = report.get("parity_store")
+    if ps is not None and (
+        not isinstance(ps, Mapping)
+        or not isinstance(ps.get("path"), str)
+        or not str(ps.get("path")).strip()
+        or not isinstance(ps.get("layer"), str)
+        or not str(ps.get("layer")).strip()
+    ):
+        issues.append(ValidationIssue("report.parity_store", "REPORT_STORE", "parity_store must have non-empty path and layer"))
     return issues

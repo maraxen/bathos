@@ -101,13 +101,17 @@ class TestBitwiseAndElementwiseMetrics:
             rtol=0.0,
         ).nonfinite_mismatch is True
 
-        # Empty and all-nonfinite arrays
+        # Empty and all-nonfinite arrays are degenerate and must NEVER pass
         empty = np.array([], dtype=np.float32)
         res_empty = compare_within_tolerance(empty, empty, atol=0.0, rtol=0.0)
-        assert res_empty.within_tolerance and res_empty.max_abs_diff == 0.0
+        assert not res_empty.within_tolerance
+        assert res_empty.degenerate is True
+        assert res_empty.max_abs_diff is None
         all_nan = np.array([np.nan, np.inf], dtype=np.float32)
         res_nan = compare_within_tolerance(all_nan, all_nan, atol=0.0, rtol=0.0)
-        assert res_nan.within_tolerance and res_nan.max_abs_diff == 0.0
+        assert not res_nan.within_tolerance
+        assert res_nan.degenerate is True
+        assert res_nan.max_abs_diff is None
 
         # Matching nonfinite mask (bug_compatible style) compares finite subset cleanly
         b2 = np.array([1.0005, np.nan], dtype=np.float32)
@@ -137,9 +141,13 @@ class TestBitwiseAndElementwiseMetrics:
         assert not res.equal
         assert res.n_differing_bytes >= 1
 
-        # Same payload bit pattern is equal
+        # All-nonfinite bitwise is degenerate (equal=False, n_differing_bytes=0); with a finite element same payload is equal
         nan1_copy = np.array([struct.unpack("<f", b"\x01\x00\xc0\x7f")[0]], dtype="<f4")
-        assert compare_bitwise(nan1, nan1_copy).equal
+        res_all_nan = compare_bitwise(nan1, nan1_copy)
+        assert not res_all_nan.equal and res_all_nan.degenerate is True and res_all_nan.n_differing_bytes == 0
+        mix1 = np.array([1.0, nan1[0]], dtype="<f4")
+        mix1_copy = np.array([1.0, nan1_copy[0]], dtype="<f4")
+        assert compare_bitwise(mix1, mix1_copy).equal
 
     def test_backend_identity(self) -> None:
         ident = get_backend_identity()

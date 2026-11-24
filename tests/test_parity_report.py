@@ -15,6 +15,7 @@ import jsonschema
 import numpy as np
 import pytest
 
+from bathos.catalog import init_catalog, write_run
 from bathos.cli_cyclopts import app
 from bathos.parity.axes import RING0_ACTIVE_G_CODES, compute_axes_and_clauses
 from bathos.parity.badge import (
@@ -26,16 +27,19 @@ from bathos.parity.badge import (
 )
 from bathos.parity.declare import declare_parity_record
 from bathos.parity.evidence import write_cell_evidence
-from bathos.parity.grader import grade_parity_record
+from bathos.parity.grader import ParityVerifyError, grade_parity_record
 from bathos.parity.report import (
+    ParityReportVerifyError,
     build_parity_report,
     canonical_report_bytes,
     render_report_html,
     render_report_markdown,
     validate_report_structure,
+    verify_parity_report,
 )
 from bathos.parity.schema import ALL_G_CODES, compute_cell_id, render_declaration_scaffold
 from bathos.parity.store import ParityStore
+from bathos.schema import Run
 
 
 def _run_bth_cli(*args: str, env_extra: dict[str, str] | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -139,18 +143,18 @@ class TestWorkedBadgeExamples:
         assert t0 == (
             f"PROVISIONAL · PASSES WITHIN-TOLERANCE 4/4 · knobs not computed · retrospective · "
             f"aminx@1234567890ab vs sealed dump frustrampnn-1ubq@3a03cdc300bf (dump ded4dbb6f472) · "
-            f"owner-stated tolerance · std 1.0.0 · T1 {h1[:12]}"
+            f"owner-stated tolerance · self-reported · std 1.0.0 · T1 {h1[:12]}"
         )
         assert t1 == (
             "PROVISIONAL (21 checks pending) · PASSES WITHIN-TOLERANCE 4/4 · retrospective · "
             "aminx@1234567890ab vs sealed dump frustrampnn-1ubq@3a03cdc300bf (dump ded4dbb6f472) · "
             "layer model · tier toy · pairing fixture · knobs not computed · "
             "gates: 0 enforce, 0 advisory, 3 shadow, 23 not active · waived (3) · "
-            f"owner-stated tolerance · std 1.0.0 · T2 {h2[:12]}"
+            f"owner-stated tolerance · self-reported · std 1.0.0 · T2 {h2[:12]}"
         )
         assert validate_badge(t0, t1, body) == []
 
-        # Example 20: tolerance loosened after first declaration
+        # Example 20: tolerance loosened after first declaration (Rev 9: no knobs not computed inside dual-display)
         fail_cells = [{**c, "verdict": "fail"} for c in cells]
         dual_clauses, _, _ = compute_axes_and_clauses(
             declaration=decl,
@@ -177,10 +181,10 @@ class TestWorkedBadgeExamples:
         t0_20 = render_t0(body, h1_20)
         assert (
             "PROVISIONAL · PASSES WITHIN-TOLERANCE 4/4 · knobs not computed · amended · "
-            "as first declared: FAILS WITHIN-TOLERANCE 0/4, knobs not computed, retrospective"
+            "as first declared: FAILS WITHIN-TOLERANCE 0/4, retrospective"
         ) in t0_20
         assert (
-            "as first declared: FAILS WITHIN-TOLERANCE 0/4, knobs not computed, retrospective"
+            "as first declared: FAILS WITHIN-TOLERANCE 0/4, retrospective"
         ) in t1_20
         assert validate_badge(t0_20, t1_20, body) == []
 
@@ -222,45 +226,65 @@ class TestWorkedBadgeExamples:
         assert "FAILS WITHIN-TOLERANCE 0/1, stale (1); PASSES BEHAVIOURAL 1/1" in t0_16
 
 
+def _recompute_badge(rep: dict) -> dict:
+    body = {k: v for k, v in rep.items() if k != "badge"}
+    h2 = hashlib.sha256(canonical_report_bytes(body)).hexdigest()
+    t1 = render_t1(body, h2)
+    h1 = hashlib.sha256(t1.encode("utf-8")).hexdigest()
+    t0 = render_t0(body, h1)
+    out = dict(body)
+    out["badge"] = {"t0": t0, "t1": t1, "t1_sha256": h1, "t2_sha256": h2}
+    return out
+
+
+def _build_graded_fixture(tmp_path: Path, *, run_evidence: bool = True) -> tuple[Path, Path, Path, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    store_dir = tmp_path / "store"
+    cat_dir = tmp_path / "catalog"
+    init_catalog(cat_dir)
+    decl_path = repo / "demo.parity.bth.toml"
+    raw_toml = render_declaration_scaffold("demo-report-v1", impl_name="aminx").replace(
+        'kind = "sealed_dump"\n'
+        'identity = { dump_sha256 = "0000000000000000000000000000000000000000000000000000000000000000", producer_run_id = "run_0000", upstream_commit = "0000000000000000000000000000000000000000" }',
+        'kind = "upstream_live"\n'
+        f'identity = {{ repo = "https://github.com/example/upstream", commit = "{"a" * 40}" }}',
+    )
+    decl_path.write_text(raw_toml, encoding="utf-8")
+    decl = tomllib.loads(decl_path.read_text(encoding="utf-8"))
+    declare_parity_record(decl_path, parity_store=store_dir)
+    if run_evidence:
+        cid = _cell_id(decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r1", exit_code=0, status="completed", outcome="pass"),
+            cat_dir,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-report-v1",
+            cell_id=cid,
+            run_id="r1",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+    graded = grade_parity_record(
+        decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False
+    )
+    return decl_path, graded.result_path, store_dir, cat_dir
+
+
 class TestReportGenerationAndNegativeControls:
     def _build_graded_fixture(self, tmp_path: Path, *, run_evidence: bool = True) -> tuple[Path, Path, Path, Path]:
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        _init_git_repo(repo)
-        store_dir = tmp_path / "store"
-        cat_dir = tmp_path / "catalog"
-        decl_path = repo / "demo.parity.bth.toml"
-        raw_toml = render_declaration_scaffold("demo-report-v1", impl_name="aminx").replace(
-            'kind = "sealed_dump"\n'
-            'identity = { dump_sha256 = "0000000000000000000000000000000000000000000000000000000000000000", producer_run_id = "run_0000", upstream_commit = "0000000000000000000000000000000000000000" }',
-            'kind = "upstream_live"\n'
-            f'identity = {{ repo = "https://github.com/example/upstream", commit = "{"a" * 40}" }}',
-        )
-        decl_path.write_text(raw_toml, encoding="utf-8")
-        decl = tomllib.loads(decl_path.read_text(encoding="utf-8"))
-        declare_parity_record(decl_path, parity_store=store_dir)
-        if run_evidence:
-            cid = _cell_id(decl)
-            write_cell_evidence(
-                store=store_dir,
-                record_id="demo-report-v1",
-                cell_id=cid,
-                run_id="r1",
-                ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
-                reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
-                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
-            )
-        graded = grade_parity_record(
-            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False
-        )
-        return decl_path, graded.result_path, store_dir, cat_dir
+        return _build_graded_fixture(tmp_path, run_evidence=run_evidence)
 
     def test_determinism_hash_links_and_not_computed_sections(self, tmp_path: Path) -> None:
-        decl_path, res_path, store_dir, _cat = self._build_graded_fixture(tmp_path)
+        decl_path, res_path, store_dir, cat_dir = self._build_graded_fixture(tmp_path)
         out1 = tmp_path / "r1.parity.report.json"
         out2 = tmp_path / "r2.parity.report.json"
-        _, rep1 = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir, output_path=out1)
-        _, rep2 = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir, output_path=out2)
+        _, rep1 = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir, output_path=out1)
+        _, rep2 = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir, output_path=out2)
 
         # Determinism
         assert out1.read_bytes() == out2.read_bytes()
@@ -329,15 +353,16 @@ class TestReportGenerationAndNegativeControls:
         errs = validate_badge(bad_t0, t1, body)
         assert any("knobs not computed" in e or "retrospective" in e for e in errs)
 
-    def test_nc_not_run_and_not_covered_render_partial(self, tmp_path: Path) -> None:
-        decl_path, res_path, store_dir, _cat = self._build_graded_fixture(tmp_path, run_evidence=False)
+    def test_nc_not_run_and_not_covered_render_partial(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        decl_path, res_path, store_dir, cat_dir = self._build_graded_fixture(tmp_path, run_evidence=False)
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
         _, rep = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir)
         t0 = rep["badge"]["t0"]
         assert "NO RESULT WITHIN-TOLERANCE 0/1" in t0
         assert "partial (1 not run)" in t0
         assert "PASSES" not in t0
 
-        # Full recomputed not_covered flow through compute_axes_and_clauses -> build_parity_report -> MD/HTML
+        # Editing result.json to forge verdict="not_covered" MUST be refused by build_parity_report
         decl = tomllib.loads(decl_path.read_text(encoding="utf-8"))
         res_obj = json.loads(res_path.read_text(encoding="utf-8"))
         res_obj["cells"][0]["verdict"] = "not_covered"
@@ -354,7 +379,22 @@ class TestReportGenerationAndNegativeControls:
         res_obj["cell_counts"] = cnt
         nc_res_path = tmp_path / "nc.parity.result.json"
         nc_res_path.write_text(json.dumps(res_obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        _, rep_nc = build_parity_report(nc_res_path, decl_path=decl_path, parity_store=store_dir)
+        with pytest.raises(ParityVerifyError):
+            build_parity_report(nc_res_path, decl_path=decl_path, parity_store=store_dir)
+
+        # In-memory report with not_covered and consistent badge renders partial (1 not covered) cleanly
+        rep_nc = json.loads(json.dumps(rep))
+        rep_nc["cells"][0]["verdict"] = "not_covered"
+        rep_nc["not_covered_cells"] = list(rep_nc["cells"])
+        rep_nc["clauses"] = cl
+        rep_nc["gates"] = g
+        rep_nc["cell_counts"] = cnt
+        body_nc = {k: v for k, v in rep_nc.items() if k != "badge"}
+        h2 = hashlib.sha256(canonical_report_bytes(body_nc)).hexdigest()
+        t1_nc = render_t1(body_nc, h2)
+        h1 = hashlib.sha256(t1_nc.encode("utf-8")).hexdigest()
+        t0_nc = render_t0(body_nc, h1)
+        rep_nc["badge"] = {"t0": t0_nc, "t1": t1_nc, "t1_sha256": h1, "t2_sha256": h2}
         assert "partial (1 not covered" in rep_nc["badge"]["t0"]
         assert "partial (1 not covered" in rep_nc["badge"]["t1"]
         md = render_report_markdown(rep_nc)
@@ -374,6 +414,10 @@ class TestReportGenerationAndNegativeControls:
         d20 = res_dir / "ex20.parity.bth.toml"
         d20.write_text(strict_toml.replace("demo-report-v1", "aminx-parity-v1"), encoding="utf-8")
         first_decl_res = declare_parity_record(d20, parity_store=store_dir, repo_root=decl_path.parent)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-ex20", exit_code=0, status="completed", outcome="pass"),
+            cat_dir,
+        )
         write_cell_evidence(
             store=store_dir,
             record_id="aminx-parity-v1",
@@ -385,7 +429,7 @@ class TestReportGenerationAndNegativeControls:
         )
         d20.write_text(d20.read_text(encoding="utf-8").replace("atol = 1e-6", "atol = 1e-2"), encoding="utf-8")
         graded = grade_parity_record(d20, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False)
-        _, rep = build_parity_report(graded.result_path, decl_path=d20, parity_store=store_dir)
+        _, rep = build_parity_report(graded.result_path, decl_path=d20, parity_store=store_dir, catalog_dir=cat_dir)
         assert "as first declared: FAILS WITHIN-TOLERANCE 0/1" in rep["badge"]["t0"]
         assert "as first declared: FAILS WITHIN-TOLERANCE 0/1" in rep["badge"]["t1"]
 
@@ -410,16 +454,15 @@ class TestReportGenerationAndNegativeControls:
         assert {(a["side"], a["name"]) for a in t3_data["arrays"]} == {("ours", "scores"), ("reference", "scores")}
 
     def test_report_lint_error_from_renderers_and_non_provisional_bypass_blocked(self, tmp_path: Path) -> None:
-        decl_path, res_path, store_dir, _cat = self._build_graded_fixture(tmp_path)
-        _, rep = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir)
+        decl_path, res_path, store_dir, cat_dir = self._build_graded_fixture(tmp_path)
+        _, rep = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir)
 
         # NON-PROVISIONAL must NOT satisfy PROVISIONAL check
         assert lint_rendered_text("NON-PROVISIONAL · PASSES WITHIN-TOLERANCE 1/1", checks_pending=True)
         assert lint_rendered_text("Our parity records show 4/4.", checks_pending=False) == []
 
         # render_report_markdown & render_report_html raise ReportLintError on bare "parity"
-        bad_rep = json.loads(json.dumps(rep))
-        bad_rep["discrepancies"] = "achieves parity on toy"
+        bad_rep = _recompute_badge(json.loads(json.dumps(rep)) | {"discrepancies": "achieves parity on toy"})
         with pytest.raises(ReportLintError, match="bare 'parity'"):
             render_report_markdown(bad_rep)
         with pytest.raises(ReportLintError, match="bare 'parity'"):
@@ -429,9 +472,9 @@ class TestReportGenerationAndNegativeControls:
         bad_decl = decl_path.read_text(encoding="utf-8").replace('name = "aminx"', 'name = "tool achieves parity"')
         bad_dpath = decl_path.parent / "bad_lint.parity.bth.toml"
         bad_dpath.write_text(bad_decl, encoding="utf-8")
-        g_bad = grade_parity_record(bad_dpath, parity_store=store_dir, as_of="2026-11-24T12:00:00Z", track_run=False)
+        g_bad = grade_parity_record(bad_dpath, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False)
         with pytest.raises(ReportLintError):
-            build_parity_report(g_bad.result_path, decl_path=bad_dpath, parity_store=store_dir)
+            build_parity_report(g_bad.result_path, decl_path=bad_dpath, parity_store=store_dir, catalog_dir=cat_dir)
 
     def test_validate_badge_failures_exploratory_and_nonhex_rev(self) -> None:
         decl = tomllib.loads(render_declaration_scaffold("badge-checks-v1", impl_name="aminx!"))
@@ -466,18 +509,19 @@ class TestReportGenerationAndNegativeControls:
         assert any("owner-stated tolerance" in e for e in validate_badge(t0_ok, t1_ok.replace("owner-stated tolerance · ", ""), body))
 
     def test_html_xss_md_pipe_escaping_and_mismatched_decl_rejected(self, tmp_path: Path) -> None:
-        decl_path, res_path, store_dir, _cat = self._build_graded_fixture(tmp_path)
-        _, rep = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir)
+        decl_path, res_path, store_dir, cat_dir = self._build_graded_fixture(tmp_path)
+        _, rep = build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir)
 
         # Mismatched declaration rejected by build_parity_report
         other_decl = decl_path.parent / "other.parity.bth.toml"
         other_decl.write_text(decl_path.read_text(encoding="utf-8").replace("demo-report-v1", "other-report-v1"), encoding="utf-8")
         with pytest.raises(ValueError, match="record_id"):
-            build_parity_report(res_path, decl_path=other_decl, parity_store=store_dir)
+            build_parity_report(res_path, decl_path=other_decl, parity_store=store_dir, catalog_dir=cat_dir)
 
         # HTML escapes <script> and MD escapes | in table cells
         xss_rep = json.loads(json.dumps(rep))
         xss_rep["cells"][0]["component_id"] = "<script>alert(1)</script>|pipe"
+        xss_rep = _recompute_badge(xss_rep)
         html_doc = render_report_html(xss_rep)
         assert "<script>" not in html_doc
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_doc
@@ -485,12 +529,29 @@ class TestReportGenerationAndNegativeControls:
         assert "\\|pipe" in md
 
     def test_cli_build_and_render(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        decl_path, res_path, store_dir, _cat = self._build_graded_fixture(tmp_path)
+        decl_path, res_path, store_dir, cat_dir = self._build_graded_fixture(tmp_path)
         monkeypatch.setenv("BTH_PARITY_STORE", str(store_dir))
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
         rep_out = tmp_path / "cli_report.json"
         md_out = tmp_path / "cli_report.md"
         html_out = tmp_path / "cli_report.html"
-        app(["parity", "report", "build", str(res_path), "--decl-path", str(decl_path), "--out", str(rep_out)], exit_on_error=False)
+        app(
+            [
+                "parity",
+                "report",
+                "build",
+                str(res_path),
+                "--decl-path",
+                str(decl_path),
+                "--parity-store",
+                str(store_dir),
+                "--catalog-dir",
+                str(cat_dir),
+                "--out",
+                str(rep_out),
+            ],
+            exit_on_error=False,
+        )
         app(["parity", "report", "render", str(rep_out), "--format", "md", "--out", str(md_out)], exit_on_error=False)
         assert rep_out.is_file()
         assert md_out.is_file()
@@ -505,3 +566,121 @@ class TestReportGenerationAndNegativeControls:
         bad_json.write_text("{not-json", encoding="utf-8")
         assert _run_bth_cli("parity", "report", "render", str(bad_json), cwd=tmp_path).returncode == 1
         assert _run_bth_cli("parity", "report", "build", str(bad_json), "--decl-path", str(decl_path), cwd=tmp_path).returncode == 1
+
+
+class TestReportCoreAndDisclosureTiers:
+    def test_b2_edit_result_then_build_report_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        decl_path, res_path, store_dir, cat_dir = _build_graded_fixture(tmp_path, run_evidence=False)
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(cat_dir))
+        res_obj = json.loads(res_path.read_text(encoding="utf-8"))
+        # Hand-edit axes.result.value to PASSES and cells[0]["verdict"] to pass
+        res_obj["clauses"][0]["axes"]["result"]["value"] = "PASSES"
+        res_obj["cells"][0]["verdict"] = "pass"
+        res_path.write_text(json.dumps(res_obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with pytest.raises(ParityVerifyError):
+            build_parity_report(res_path, decl_path=decl_path, parity_store=store_dir)
+
+    def test_s7_report_verify_tier_chain_cli_and_render_tamper(self, tmp_path: Path) -> None:
+        decl_path, res_path, store_dir, cat_dir = _build_graded_fixture(tmp_path)
+        rep_path = decl_path.parent / "demo.parity.report.json"
+        _, rep = build_parity_report(
+            res_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir, output_path=rep_path
+        )
+        # S4: parity_store recorded in report_body and T3 bundle
+        assert rep["parity_store"] == {"path": str(store_dir.resolve()), "layer": "cli_arg"}
+        store = ParityStore(store_dir)
+        t3_obj = json.loads(store.get_bytes(rep["bundle_sha256"]).decode("utf-8"))
+        assert t3_obj["parity_store"] == rep["parity_store"]
+
+        # API verify succeeds (with companion discovery and explicit args)
+        info = verify_parity_report(rep_path, parity_store=store_dir, catalog_dir=cat_dir)
+        assert info["verified"] is True and info["result_verified"] is True and info["present_members"] >= 1
+
+        # CLI `bth parity report verify` succeeds + --json
+        proc_v = _run_bth_cli(
+            "parity", "report", "verify", str(rep_path),
+            "--parity-store", str(store_dir), "--catalog-dir", str(cat_dir), "--json",
+            cwd=tmp_path,
+        )
+        assert proc_v.returncode == 0
+        assert json.loads(proc_v.stdout)["verified"] is True
+
+        # Tamper T0 -> TIER_LINK_BROKEN:T0 (and render_report_markdown/html refuse)
+        t0_bad = json.loads(rep_path.read_text(encoding="utf-8"))
+        t0_bad["badge"]["t0"] = "FORGED"
+        with pytest.raises(ParityReportVerifyError, match="TIER_LINK_BROKEN:T0"):
+            render_report_markdown(t0_bad)
+        with pytest.raises(ParityReportVerifyError, match="TIER_LINK_BROKEN:T0"):
+            render_report_html(t0_bad)
+        t0_bad_p = tmp_path / "t0_bad.json"
+        t0_bad_p.write_text(json.dumps(t0_bad), encoding="utf-8")
+        with pytest.raises(ParityReportVerifyError, match="TIER_LINK_BROKEN:T0"):
+            verify_parity_report(t0_bad_p, parity_store=store_dir, catalog_dir=cat_dir)
+
+        # Tamper T1 -> TIER_LINK_BROKEN:T1
+        t1_bad = json.loads(rep_path.read_text(encoding="utf-8"))
+        t1_bad["badge"]["t1"] = "FORGED"
+        t1_bad_p = tmp_path / "t1_bad.json"
+        t1_bad_p.write_text(json.dumps(t1_bad), encoding="utf-8")
+        with pytest.raises(ParityReportVerifyError, match="TIER_LINK_BROKEN:T1"):
+            verify_parity_report(t1_bad_p, parity_store=store_dir, catalog_dir=cat_dir)
+
+        # Tamper T2 body -> TIER_LINK_BROKEN:T2
+        t2_bad = json.loads(rep_path.read_text(encoding="utf-8"))
+        t2_bad["prior_records_on_pair"] = 99
+        t2_bad_p = tmp_path / "t2_bad.json"
+        t2_bad_p.write_text(json.dumps(t2_bad), encoding="utf-8")
+        with pytest.raises(ParityReportVerifyError, match="TIER_LINK_BROKEN:T2"):
+            verify_parity_report(t2_bad_p, parity_store=store_dir, catalog_dir=cat_dir)
+
+        # Tamper T3 bundle -> TIER_LINK_BROKEN:T3 and CLI exits 1
+        store.blob_path(rep["bundle_sha256"]).unlink()
+        with pytest.raises(ParityReportVerifyError, match="TIER_LINK_BROKEN:T3"):
+            verify_parity_report(rep_path, parity_store=store_dir, catalog_dir=cat_dir)
+        assert _run_bth_cli(
+            "parity", "report", "verify", str(rep_path),
+            "--parity-store", str(store_dir), "--catalog-dir", str(cat_dir),
+            cwd=tmp_path,
+        ).returncode == 1
+
+    def test_s7_rev9_badge_multiclause_smoke_and_within_tolerance_lint(self) -> None:
+        # Rev 9 L2260: `parity within-tolerance` and `parity within tolerance` allowed; bare `parity` rejected
+        assert lint_rendered_text("Achieved parity within-tolerance and parity within tolerance.", checks_pending=False) == []
+        assert lint_rendered_text("Achieved parity on smoke.", checks_pending=False)
+        assert lint_rendered_text("Achieved within-tolerance parity.", checks_pending=False)
+
+        # Multi-clause badge differing in not_run with knobs_uncovered=2 and tier="smoke"
+        decl = tomllib.loads(render_declaration_scaffold("rev9-mc-v1", impl_name="aminx"))
+        decl["parity"]["badge_min_tier"] = "smoke"
+        cells = [
+            {"cell_id": "a" * 16, "data_tier": "smoke", "pairing": "fixture", "declared_kind": "within_tolerance", "verdict": "not_run", "overlays": []},
+            {"cell_id": "b" * 16, "data_tier": "smoke", "pairing": "fixture", "declared_kind": "behavioural", "verdict": "pass", "overlays": []},
+        ]
+        clauses, gates, counts = compute_axes_and_clauses(
+            declaration=decl,
+            cells=cells,
+            active_g_codes=set(ALL_G_CODES),
+            has_registered_declaration=True,
+            knobs_uncovered=2,
+            knobs_non_excluded=5,
+            knobs_covered=3,
+        )
+        body = {
+            "standard_version": "1.0.0",
+            "parity_metadata": {"layer_under_test": "model", "badge_min_tier": "smoke", "instrumentation": "instrumented", "mode": "confirmatory", "has_owner_stated_tolerance": False, "control": False},
+            "tool": {"name": "aminx", "revision": "1234567890ab" + "0" * 28, "third_party": False},
+            "references": decl["reference"],
+            "cells": cells,
+            "cell_counts": counts,
+            "clauses": clauses,
+            "gates": gates,
+            "dual_display_result": None,
+            "evidence_level": "self_reported",
+        }
+        t1 = render_t1(body, "a" * 64)
+        h1 = hashlib.sha256(t1.encode("utf-8")).hexdigest()
+        t0 = render_t0(body, h1)
+        assert "NO RESULT WITHIN-TOLERANCE 0/1, partial (1 not run); PASSES BEHAVIOURAL 1/1 · partial (2 knobs uncovered)" in t0
+        assert "tier smoke" in t1
+        assert "knobs 3/5" in t1
+        assert validate_badge(t0, t1, body) == []

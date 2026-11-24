@@ -25,6 +25,7 @@ class BitwiseComparisonResult:
     shape_ref: tuple[int, ...]
     n_differing_bytes: int
     n_bytes: int
+    degenerate: bool = False
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,6 +37,7 @@ class BitwiseComparisonResult:
             "shape_ref": list(self.shape_ref),
             "n_differing_bytes": self.n_differing_bytes,
             "n_bytes": self.n_bytes,
+            "degenerate": self.degenerate,
             "reason": self.reason,
         }
 
@@ -57,6 +59,8 @@ class ElementwiseComparisonResult:
     shape_ours: tuple[int, ...]
     shape_ref: tuple[int, ...]
     nonfinite_mismatch: bool = False
+    degenerate: bool = False
+    dtype_mismatch: bool = False
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,6 +78,8 @@ class ElementwiseComparisonResult:
             "shape_ours": list(self.shape_ours),
             "shape_ref": list(self.shape_ref),
             "nonfinite_mismatch": self.nonfinite_mismatch,
+            "degenerate": self.degenerate,
+            "dtype_mismatch": self.dtype_mismatch,
             "reason": self.reason,
         }
 
@@ -119,6 +125,32 @@ def compare_bitwise(ours: np.ndarray, ref: np.ndarray) -> BitwiseComparisonResul
     b_bytes = np.frombuffer(b.tobytes("C"), dtype=np.uint8)
     diff_mask = a_bytes != b_bytes
     n_diff = int(np.count_nonzero(diff_mask))
+    if b.size == 0:
+        return BitwiseComparisonResult(
+            equal=False,
+            dtype_ours=a.dtype.str,
+            dtype_ref=b.dtype.str,
+            shape_ours=a.shape,
+            shape_ref=b.shape,
+            n_differing_bytes=0,
+            n_bytes=0,
+            degenerate=True,
+            reason="degenerate empty array (0 elements)",
+        )
+    if (
+        np.issubdtype(b.dtype, np.floating) or np.issubdtype(b.dtype, np.complexfloating)
+    ) and not np.any(np.isfinite(b)):
+        return BitwiseComparisonResult(
+            equal=False,
+            dtype_ours=a.dtype.str,
+            dtype_ref=b.dtype.str,
+            shape_ours=a.shape,
+            shape_ref=b.shape,
+            n_differing_bytes=n_diff,
+            n_bytes=int(b_bytes.size),
+            degenerate=True,
+            reason="degenerate all-nonfinite reference array",
+        )
     return BitwiseComparisonResult(
         equal=(n_diff == 0),
         dtype_ours=a.dtype.str,
@@ -216,6 +248,23 @@ def compare_within_tolerance(
             shape_ref=b.shape,
             reason=f"shape mismatch: ours={a.shape} vs ref={b.shape}",
         )
+    if a.dtype.newbyteorder("<") != b.dtype.newbyteorder("<"):
+        return ElementwiseComparisonResult(
+            within_tolerance=False,
+            max_abs_diff=None,
+            max_rel_diff=None,
+            mean_abs_diff=None,
+            n_exceeding=int(b.size),
+            n_elements=int(b.size),
+            atol=atol_f,
+            rtol=rtol_f,
+            dtype_ours=a.dtype.str,
+            dtype_ref=b.dtype.str,
+            shape_ours=a.shape,
+            shape_ref=b.shape,
+            dtype_mismatch=True,
+            reason=f"dtype mismatch: ours={a.dtype.str} vs ref={b.dtype.str}",
+        )
 
     is_complex = np.iscomplexobj(a) or np.iscomplexobj(b)
     is_exact_int = (
@@ -227,10 +276,10 @@ def compare_within_tolerance(
     if is_exact_int:
         if b.size == 0:
             return ElementwiseComparisonResult(
-                within_tolerance=True,
-                max_abs_diff=0.0,
-                max_rel_diff=0.0,
-                mean_abs_diff=0.0,
+                within_tolerance=False,
+                max_abs_diff=None,
+                max_rel_diff=None,
+                mean_abs_diff=None,
                 n_exceeding=0,
                 n_elements=0,
                 atol=atol_f,
@@ -239,6 +288,8 @@ def compare_within_tolerance(
                 dtype_ref=b.dtype.str,
                 shape_ours=a.shape,
                 shape_ref=b.shape,
+                degenerate=True,
+                reason="degenerate empty array (0 elements)",
             )
         diffs, is_u64 = _exact_int_abs_diff(a, b)
         b_abs_float = np.abs(b.astype(np.float64))
@@ -324,10 +375,10 @@ def compare_within_tolerance(
 
     if b_cmp.size == 0:
         return ElementwiseComparisonResult(
-            within_tolerance=True,
-            max_abs_diff=0.0,
-            max_rel_diff=0.0,
-            mean_abs_diff=0.0,
+            within_tolerance=False,
+            max_abs_diff=None,
+            max_rel_diff=None,
+            mean_abs_diff=None,
             n_exceeding=0,
             n_elements=0,
             atol=atol_f,
@@ -336,14 +387,16 @@ def compare_within_tolerance(
             dtype_ref=b.dtype.str,
             shape_ours=a.shape,
             shape_ref=b.shape,
+            degenerate=True,
+            reason="degenerate empty array (0 elements)",
         )
 
     if not np.any(fin_b):
         return ElementwiseComparisonResult(
-            within_tolerance=True,
-            max_abs_diff=0.0,
-            max_rel_diff=0.0,
-            mean_abs_diff=0.0,
+            within_tolerance=False,
+            max_abs_diff=None,
+            max_rel_diff=None,
+            mean_abs_diff=None,
             n_exceeding=0,
             n_elements=int(b_cmp.size),
             atol=atol_f,
@@ -352,6 +405,8 @@ def compare_within_tolerance(
             dtype_ref=b.dtype.str,
             shape_ours=a.shape,
             shape_ref=b.shape,
+            degenerate=True,
+            reason="degenerate all-nonfinite reference array",
         )
 
     a_fin = a_cmp[fin_b]

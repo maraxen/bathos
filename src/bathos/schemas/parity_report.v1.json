@@ -71,6 +71,14 @@
     "prior_records_on_pair": { "type": "integer", "minimum": 0 },
     "evidence_level": { "type": "string", "minLength": 1 },
     "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "parity_store": {
+      "type": "object",
+      "required": ["path", "layer"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "layer": { "type": "string", "minLength": 1 }
+      }
+    },
     "generator": { "type": "object", "required": ["name", "version", "schema"] },
     "badge": {
       "type": "object",

@@ -11,10 +11,10 @@ from typing import Any
 
 from bathos.parity.schema import DATA_TIERS, PARITY_KINDS_ORDER, STANDARD_VERSION
 
-# Word 'parity' MUST be followed by one of: a kind word, "record(s)", or "report(s)" (§9.3.4).
+# Word 'parity' MUST be followed by one of: a kind word, "record(s)", or "report(s)" (§9.3.4, Rev 9 L2260).
 # Hyphenated/underscored identifiers (e.g. "aminx-parity-v1", "my_parity_check") are excluded.
 _BARE_PARITY_RE = re.compile(
-    r"(?<![a-zA-Z0-9_-])\bparity\b(?!\s+(?:records?|reports?|bitwise|within[-_]tolerance|distributional|behavioural|association|approximate)\b)(?![_-])",
+    r"(?<![\w./-])parity(?![\w/-]|\.\w)(?!\s+(?:bitwise|within[- ]tolerance|distributional|behavioural|association|approximate|records?|reports?)\b)",
     re.IGNORECASE,
 )
 _PASSES_OR_VALID_RE = re.compile(r"\b(?:PASSES|VALID)\b")
@@ -78,6 +78,27 @@ def format_reference_qualifier(references: Sequence[Mapping[str, Any]]) -> str:
     return base
 
 
+def _cell_coverage_token(cov: Mapping[str, Any]) -> str | None:
+    parts: list[str] = []
+    nr = int(cov.get("not_run") or 0)
+    nc = int(cov.get("not_covered") or 0)
+    if nr > 0:
+        parts.append(f"{nr} not run")
+    if nc > 0:
+        parts.append(f"{nc} not covered")
+    if not parts:
+        return None
+    return f"partial ({', '.join(parts)})"
+
+
+def _knob_coverage_token(cov: Mapping[str, Any]) -> str | None:
+    u = cov.get("knobs_uncovered")
+    if u is not None and int(u) > 0:
+        noun = "knob" if int(u) == 1 else "knobs"
+        return f"partial ({int(u)} {noun} uncovered)"
+    return None
+
+
 def _coverage_parts_token(cov: Mapping[str, Any]) -> str | None:
     parts: list[str] = []
     nr = int(cov.get("not_run") or 0)
@@ -95,21 +116,47 @@ def _coverage_parts_token(cov: Mapping[str, Any]) -> str | None:
     return f"partial ({', '.join(parts)})"
 
 
+def _clauses_differ_in_cell_coverage(clauses: Sequence[Mapping[str, Any]]) -> bool:
+    if len(clauses) <= 1:
+        return False
+    pairs = {
+        (
+            int(cl["axes"]["coverage"].get("not_run") or 0),
+            int(cl["axes"]["coverage"].get("not_covered") or 0),
+        )
+        for cl in clauses
+    }
+    return len(pairs) > 1
+
+
 def _axis_tokens_for_clause(
     clause: Mapping[str, Any],
     *,
     include_knobs_not_computed: bool,
+    split_cell_and_knob_coverage: bool = False,
 ) -> list[str]:
     axes = clause["axes"]
     tokens: list[str] = []
 
     cov = axes["coverage"]
     if cov.get("value") != "full":
-        pt = _coverage_parts_token(cov)
-        if pt is not None:
-            tokens.append(pt)
-        if cov.get("knobs_uncovered") is None and include_knobs_not_computed:
-            tokens.append("knobs not computed")
+        if split_cell_and_knob_coverage:
+            cell_pt = _cell_coverage_token(cov)
+            if cell_pt is not None:
+                tokens.append(cell_pt)
+            if include_knobs_not_computed:
+                if cov.get("knobs_uncovered") is None:
+                    tokens.append("knobs not computed")
+                else:
+                    knob_pt = _knob_coverage_token(cov)
+                    if knob_pt is not None:
+                        tokens.append(knob_pt)
+        else:
+            pt = _coverage_parts_token(cov)
+            if pt is not None:
+                tokens.append(pt)
+            if cov.get("knobs_uncovered") is None and include_knobs_not_computed:
+                tokens.append("knobs not computed")
 
     fresh = axes["freshness"]
     if fresh.get("value") == "stale":
@@ -131,8 +178,13 @@ def _render_clauses_and_shared_tokens(
     if not clauses:
         return "NO RESULT WITHIN-TOLERANCE 0/0", []
 
+    split_cov = (not force_inline_for_segment) and _clauses_differ_in_cell_coverage(clauses)
     per_clause_tokens = [
-        _axis_tokens_for_clause(cl, include_knobs_not_computed=include_knobs_not_computed_in_axes)
+        _axis_tokens_for_clause(
+            cl,
+            include_knobs_not_computed=include_knobs_not_computed_in_axes,
+            split_cell_and_knob_coverage=split_cov,
+        )
         for cl in clauses
     ]
 
@@ -174,7 +226,7 @@ def _render_dual_display(dual: Mapping[str, Any] | None) -> str | None:
     prefix = "as registered:" if basis == "registered" else "as first declared:"
     seg_clauses_text, _ = _render_clauses_and_shared_tokens(
         dual.get("clauses", []),
-        include_knobs_not_computed_in_axes=True,
+        include_knobs_not_computed_in_axes=False,
         force_inline_for_segment=True,
     )
     return f"{prefix} {seg_clauses_text}"
@@ -251,6 +303,9 @@ def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
         quals.append("kinds declared by us")
     if parity_meta.get("control"):
         quals.append("control")
+
+    ev_level = str(report_body.get("evidence_level", "self_reported"))
+    quals.append("reexecuted" if ev_level == "reexecuted" else "self-reported")
 
     return quals
 
@@ -345,6 +400,9 @@ def render_t0(report_body: Mapping[str, Any], h1_full: str) -> str:
     if parity_meta.get("has_owner_stated_tolerance"):
         parts.append("owner-stated tolerance")
 
+    ev_level = str(report_body.get("evidence_level", "self_reported"))
+    parts.append("reexecuted" if ev_level == "reexecuted" else "self-reported")
+
     std_ver = str(report_body.get("standard_version", STANDARD_VERSION))
     parts.append(f"std {std_ver}")
     parts.append(f"T1 {h1_full[:12]}")
@@ -365,15 +423,37 @@ def _has_impl_vs_ref_segment(segments: Sequence[str]) -> bool:
     return False
 
 
+def _split_top_level_commas(text: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth > 0:
+            depth -= 1
+        elif depth == 0 and text.startswith(", ", i):
+            parts.append(text[start:i].strip())
+            start = i + 2
+            i += 2
+            continue
+        i += 1
+    parts.append(text[start:].strip())
+    return parts
+
+
 def _segment_has_token(segments: Sequence[str], token: str) -> bool:
     if token in segments:
         return True
     for seg in segments:
-        # Inline axis tokens on clause segments are comma-separated after the clause head
-        if ", " in seg:
-            _, tail = seg.split(", ", 1)
-            if token in [part.strip() for part in tail.split(", ")]:
-                return True
+        for clause_seg in seg.split("; "):
+            # Inline axis tokens on clause segments are comma-separated after the clause head
+            if ", " in clause_seg:
+                _, tail = clause_seg.split(", ", 1)
+                if token in _split_top_level_commas(tail):
+                    return True
     return False
 
 
@@ -406,7 +486,15 @@ def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str
         if "owner-stated tolerance" not in t1_segs:
             errors.append("T1 missing 'owner-stated tolerance' qualifier")
 
+    ev_level = str(report_body.get("evidence_level", "self_reported"))
+    expected_ev_tok = "reexecuted" if ev_level == "reexecuted" else "self-reported"
+    if expected_ev_tok not in t0_segs:
+        errors.append(f"T0 missing evidence level token {expected_ev_tok!r}")
+    if expected_ev_tok not in t1_segs:
+        errors.append(f"T1 missing evidence level token {expected_ev_tok!r}")
+
     clauses = report_body.get("clauses", [])
+    split_cov = _clauses_differ_in_cell_coverage(clauses)
     saw_amended = False
     for cl in clauses:
         axes = cl["axes"]
@@ -423,14 +511,29 @@ def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str
             if not any(s.startswith("PROVISIONAL (") and "checks pending)" in s for s in t1_segs):
                 errors.append("T1 missing 'PROVISIONAL (<k> checks pending)'")
         if cov["value"] == "partial":
-            pt = _coverage_parts_token(cov)
-            if pt and (not _segment_has_token(t0_segs, pt) or not _segment_has_token(t1_segs, pt)):
-                errors.append(f"badge missing coverage token {pt!r}")
-            if cov.get("knobs_uncovered") is None and (
-                not _segment_has_token(t0_segs, "knobs not computed")
-                or not _segment_has_token(t1_segs, "knobs not computed")
-            ):
-                errors.append("badge missing 'knobs not computed' for uncomputed u")
+            if split_cov:
+                cell_pt = _cell_coverage_token(cov)
+                if cell_pt and (not _segment_has_token(t0_segs, cell_pt) or not _segment_has_token(t1_segs, cell_pt)):
+                    errors.append(f"badge missing coverage token {cell_pt!r}")
+                if cov.get("knobs_uncovered") is None:
+                    if not _segment_has_token(t0_segs, "knobs not computed") or not _segment_has_token(t1_segs, "knobs not computed"):
+                        errors.append("badge missing 'knobs not computed' for uncomputed u")
+                else:
+                    knob_pt = _knob_coverage_token(cov)
+                    if knob_pt:
+                        if not _segment_has_token(t0_segs, knob_pt):
+                            errors.append(f"T0 missing knob coverage token {knob_pt!r}")
+                        if not _segment_has_token(t1_segs, knob_pt) and not any(s.startswith("knobs ") for s in t1_segs):
+                            errors.append(f"T1 missing knob coverage token {knob_pt!r} or 'knobs <cov>/<tot>'")
+            else:
+                pt = _coverage_parts_token(cov)
+                if pt and (not _segment_has_token(t0_segs, pt) or not _segment_has_token(t1_segs, pt)):
+                    errors.append(f"badge missing coverage token {pt!r}")
+                if cov.get("knobs_uncovered") is None and (
+                    not _segment_has_token(t0_segs, "knobs not computed")
+                    or not _segment_has_token(t1_segs, "knobs not computed")
+                ):
+                    errors.append("badge missing 'knobs not computed' for uncomputed u")
         if fresh == "stale":
             st_tok = f"stale ({int(axes['freshness'].get('stale_count') or 0)})"
             if not _segment_has_token(t0_segs, st_tok) or not _segment_has_token(t1_segs, st_tok):

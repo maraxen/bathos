@@ -145,8 +145,14 @@
           "tolerance_id": { "type": "string", "minLength": 1 },
           "assumptions": { "type": "array", "items": { "type": "string" } },
           "exploratory": { "type": "boolean" },
-          "incompatibility": { "type": "object" }
-        }
+          "incompatibility": { "type": "object" },
+          "reference_members": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": { "type": "string", "minLength": 1 }
+          }
+        },
+        "not": { "required": ["dump_keys"] }
       }
     },
     "waiver": {

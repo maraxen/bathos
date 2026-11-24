@@ -40,7 +40,31 @@
         "ledger_high_water_mark": { "type": ["string", "null"] },
         "gate_stages": { "type": "object" },
         "comparison_backend": { "type": "object" },
-        "cell_runs": { "type": "object" }
+        "cell_runs": { "type": "object" },
+        "parity_store": {
+          "type": "object",
+          "required": ["path", "layer"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "layer": { "type": "string", "minLength": 1 }
+          }
+        },
+        "evidence_run_ids_filter": {
+          "type": ["array", "null"],
+          "items": { "type": "string" }
+        },
+        "overlay_hooks": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "parity_store": {
+      "type": "object",
+      "required": ["path", "layer"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "layer": { "type": "string", "minLength": 1 }
       }
     },
     "evidence_runs": {

@@ -2750,15 +2750,19 @@ def _emit_parity_cli_error(exc: Exception, *, json_out: bool) -> None:
 
 @parity_app.command(name="where")
 def parity_where_cmd(
+    path: str = "",
     *,
     parity_store: str = "",
     json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
 ) -> None:
     """Print the resolved parity-store path and which configuration layer decided."""
-    from bathos.parity.store import ParityStoreConfigError, resolve_parity_store
+    from bathos.parity.store import ParityStoreConfigError, resolve_parity_store, resolve_start_dir
 
     try:
-        res = resolve_parity_store(explicit=parity_store or None)
+        res = resolve_parity_store(
+            explicit=parity_store or None,
+            start_dir=resolve_start_dir(path) if path else None,
+        )
     except ParityStoreConfigError as exc:
         _emit_parity_cli_error(exc, json_out=json_out)
 
@@ -2934,6 +2938,7 @@ def parity_grade_cmd(
         SealedDumpError,
         ParityStoreConfigError,
         ParityStoreUnavailableError,
+        ValueError,
         OSError,
     ) as exc:
         _emit_parity_cli_error(exc, json_out=json_out)
@@ -2973,6 +2978,7 @@ def parity_report_build_cmd(
     *,
     decl_path: str = "",
     parity_store: str = "",
+    catalog_dir: str = "",
     out: str = "",
     json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
 ) -> None:
@@ -2980,7 +2986,9 @@ def parity_report_build_cmd(
     from bathos.parity.badge import BadgeValidationError, ReportLintError
     from bathos.parity.declare import ParityDeclareError
     from bathos.parity.evidence import CellEvidenceError
-    from bathos.parity.report import build_parity_report
+    from bathos.parity.grader import ParityVerifyError
+    from bathos.parity.report import ParityReportVerifyError, build_parity_report
+    from bathos.parity.schema import ParityValidationError
     from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
 
     try:
@@ -2988,6 +2996,7 @@ def parity_report_build_cmd(
             result_path,
             decl_path=decl_path or None,
             parity_store=parity_store or None,
+            catalog_dir=catalog_dir or None,
             output_path=out or None,
         )
     except (
@@ -2998,6 +3007,9 @@ def parity_report_build_cmd(
         KeyError,
         ValueError,
         ParityDeclareError,
+        ParityValidationError,
+        ParityVerifyError,
+        ParityReportVerifyError,
         CellEvidenceError,
         BadgeValidationError,
         ReportLintError,
@@ -3014,6 +3026,60 @@ def parity_report_build_cmd(
         print(f"report: {out_p}")
 
 
+@parity_report_app.command(name="verify")
+def parity_report_verify_cmd(
+    report_path: str,
+    *,
+    result_path: str = "",
+    decl_path: str = "",
+    parity_store: str = "",
+    catalog_dir: str = "",
+    json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+) -> None:
+    """Verify full T0 -> T1 -> T2 -> T3 parity report chain and optional result/declaration replay."""
+    from bathos.parity.badge import BadgeValidationError
+    from bathos.parity.declare import ParityDeclareError
+    from bathos.parity.evidence import CellEvidenceError
+    from bathos.parity.grader import ParityVerifyError
+    from bathos.parity.report import ParityReportVerifyError, verify_parity_report
+    from bathos.parity.schema import ParityValidationError
+    from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
+
+    try:
+        info = verify_parity_report(
+            report_path,
+            result_path=result_path or None,
+            decl_path=decl_path or None,
+            parity_store=parity_store or None,
+            catalog_dir=catalog_dir or None,
+        )
+    except (
+        FileNotFoundError,
+        OSError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        KeyError,
+        ValueError,
+        ParityDeclareError,
+        ParityValidationError,
+        ParityVerifyError,
+        ParityReportVerifyError,
+        CellEvidenceError,
+        BadgeValidationError,
+        ParityStoreConfigError,
+        ParityStoreUnavailableError,
+    ) as exc:
+        _emit_parity_cli_error(exc, json_out=json_out)
+
+    if json_out:
+        print(json.dumps(info, indent=2, sort_keys=True))
+    else:
+        print(
+            f"VERIFIED: {info['report_path']} "
+            f"(bundle={info['bundle_sha256'][:12]}, present={info['present_members']}, absent={info['absent_members']})"
+        )
+
+
 @parity_report_app.command(name="render")
 def parity_report_render_cmd(
     report_path: str,
@@ -3023,7 +3089,11 @@ def parity_report_render_cmd(
 ) -> None:
     """Render a ``parity_report.v1`` JSON file to Markdown or HTML (reads only JSON)."""
     from bathos.parity.badge import ReportLintError
-    from bathos.parity.report import render_report_html, render_report_markdown
+    from bathos.parity.report import (
+        ParityReportVerifyError,
+        render_report_html,
+        render_report_markdown,
+    )
 
     rpath = Path(report_path)
     if not rpath.is_file():
@@ -3044,7 +3114,16 @@ def parity_report_render_cmd(
             print(f"wrote {out}")
         else:
             print(text, end="")
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError, ReportLintError) as exc:
+    except (
+        OSError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        ParityReportVerifyError,
+        ReportLintError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
 

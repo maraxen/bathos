@@ -22,6 +22,7 @@ from bathos.parity.store import (
     ParityStore,
     atomic_write_json,
     require_parity_store,
+    resolve_start_dir,
     validate_safe_store_segment,
 )
 
@@ -92,7 +93,7 @@ def declare_parity_record(
     head_dir = Path(repo_root).resolve() if repo_root is not None else path.parent
     head_commit = _capture_git_head(head_dir)
 
-    store, _res = require_parity_store(explicit=parity_store, start_dir=path.parent)
+    store, _res = require_parity_store(explicit=parity_store, start_dir=resolve_start_dir(path))
     decl_sha = store.put_bytes(raw_bytes)
     blob_path = store.blob_path(decl_sha)
 

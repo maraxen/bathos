@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import importlib.resources
+import io
 import itertools
 import json
 import os
 import subprocess
 import sys
 import tomllib
+import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import jsonschema
@@ -25,10 +28,10 @@ from bathos.catalog import init_catalog, read_runs, write_run
 from bathos.compact import compact
 from bathos.parity import ParityEvidence, compute_grade, legacy_literature_grade
 from bathos.parity.axes import RING0_ACTIVE_G_CODES, compute_axes_and_clauses
-from bathos.parity.declare import declare_parity_record
+from bathos.parity.declare import ParityDeclareError, declare_parity_record
 from bathos.parity.evidence import write_cell_evidence
 from bathos.parity.grader import ParityVerifyError, grade_parity_record, register_overlay_hook
-from bathos.parity.npy_stdlib import encode_npz
+from bathos.parity.npy_stdlib import canonical_array_digest, encode_npz
 from bathos.parity.schema import (
     ALL_G_CODES,
     ParityValidationError,
@@ -36,7 +39,7 @@ from bathos.parity.schema import (
     render_declaration_scaffold,
 )
 from bathos.parity.sealed_dump import ingest_sealed_dump
-from bathos.parity.store import ParityStore
+from bathos.parity.store import ParityStore, atomic_write_json
 from bathos.schema import Run
 
 
@@ -210,9 +213,14 @@ class TestMinimalGraderAndNCs:
         return repo, store, cat, decl_path, decl
 
     def test_good_record_passes_and_verify_succeeds(self, tmp_path: Path) -> None:
+        # Note: previously passed without registering a Run row in cat; B1 requires a terminal Run in catalog.
         _repo, store, cat, decl_path, decl = self._setup_workspace(tmp_path)
         res_decl = declare_parity_record(decl_path, parity_store=store)
         cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="run-good", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
         ours = np.array([1.0, 2.0, 3.0], dtype=np.float32)
         ref = np.array([1.0 + 1e-6, 2.0, 3.0], dtype=np.float32)
         write_cell_evidence(
@@ -242,6 +250,181 @@ class TestMinimalGraderAndNCs:
         graded.result_path.write_text(raw + " ", encoding="utf-8")
         with pytest.raises(ParityVerifyError, match="bytes differ"):
             grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, verify=True)
+
+    def test_b1_unknown_run_and_missing_catalog_give_not_run(self, tmp_path: Path) -> None:
+        _repo, store, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store)
+        cid = _cell_id_from_decl(decl)
+        write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="run-unknown-not-in-catalog",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+
+        g_unknown = grade_parity_record(
+            decl_path, parity_store=store, catalog_dir=cat, track_run=False
+        )
+        assert g_unknown.result["cells"][0]["verdict"] == "not_run"
+        assert g_unknown.result["evidence_runs"][0]["status"] == "unknown"
+        assert g_unknown.result["evidence_runs"][0]["validity_state"] == "unknown"
+
+        missing_cat = tmp_path / "does_not_exist_catalog"
+        g_missing = grade_parity_record(
+            decl_path, parity_store=store, catalog_dir=missing_cat, track_run=False
+        )
+        assert g_missing.result["cells"][0]["verdict"] == "not_run"
+
+    def test_b3_zero_length_and_all_nan_through_grader_never_pass(self, tmp_path: Path) -> None:
+        _repo, store, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store)
+        cid = _cell_id_from_decl(decl)
+        for rid, arr in (
+            ("r-empty", np.array([], dtype=np.float32)),
+            ("r-all-nan", np.array([np.nan, np.inf], dtype=np.float32)),
+        ):
+            write_run(
+                Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id=rid, exit_code=0, status="completed", outcome="pass"),
+                cat,
+            )
+            write_cell_evidence(
+                store=store,
+                record_id="demo-record-v1",
+                cell_id=cid,
+                run_id=rid,
+                ours_arrays={"scores": arr},
+                reference_arrays={"scores": arr},
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+            g = grade_parity_record(
+                decl_path, parity_store=store, catalog_dir=cat, evidence_run_ids=[rid], track_run=False
+            )
+            assert g.result["cells"][0]["verdict"] == "inconclusive"
+            assert "degenerate_capture" in g.result["cells"][0]["flags"]
+            assert g.result["cells"][0]["nondegeneracy"]["status"] == "degenerate"
+
+    def test_b4_sealed_dump_subset_and_manifest_map_mismatch_fail(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        store_dir = tmp_path / "store"
+        cat = tmp_path / "catalog"
+        init_catalog(cat)
+        store = ParityStore(store_dir)
+
+        dump_bytes = encode_npz(
+            {
+                "logits": np.array([1.0, 2.0], dtype=np.float32),
+                "hidden": np.array([3.0, 4.0], dtype=np.float32),
+            }
+        )
+        dump_sha = hashlib.sha256(dump_bytes).hexdigest()
+        dump_path = tmp_path / "multi.npz"
+        dump_path.write_bytes(dump_bytes)
+        ingest_sealed_dump(dump_path, expected_sha256=dump_sha, store=store, stem="multi")
+
+        base_toml = render_declaration_scaffold("sealed-b4-v1").replace(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            dump_sha,
+            1,
+        )
+        decl_path = repo / "b4.parity.bth.toml"
+        decl_path.write_text(base_toml, encoding="utf-8")
+        decl = tomllib.loads(base_toml)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+
+        # 1. Dump has logits + hidden; port supplies only hidden -> fail + fixture_mismatch
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-subset", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="sealed-b4-v1",
+            cell_id=cid,
+            run_id="r-subset",
+            ours_arrays={"hidden": np.array([3.0, 4.0], dtype=np.float32)},
+            reference_dump_sha256=dump_sha,
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_sub = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-subset"], track_run=False
+        )
+        assert g_sub.result["cells"][0]["verdict"] == "fail"
+        assert g_sub.result["cells"][0]["flags"] == ["fixture_mismatch"]
+
+        # 2. Legacy dump_keys rejected in declaration (G01_FORBIDDEN_FIELD)
+        bad_dump_keys_toml = base_toml.replace(
+            'tolerance_id = "f32-owner"',
+            'tolerance_id = "f32-owner"\ndump_keys = { out = "logits" }',
+        )
+        bad_dk_path = repo / "b4_dk.parity.bth.toml"
+        bad_dk_path.write_text(bad_dump_keys_toml, encoding="utf-8")
+        with pytest.raises(ParityValidationError, match="G01_FORBIDDEN_FIELD"):
+            grade_parity_record(bad_dk_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+        # 3. Declaration with reference_members: manifest reference_dump_keys mismatch -> fail + fixture_mismatch
+        rm_toml = base_toml.replace(
+            'tolerance_id = "f32-owner"',
+            'tolerance_id = "f32-owner"\nreference_members = { out = "logits" }',
+        )
+        rm_path = repo / "b4_rm.parity.bth.toml"
+        rm_path.write_text(rm_toml, encoding="utf-8")
+        rm_decl = tomllib.loads(rm_toml)
+        declare_parity_record(rm_path, parity_store=store_dir)
+        rm_cid = _cell_id_from_decl(rm_decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-map-mismatch", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="sealed-b4-v1",
+            cell_id=rm_cid,
+            run_id="r-map-mismatch",
+            ours_arrays={"out": np.array([3.0, 4.0], dtype=np.float32)},
+            reference_dump_sha256=dump_sha,
+            reference_dump_keys={"out": "hidden"},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_map = grade_parity_record(
+            rm_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-map-mismatch"], track_run=False
+        )
+        assert g_map.result["cells"][0]["verdict"] == "fail"
+        assert g_map.result["cells"][0]["flags"] == ["fixture_mismatch"]
+
+        # 4. Missing dump member referenced by declaration reference_members -> fail + fixture_mismatch
+        miss_toml = base_toml.replace(
+            'tolerance_id = "f32-owner"',
+            'tolerance_id = "f32-owner"\nreference_members = { out = "nonexistent_member" }',
+        )
+        miss_path = repo / "b4_miss.parity.bth.toml"
+        miss_path.write_text(miss_toml, encoding="utf-8")
+        miss_decl = tomllib.loads(miss_toml)
+        declare_parity_record(miss_path, parity_store=store_dir)
+        miss_cid = _cell_id_from_decl(miss_decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-miss-member", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="sealed-b4-v1",
+            cell_id=miss_cid,
+            run_id="r-miss-member",
+            ours_arrays={"out": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_dump_sha256=dump_sha,
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_miss = grade_parity_record(
+            miss_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-miss-member"], track_run=False
+        )
+        assert g_miss.result["cells"][0]["verdict"] == "fail"
+        assert g_miss.result["cells"][0]["flags"] == ["fixture_mismatch"]
 
     def test_nc_g01_and_g02_refusals(self, tmp_path: Path) -> None:
         _repo, store, cat, decl_path, _decl = self._setup_workspace(tmp_path)
@@ -331,6 +514,10 @@ class TestMinimalGraderAndNCs:
         declare_parity_record(decl_path, parity_store=store)
 
         cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r1", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
         write_cell_evidence(
             store=store,
             record_id="demo-record-v1",
@@ -468,6 +655,11 @@ class TestMinimalGraderAndNCs:
         cid = _cell_id_from_decl(decl)
 
         # Spoof attempt 1: self-reported reference_arrays=[1.0] matching ours=[1.0] MUST NOT override sealed_dump
+        for rid_s in ("r-spoof-bundle", "r-spoof-dump", "r-ok"):
+            write_run(
+                Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id=rid_s, exit_code=0, status="completed", outcome="pass"),
+                cat,
+            )
         write_cell_evidence(
             store=store,
             record_id="sealed-demo-v1",
@@ -518,6 +710,14 @@ class TestMinimalGraderAndNCs:
         _repo, store, cat, decl_path, decl = self._setup_workspace(tmp_path)
         declare_parity_record(decl_path, parity_store=store)
         cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r1", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r2-added", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
         write_cell_evidence(
             store=store,
             record_id="demo-record-v1",
@@ -622,6 +822,11 @@ class TestMinimalGraderAndNCs:
         assert g_cool.result["cells"][0]["verdict"] == "not_run"
 
         # 4. Non-finite / shape mismatch -> max_abs_diff is None (not 0.0)
+        for rid_e in ("r-shape", "r-f64", "r-missing-ours", "r-bw-zero"):
+            write_run(
+                Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id=rid_e, exit_code=0, status="completed", outcome="pass"),
+                cat,
+            )
         write_cell_evidence(
             store=store_dir,
             record_id="demo-record-v1",
@@ -733,3 +938,345 @@ class TestMinimalGraderAndNCs:
 
         proc_err = _run_bth_cli("parity", "grade", str(tmp_path / "missing.toml"), cwd=repo)
         assert proc_err.returncode == 1
+
+    def test_s7_raw_zipfile_cell_evidence_and_digest_tamper(self, tmp_path: Path) -> None:
+        _repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+        store = ParityStore(store_dir)
+
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-raw", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+
+        def _make_raw_npz(arr: np.ndarray) -> tuple[str, dict]:
+            npy_buf = io.BytesIO()
+            np.save(npy_buf, arr, allow_pickle=False)
+            npy_bytes = npy_buf.getvalue()
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("scores.npy", npy_bytes)
+            bundle_sha = store.put_bytes(zip_buf.getvalue())
+            le = arr.astype(arr.dtype.newbyteorder("<"), copy=False) if arr.dtype.byteorder == ">" else arr
+            le_c = np.ascontiguousarray(le)
+            desc = {
+                "scores": {
+                    "member_name": "scores.npy",
+                    "dtype": le_c.dtype.str,
+                    "shape": list(le_c.shape),
+                    "canonical_digest": canonical_array_digest(le_c.dtype.str, le_c.shape, le_c.tobytes("C")),
+                }
+            }
+            return bundle_sha, desc
+
+        ours_arr = np.array([1.0, 2.0], dtype=np.float32)
+        ref_arr = np.array([1.0, 2.0], dtype=np.float32)
+        ours_sha, ours_desc = _make_raw_npz(ours_arr)
+        ref_sha, ref_desc = _make_raw_npz(ref_arr)
+
+        manifest = {
+            "schema_version": "cell_evidence.v1",
+            "record_id": "demo-record-v1",
+            "cell_id": cid,
+            "run_id": "r-raw",
+            "input_sha256": {"ours": ["a" * 64], "reference": ["b" * 64]},
+            "ours_bundle_sha256": ours_sha,
+            "ours_arrays": ours_desc,
+            "reference_bundle_sha256": ref_sha,
+            "reference_arrays": ref_desc,
+            "adapter": {"name": "raw.zipfile", "version": "1.0.0"},
+            "created_at": "2026-11-24T10:00:00Z",
+        }
+        m_bytes = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        m_sha = store.put_bytes(m_bytes)
+        atomic_write_json(store.root / "evidence" / "demo-record-v1" / "r-raw" / f"{cid}.json", {"manifest_sha256": m_sha, **manifest})
+
+        g = grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+        assert g.result["cells"][0]["verdict"] == "pass"
+
+        # Tamper canonical_digest in manifest blob -> digest_mismatch
+        bad_m = dict(manifest)
+        bad_m["ours_arrays"] = {"scores": {**ours_desc["scores"], "canonical_digest": "0" * 64}}
+        bad_bytes = (json.dumps(bad_m, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        bad_sha = store.put_bytes(bad_bytes)
+        atomic_write_json(store.root / "evidence" / "demo-record-v1" / "r-raw" / f"{cid}.json", {"manifest_sha256": bad_sha, **bad_m})
+        g_bad = grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+        assert g_bad.result["cells"][0]["verdict"] == "fail"
+        assert g_bad.result["cells"][0]["flags"] == ["digest_mismatch"]
+
+    @pytest.mark.parametrize(
+        "verdicts,expected_result",
+        [
+            (["fail", "contested"], "FAILS"),
+            (["contested", "inconclusive"], "CONTESTED"),
+            (["inconclusive", "declared_deviation"], "INCONCLUSIVE"),
+            (["pass", "declared_deviation"], "PASSES EXCEPT DECLARED DEVIATIONS (1)"),
+            (["not_run", "pass"], "PASSES"),
+        ],
+    )
+    def test_s7_multicell_axis_table_step_precedence(self, verdicts: list[str], expected_result: str) -> None:
+        decl = tomllib.loads(render_declaration_scaffold("axis-table-v1"))
+        cells = [
+            {
+                "cell_id": f"{idx:016x}",
+                "data_tier": "toy",
+                "pairing": "fixture",
+                "declared_kind": "within_tolerance",
+                "verdict": v,
+                "overlays": [],
+            }
+            for idx, v in enumerate(verdicts)
+        ]
+        clauses, _gates, _counts = compute_axes_and_clauses(
+            declaration=decl, cells=cells, active_g_codes=RING0_ACTIVE_G_CODES
+        )
+        assert clauses[0]["axes"]["result"]["value"] == expected_result
+
+    def test_s7_tightening_and_smoke_two_band_and_dtype_mismatch(self, tmp_path: Path) -> None:
+        _repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        # 1. Tightening: first declaration loose (passes), then tightened (fails + dual display PASSES)
+        loose_toml = decl_path.read_text(encoding="utf-8").replace("atol = 1e-4", "atol = 1e-2")
+        decl_path.write_text(loose_toml, encoding="utf-8")
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-tight", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-tight",
+            ours_arrays={"scores": np.array([1.001], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        tight_toml = loose_toml.replace("atol = 1e-2", "atol = 1e-6").replace("rtol = 1e-4", "rtol = 0.0")
+        decl_path.write_text(tight_toml, encoding="utf-8")
+        g_tight = grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+        assert g_tight.result["clauses"][0]["axes"]["result"]["value"] == "FAILS"
+        assert g_tight.result["clauses"][0]["axes"]["registration"]["value"] == "amended"
+        assert g_tight.result["dual_display_result"]["clauses"][0]["axes"]["result"]["value"] == "PASSES"
+
+        # 2. S3 dtype mismatch: ours=float64, ref=float32 (tol selected from ref dtype!) -> fail + kind_shortfall
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-dtype-mm", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-dtype-mm",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float64)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_mm = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-dtype-mm"], track_run=False
+        )
+        assert g_mm.result["cells"][0]["verdict"] == "fail"
+        assert g_mm.result["cells"][0]["flags"] == ["kind_shortfall"]
+        assert g_mm.result["cells"][0]["metric_values"]["arrays"]["scores"]["dtype_mismatch"] is True
+
+        # 3. Two-band: smoke + toy cells with badge_min_tier="smoke" vs "toy"
+        smoke_decl = tomllib.loads(render_declaration_scaffold("smoke-two-band-v1"))
+        smoke_decl["parity"]["badge_min_tier"] = "smoke"
+        cl_smoke, _, cnt_smoke = compute_axes_and_clauses(
+            declaration=smoke_decl,
+            cells=[
+                {"cell_id": "a" * 16, "data_tier": "smoke", "pairing": "fixture", "declared_kind": "within_tolerance", "verdict": "pass", "overlays": []},
+                {"cell_id": "b" * 16, "data_tier": "toy", "pairing": "fixture", "declared_kind": "within_tolerance", "verdict": "fail", "overlays": []},
+            ],
+        )
+        assert cl_smoke[0]["passing"] == 1 and cl_smoke[0]["required"] == 2
+        assert cnt_smoke["required"] == 2
+
+    def test_s7_s2_pooling_all_runs_and_per_input_fail_then_pass(self, tmp_path: Path) -> None:
+        repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+        store = ParityStore(store_dir)
+
+        t0 = datetime(2026, 11, 24, 10, 0, 0, tzinfo=UTC)
+        # Run 1 fails, Run 2 passes later in catalog timestamp (even if created_at in manifest is earlier!)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-pool-1", timestamp=t0, exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-pool-2", timestamp=t0 + timedelta(minutes=5), exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        _s1, _ = write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-pool-1",
+            ours_arrays={"scores": np.array([1.5], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        _s2, _ = write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-pool-2",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+
+        # Backdate r-pool-2's manifest created_at before r-pool-1 to prove catalog timestamp controls sort order
+        idx2_path = store.root / "evidence" / "demo-record-v1" / "r-pool-2" / f"{cid}.json"
+        idx2 = json.loads(idx2_path.read_text(encoding="utf-8"))
+        m2_body = {k: v for k, v in idx2.items() if k != "manifest_sha256"}
+        m2_body["created_at"] = "2020-01-01T00:00:00Z"
+        m2_sha = store.put_bytes((json.dumps(m2_body, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+        atomic_write_json(idx2_path, {"manifest_sha256": m2_sha, **m2_body})
+
+        g_all = grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+        c_all = g_all.result["cells"][0]
+        assert c_all["verdict"] == "fail"
+        assert "pooled_run_failure" in c_all["flags"]
+        assert "kind_shortfall" in c_all["flags"]
+        assert [rv["run_id"] for rv in c_all["run_verdicts"]] == ["r-pool-1", "r-pool-2"]
+        assert c_all["cell_evidence_sha256"] == m2_sha
+        assert len(c_all["cell_evidence_sha256s"]) == 2
+        assert c_all["metric_values"]["max_abs_diff"] == pytest.approx(0.5)
+
+        # per_input pooling across two inputs where one input had a fail-then-pass
+        pi_toml = decl_path.read_text(encoding="utf-8").replace('pooling_rule = "all_runs"', 'pooling_rule = "per_input"').replace("demo-record-v1", "demo-per-input-v1")
+        pi_path = repo / "pi.parity.bth.toml"
+        pi_path.write_text(pi_toml, encoding="utf-8")
+        pi_decl = tomllib.loads(pi_toml)
+        declare_parity_record(pi_path, parity_store=store_dir)
+        pi_cid = _cell_id_from_decl(pi_decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-pool-3", timestamp=t0 + timedelta(minutes=10), exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store, record_id="demo-per-input-v1", cell_id=pi_cid, run_id="r-pool-1",
+            ours_arrays={"scores": np.array([1.5], dtype=np.float32)}, reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        write_cell_evidence(
+            store=store, record_id="demo-per-input-v1", cell_id=pi_cid, run_id="r-pool-2",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)}, reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        write_cell_evidence(
+            store=store, record_id="demo-per-input-v1", cell_id=pi_cid, run_id="r-pool-3",
+            ours_arrays={"scores": np.array([2.0], dtype=np.float32)}, reference_arrays={"scores": np.array([2.0], dtype=np.float32)},
+            input_sha256={"ours": ["c" * 64], "reference": ["d" * 64]},
+        )
+        g_pi = grade_parity_record(pi_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+        c_pi = g_pi.result["cells"][0]
+        assert c_pi["verdict"] == "fail"
+        assert "pooled_run_failure" in c_pi["flags"]
+        assert len(c_pi["run_verdicts"]) == 3
+
+    def test_s7_n2_nan_tol_cli_and_s4_s5_s6(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
+
+        # N2: atol = nan in TOML -> bth parity grade exits 1
+        nan_toml = decl_path.read_text(encoding="utf-8").replace("atol = 1e-4", "atol = nan")
+        nan_path = repo / "nan.parity.bth.toml"
+        nan_path.write_text(nan_toml, encoding="utf-8")
+        proc_nan = _run_bth_cli(
+            "parity", "grade", str(nan_path), "--parity-store", str(store_dir), "--catalog-dir", str(cat), "--no-track",
+            cwd=repo,
+        )
+        assert proc_nan.returncode == 1
+
+        # S4: undeclared record_id raises ParityDeclareError
+        undec_path = repo / "undeclared.parity.bth.toml"
+        undec_path.write_text(decl_path.read_text(encoding="utf-8").replace("demo-record-v1", "undeclared-v1"), encoding="utf-8")
+        with pytest.raises(ParityDeclareError, match="no declared baseline"):
+            grade_parity_record(undec_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+        # S4 + S6: parity_store, evidence_run_ids_filter, overlay_hooks recorded + Run.metadata + Run.tags
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-s4", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-s4",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+
+        def _custom_hook(_cell: dict, _decl: dict) -> list[str]:
+            return ["stale(code)"]
+
+        g = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat,
+            evidence_run_ids=["r-s4"],
+            as_of="2026-11-24T12:00:00Z",
+            track_run=True,
+            overlay_hooks=(_custom_hook,),
+        )
+        assert g.result["parity_store"] == {"path": str(Path(store_dir).resolve()), "layer": "cli_arg"}
+        assert g.result["grade_inputs"]["parity_store"] == g.result["parity_store"]
+        assert g.result["grade_inputs"]["evidence_run_ids_filter"] == ["r-s4"]
+        assert len(g.result["grade_inputs"]["overlay_hooks"]) == 1
+
+        grade_run = next(r for r in read_runs(cat) if r.id == g.grade_run_id)
+        assert "parity_store_layer:cli_arg" in grade_run.tags
+        run_meta = json.loads(grade_run.metadata)
+        assert run_meta["parity_store"] == g.result["parity_store"]
+        assert run_meta["record_id"] == "demo-record-v1"
+
+        # S6: --verify with mismatched evidence_run_ids or hooks fails ParityVerifyError
+        assert grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-s4"], verify=True, overlay_hooks=(_custom_hook,)
+        ).verified is True
+        with pytest.raises(ParityVerifyError):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, verify=True, overlay_hooks=())
+
+        # S6: missing head_commit in store raises ParityDeclareError (no git rev-parse fallback)
+        store = ParityStore(store_dir)
+        first_json = store.root / "declarations" / "demo-record-v1" / "first.json"
+        first_obj = json.loads(first_json.read_text(encoding="utf-8"))
+        sha = first_obj["declaration_sha256"]
+        first_obj["head_commit"] = ""
+        first_json.write_text(json.dumps(first_obj), encoding="utf-8")
+        ver_json = store.root / "declarations" / "demo-record-v1" / f"{sha}.json"
+        ver_obj = json.loads(ver_json.read_text(encoding="utf-8"))
+        ver_obj["head_commit"] = ""
+        ver_json.write_text(json.dumps(ver_obj), encoding="utf-8")
+        with pytest.raises(ParityDeclareError, match="missing declared head_commit"):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+        # S5: error in cool archived_items reader raises instead of silently swallowing
+        cool_cat = tmp_path / "corrupt_cool_cat"
+        cool_cat.mkdir()
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-s4", exit_code=0, status="completed", outcome="pass"),
+            cool_cat,
+        )
+        arch_dir = cool_cat / "archived_items"
+        arch_dir.mkdir(parents=True)
+        # Restore head_commit first so we reach archived_items check
+        first_obj["head_commit"] = "a" * 40
+        first_json.write_text(json.dumps(first_obj), encoding="utf-8")
+        ver_obj["head_commit"] = "a" * 40
+        ver_json.write_text(json.dumps(ver_obj), encoding="utf-8")
+
+        def _boom(_cat: Path | str) -> list:
+            raise RuntimeError("corrupt archived_items ledger")
+
+        monkeypatch.setattr("bathos.parity.grader.read_archived_item_fragments", _boom)
+        with pytest.raises(RuntimeError, match="corrupt archived_items ledger"):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cool_cat, evidence_run_ids=["r-s4"], track_run=False)

@@ -246,20 +246,26 @@ def _resolve_xdg_config_path(environ: Mapping[str, str]) -> tuple[Path, str]:
     return xdg_base / "bathos" / "config.toml", xdg_note
 
 
+def resolve_start_dir(path: Path | str | None = None) -> Path:
+    """Return the directory used to anchor parity-store config resolution for *path*."""
+    if path is None:
+        return Path.cwd().resolve()
+    p = Path(path).resolve()
+    return p if p.is_dir() else p.parent
+
+
 def _collect_quota_fallbacks(cwd: Path, environ: Mapping[str, str]) -> tuple[int | None, int | None]:
-    """Read optional quota overrides from pyproject.toml -> XDG without failing on malformed config."""
+    """Read optional quota overrides from pyproject.toml -> XDG (raising on malformed config)."""
     p_files: int | None = None
     p_bytes: int | None = None
     x_files: int | None = None
     x_bytes: int | None = None
     pyproject_path = _find_nearest_pyproject(cwd)
     if pyproject_path is not None:
-        with contextlib.suppress(ParityStoreConfigError):
-            _pp, p_files, p_bytes, _pst, _pd = _read_pyproject_parity(pyproject_path)
+        _pp, p_files, p_bytes, _pst, _pd = _read_pyproject_parity(pyproject_path)
     xdg_config, _note = _resolve_xdg_config_path(environ)
     if xdg_config.is_file():
-        with contextlib.suppress(ParityStoreConfigError):
-            _xp, x_files, x_bytes, _xst, _xd = _read_xdg_parity(xdg_config)
+        _xp, x_files, x_bytes, _xst, _xd = _read_xdg_parity(xdg_config)
     return (
         p_files if p_files is not None else x_files,
         p_bytes if p_bytes is not None else x_bytes,
@@ -335,8 +341,7 @@ def resolve_parity_store(
             x_files: int | None = None
             x_bytes: int | None = None
             if xdg_config.is_file():
-                with contextlib.suppress(ParityStoreConfigError):
-                    _xp, x_files, x_bytes, _xst, _xd = _read_xdg_parity(xdg_config)
+                _xp, x_files, x_bytes, _xst, _xd = _read_xdg_parity(xdg_config)
             return ParityStoreResolution(
                 path=p_path,
                 source=LAYER_PYPROJECT,
