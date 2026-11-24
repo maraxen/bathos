@@ -214,6 +214,11 @@ class InterimUnitPackReader:
                 raise OutputTierError(
                     OUTPUTS_DRIFTED, f"{rel} (invalid storage.{kind} filename {fname!r})"
                 )
+        if pack_name in (UNIT_RECORD_FILENAME, index_name) or index_name == UNIT_RECORD_FILENAME:
+            raise OutputTierError(
+                OUTPUTS_DRIFTED,
+                f"{rel} (conflicting storage filenames pack={pack_name!r}, index={index_name!r})",
+            )
         pack_sha = storage.get("pack_sha256")
         index_sha = storage.get("index_sha256")
         if not isinstance(pack_sha, str) or not pack_sha:
@@ -238,7 +243,9 @@ class InterimUnitPackReader:
             raise OutputTierError(OUTPUTS_DRIFTED, f"{rel} ({index_name} missing members mapping)")
 
         n_members = storage.get("n_members")
-        if n_members is not None and n_members != len(members):
+        if n_members is not None and (
+            isinstance(n_members, bool) or not isinstance(n_members, int) or n_members != len(members)
+        ):
             raise OutputTierError(
                 OUTPUTS_DRIFTED,
                 f"{rel} ({index_name} member count {len(members)} != storage.n_members {n_members})",

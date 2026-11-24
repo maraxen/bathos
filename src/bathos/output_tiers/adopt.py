@@ -26,6 +26,7 @@ from bathos.output_tiers.reference import (
     PHASE_RUN_END_LEGACY,
     OutputTierError,
     ReferenceEntry,
+    check_root_syntax,
     expand_roots,
     hash_file,
     normalize_relpath,
@@ -40,6 +41,7 @@ from bathos.output_tiers.run_context import (
     open_run,
     require_log_mode,
 )
+from bathos.output_tiers.unit_pack_reader import DEFAULT_UNIT_PACK_READER, UnitPackReader
 
 NO_REFERENCE_HASHES = "no_reference_hashes"
 RUN_NOT_TERMINAL = "run_not_terminal"
@@ -93,7 +95,12 @@ def _log_cwd(ctx: RunContext, fallback: Path | None) -> Path:
 # --- hash ---------------------------------------------------------------------------------------
 
 
-def _live_state(root: Path, entry: ReferenceEntry) -> dict[str, Any]:
+def _live_state(
+    root: Path,
+    entry: ReferenceEntry,
+    *,
+    unit_reader: UnitPackReader | None = None,
+) -> dict[str, Any]:
     """``match`` / ``drift`` / ``missing`` for one reference entry against the live tree. Never follows a link."""
     p = root / entry.relpath
     out: dict[str, Any] = {
@@ -108,16 +115,44 @@ def _live_state(root: Path, entry: ReferenceEntry) -> dict[str, Any]:
         return {**out, "status": "missing", "live_sha256": None}
     except OSError as e:
         return {**out, "status": "drift", "live_sha256": None, "detail": f"unreadable: {e}"}
-    if not stat.S_ISREG(st.st_mode):
-        kind = "symlink" if stat.S_ISLNK(st.st_mode) else "not a regular file"
-        return {**out, "status": "drift", "live_sha256": None, "detail": kind}
-    if Path(os.path.realpath(p)) != Path(os.path.realpath(root)) / entry.relpath:
+    if stat.S_ISLNK(st.st_mode):
+        return {**out, "status": "drift", "live_sha256": None, "detail": "symlink"}
+    if check_root_syntax(entry.relpath) is not None or (
+        Path(os.path.realpath(p)) != Path(os.path.realpath(root)) / entry.relpath
+    ):
         return {
             **out,
             "status": "drift",
             "live_sha256": None,
             "detail": "a component of the path is a symlink",
         }
+    if stat.S_ISDIR(st.st_mode):
+        reader = unit_reader if unit_reader is not None else DEFAULT_UNIT_PACK_READER
+        if reader.is_unit_dir(root, entry.relpath):
+            try:
+                unit_info = reader.read_unit(root, entry.relpath, entry.sha256)
+                total_size = 0
+                for member in unit_info.members:
+                    if check_root_syntax(member.relpath) is not None:
+                        raise OutputTierError(
+                            "invalid_param", f"invalid packed member relpath {member.relpath!r}"
+                        )
+                    if member.expected_size is not None:
+                        total_size += member.expected_size
+                    else:
+                        total_size += os.lstat(root / member.relpath).st_size
+            except (OutputTierError, OSError) as e:
+                detail = e.detail if isinstance(e, OutputTierError) else f"unreadable: {e}"
+                return {**out, "status": "drift", "live_sha256": None, "detail": detail}
+            return {
+                **out,
+                "status": "match" if unit_info.content_digest == entry.sha256 else "drift",
+                "live_sha256": unit_info.content_digest,
+                "size_bytes": total_size,
+            }
+        return {**out, "status": "drift", "live_sha256": None, "detail": "not a regular file"}
+    if not stat.S_ISREG(st.st_mode):
+        return {**out, "status": "drift", "live_sha256": None, "detail": "not a regular file"}
     try:
         live = hash_file(p)
     except OSError as e:

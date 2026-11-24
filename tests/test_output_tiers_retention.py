@@ -203,3 +203,61 @@ def test_non_decision_relevant_run_does_not_flag(tmp_path: Path) -> None:
     rep_explicit = check_citation_retention(w.catalog, RID[:8], decision_relevant=True)
     assert rep_explicit.decision_relevant is True
     assert rep_explicit.ok is False
+
+
+def test_assess_paths_retention_external_paths_do_not_fail_open_gitignored(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_init_with_ignore(repo, "/outputs/\n")
+    (repo / "outputs").mkdir()
+    (repo / "outputs" / "metrics.json").write_text("{}")
+
+    rep = assess_paths_retention(
+        [str(tmp_path / "external" / "outside.bin"), "outputs/metrics.json"],
+        reference_paths=[],
+        worktree_root=repo,
+        has_verified_cold_copy=False,
+        run_id="run-ext",
+        decision_relevant=True,
+    )
+    assert rep.ok is False
+    assert rep.gitignored_paths == ("outputs/metrics.json",)
+    assert UNARCHIVED_GITIGNORED in rep.flag_codes
+
+
+def test_check_citation_retention_legacy_catalog_no_cwd_fallback(tmp_path: Path) -> None:
+    from bathos.catalog import init_catalog, write_run
+    from bathos.schema import Run
+
+    cat = tmp_path / "legacy_cat"
+    init_catalog(cat)
+    repo = tmp_path / "legacy_repo"
+    repo.mkdir()
+    _git_init_with_ignore(repo, "/out/\n")
+    (repo / "out").mkdir()
+    (repo / "out" / "res.json").write_text("{}")
+
+    run = Run(
+        project_slug="proj",
+        command="python run.py",
+        argv=["python", "run.py"],
+        git_hash="abc123",
+        git_branch="main",
+        git_dirty=False,
+        outcome="pass",
+        output_paths=["out/res.json"],
+    )
+    write_run(run, cat)
+
+    # Without worktree_root, does not fall back to Path.cwd() and returns cleanly
+    rep_no_root = check_citation_retention(cat, run.id[:8], worktree_root=None)
+    assert rep_no_root.ok is True
+    assert rep_no_root.decision_relevant is True
+
+    # With worktree_root, flags the gitignored output on the legacy run
+    rep_with_root = check_citation_retention(cat, run.id[:8], worktree_root=str(repo))
+    assert rep_with_root.ok is False
+    assert rep_with_root.gitignored_paths == ("out/res.json",)
+    assert UNARCHIVED_GITIGNORED in rep_with_root.flag_codes

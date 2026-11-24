@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from bathos.output_tiers.reference import (
+    RUN_NOT_FOUND,
+    RUN_PREFIX_AMBIGUOUS,
     OutputTierError,
     _entries_of,
     legacy_relpath,
@@ -76,7 +79,9 @@ class RetentionReport:
 
 def _gitignored_paths(paths: Iterable[str], root: Path) -> set[str]:
     """Return the subset of *paths* (relative POSIX under *root*) ignored by git."""
-    candidates = sorted({p for p in paths if p})
+    candidates = sorted(
+        {rel for p in paths if p and (rel := normalize_relpath(p, root)) is not None}
+    )
     if not candidates or not root.is_dir():
         return set()
     try:
@@ -126,10 +131,11 @@ def assess_paths_retention(
             norm_refs.add(key)
 
     all_candidates = sorted(set(norm_outputs) | norm_refs)
-    ignored = _gitignored_paths(all_candidates, worktree_root)
+    in_tree_candidates = [p for p in all_candidates if normalize_relpath(p, worktree_root) is not None]
+    ignored = _gitignored_paths(in_tree_candidates, worktree_root)
     gitignored_list = tuple(p for p in all_candidates if p in ignored)
     unpinned_list = tuple(p for p in gitignored_list if p not in norm_refs)
-    unarchived_list = () if has_verified_cold_copy else gitignored_list
+    unarchived_list = unpinned_list if has_verified_cold_copy else gitignored_list
 
     if not decision_relevant or not gitignored_list:
         return RetentionReport(
@@ -292,6 +298,21 @@ def _cold_copy_flags(con: Any, run_id: str) -> tuple[bool, bool]:
     return has_verified, has_unverified
 
 
+def _legacy_decision_relevance(run: Any) -> tuple[bool, tuple[str, ...]]:
+    reasons: list[str] = []
+    stage_name = getattr(run, "stage_name", None)
+    if stage_name in _DECISION_STAGES:
+        reasons.append(f"stage:{stage_name}")
+    if getattr(run, "epistemic_class", None) == "confirmatory":
+        reasons.append("epistemic_class:confirmatory")
+    if getattr(run, "outcome", None) == "pass":
+        reasons.append("outcome:pass")
+    campaign_id = getattr(run, "campaign_id", None)
+    if campaign_id:
+        reasons.append(f"campaign:{campaign_id}")
+    return bool(reasons), tuple(reasons)
+
+
 def check_citation_retention(
     catalog_dir: Path,
     run_prefix: str,
@@ -302,25 +323,96 @@ def check_citation_retention(
     emit_telemetry: bool = True,
 ) -> RetentionReport:
     """Check whether a run's gitignored decision-relevant outputs lack a reference or cold pin."""
-    from bathos.index import connect_read
+    from bathos.index import catalog_readable, connect_read
+    from bathos.query import AmbiguousRunId, get_run
+    from bathos.runlog.mode import is_log_mode
 
-    ctx = open_run(catalog_dir, run_prefix, need_root=False)
-    try:
-        resolved_root, _src, imported_root = _resolve_root(ctx.events, worktree_root)
-    except OutputTierError:
-        resolved_root = Path(worktree_root) if worktree_root else Path.cwd()
-        imported_root = worktree_root
+    resolved_root: Path | None = None
+    ref_paths: Iterable[str] = ()
+    all_paths: list[str] = []
+    has_verified = False
+    has_unverified = False
+    inferred_relevant = False
+    reasons: tuple[str, ...] = ()
 
-    ref = reference_hashes(ctx.events, imported_root=imported_root)
-    con = connect_read(catalog_dir)
-    try:
-        inferred_relevant, reasons = _infer_decision_relevance(con, ctx.run_id, ctx.events)
-        all_paths = _collect_run_output_paths(
-            con, ctx.run_id, ctx.events, resolved_root, imported_root, output_paths
+    if is_log_mode(catalog_dir):
+        ctx = open_run(catalog_dir, run_prefix, need_root=False)
+        run_id = ctx.run_id
+        try:
+            resolved_root, _src, imported_root = _resolve_root(ctx.events, worktree_root)
+        except OutputTierError:
+            resolved_root = (
+                Path(os.path.abspath(os.path.expanduser(worktree_root)))
+                if worktree_root
+                else None
+            )
+            imported_root = worktree_root
+
+        ref = reference_hashes(ctx.events, imported_root=imported_root)
+        ref_paths = ref.keys()
+        con = connect_read(catalog_dir)
+        try:
+            inferred_relevant, reasons = _infer_decision_relevance(con, run_id, ctx.events)
+            all_paths = _collect_run_output_paths(
+                con,
+                run_id,
+                ctx.events,
+                resolved_root if resolved_root is not None else Path("/"),
+                imported_root,
+                output_paths,
+            )
+            has_verified, has_unverified = _cold_copy_flags(con, run_id)
+        finally:
+            con.close()
+    else:
+        try:
+            run = get_run(
+                run_prefix, catalog_dir, allow_cool_fallback=True, include_superseded=True
+            )
+        except AmbiguousRunId:
+            raise OutputTierError(RUN_PREFIX_AMBIGUOUS, run_prefix) from None
+        if run is None:
+            raise OutputTierError(RUN_NOT_FOUND, run_prefix)
+        run_id = run.id
+        resolved_root = (
+            Path(os.path.abspath(os.path.expanduser(worktree_root))) if worktree_root else None
         )
-        has_verified, has_unverified = _cold_copy_flags(con, ctx.run_id)
-    finally:
-        con.close()
+        root_str = str(resolved_root) if resolved_root is not None else ""
+        ref_set: list[str] = []
+        for entry in _entries_of(run.output_metadata):
+            if entry.get("sha256"):
+                rel = entry.get("relpath") or (
+                    legacy_relpath(str(entry.get("path", "")), root_str) if root_str else None
+                )
+                if rel:
+                    ref_set.append(str(rel))
+        ref_paths = ref_set
+        if catalog_readable(catalog_dir):
+            con = connect_read(catalog_dir)
+            try:
+                try:
+                    inferred_relevant, reasons = _infer_decision_relevance(con, run_id, [])
+                    all_paths = _collect_run_output_paths(
+                        con,
+                        run_id,
+                        [],
+                        resolved_root if resolved_root is not None else Path("/"),
+                        None,
+                        output_paths,
+                    )
+                except Exception:
+                    inferred_relevant, reasons = _legacy_decision_relevance(run)
+                    all_paths = [str(p) for p in (run.output_paths or []) if p]
+                    if output_paths is not None:
+                        all_paths.extend(str(p) for p in output_paths if p)
+                has_verified, has_unverified = _cold_copy_flags(con, run_id)
+            finally:
+                con.close()
+        else:
+            inferred_relevant, reasons = _legacy_decision_relevance(run)
+            all_paths = [str(p) for p in (run.output_paths or []) if p]
+            if output_paths is not None:
+                all_paths.extend(str(p) for p in output_paths if p)
 
     if decision_relevant is True:
         effective_relevant = True
@@ -332,20 +424,35 @@ def check_citation_retention(
         effective_relevant = inferred_relevant
         effective_reasons = reasons
 
+    if resolved_root is None:
+        return RetentionReport(
+            ok=True,
+            run_id=run_id,
+            decision_relevant=effective_relevant,
+            decision_reasons=effective_reasons,
+            gitignored_paths=(),
+            unpinned_paths=(),
+            unarchived_paths=(),
+            has_verified_cold_copy=has_verified,
+            has_unverified_cold_copy=has_unverified,
+            flag_codes=(),
+            warnings=(),
+        )
+
     report = assess_paths_retention(
         all_paths,
-        ref.keys(),
+        ref_paths,
         worktree_root=resolved_root,
         has_verified_cold_copy=has_verified,
         has_unverified_cold_copy=has_unverified,
-        run_id=ctx.run_id,
+        run_id=run_id,
         decision_relevant=effective_relevant,
         decision_reasons=effective_reasons,
     )
     if emit_telemetry and not report.ok:
         event(
             "output_tiers.retention_warning",
-            run_id=ctx.run_id,
+            run_id=run_id,
             flag_codes=list(report.flag_codes),
             n_gitignored=len(report.gitignored_paths),
             n_unpinned=len(report.unpinned_paths),

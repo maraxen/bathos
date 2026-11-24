@@ -156,3 +156,40 @@ def test_all_three_ledgers_adopt_append_only_ledger() -> None:
     assert isinstance(blast_radius._LEDGER, AppendOnlyLedger)
     assert isinstance(trust_ledger._LEDGER, AppendOnlyLedger)
     assert isinstance(archived_items._LEDGER, AppendOnlyLedger)
+
+
+def test_read_fragments_skips_schema_mismatch_and_missing_required_col(tmp_path: Path) -> None:
+    import pyarrow.parquet as pq
+
+    cat = tmp_path / "cat"
+    cat.mkdir()
+    ledger = _make_ledger()
+
+    r1 = _SampleRecord(id="good-1", key="k1", val="ok")
+    ledger.write_fragment(r1, cat)
+    frag_dir = ledger.fragments_dir(cat)
+
+    # Incompatible column type for `extra` (int64 instead of string)
+    bad_type_tbl = pa.table(
+        {
+            "id": ["bad-type"],
+            "key": ["k1"],
+            "val": ["v"],
+            "amended_at": ["2026-11-24T00:00:00+00:00"],
+            "extra": pa.array([123], type=pa.int64()),
+        }
+    )
+    pq.write_table(bad_type_tbl, frag_dir / "sample_badtype.parquet")
+
+    # Missing required column `val` -> KeyError during row conversion
+    missing_col_tbl = pa.table(
+        {
+            "id": ["missing-col"],
+            "key": ["k1"],
+            "amended_at": ["2026-11-24T00:00:00+00:00"],
+        }
+    )
+    pq.write_table(missing_col_tbl, frag_dir / "sample_missingcol.parquet")
+
+    records = ledger.read_fragments(cat)
+    assert [r.id for r in records] == ["good-1"]

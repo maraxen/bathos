@@ -218,7 +218,7 @@ def latest_ledger_record(catalog_dir: Path | str, content_hash: str) -> TrustLed
     """Return the latest-by-``amended_at`` ledger record for ``content_hash``, or
     ``None`` if no record exists. This is the full-record counterpart to
     :func:`fold_trust_state`, which returns only the folded ``to_state`` string."""
-    return _LEDGER.latest_record_via_connect(catalog_dir, [("content_hash", content_hash)])
+    return _LEDGER.latest_record_log_aware(catalog_dir, [("content_hash", content_hash)])
 
 
 def fold_trust_state(catalog_dir: Path | str, content_hash: str) -> str | None:

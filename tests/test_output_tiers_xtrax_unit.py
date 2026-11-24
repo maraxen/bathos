@@ -256,3 +256,138 @@ def test_build_archive_accepts_swapped_unit_pack_reader(tmp_path: Path) -> None:
     assert ver.ok
     assert [f["relpath"] for f in built.manifest["files"]] == [f"{unit_rel}/payload.bin"]
     assert built.manifest["units"][0]["storage_schema"] == "custom.pack/1"
+
+
+def test_packed_unit_decompression_bypass_across_archive_hash_and_cold_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decompression bypass: build_archive, hash_outputs, and cold --dry-run verify
+    packed units via metadata without invoking zstandard decompression."""
+    from bathos.output_tiers.adopt import hash_outputs
+    from bathos.output_tiers.cold import cold_outputs
+    from tests._fake_myxcel import FakeMyxcel
+    from tests.test_output_tiers_adopt import RID, World
+
+    w = World(tmp_path)
+    unit_rel = "outputs/units/u_bypass"
+    digest, _ = _make_xtrax_unit(
+        w.root / unit_rel,
+        {"fold/a.json": b'{"x": 1}', "fold/b.bin": b"\x01\x02\x03\x04"},
+    )
+    w.started(RID, declared=True)
+    w.run_end(
+        [
+            {
+                "path": str(w.root / unit_rel),
+                "status": "present",
+                "size_bytes": None,
+                "mtime_unix": 1.0,
+                "sha256": digest,
+                "relpath": unit_rel,
+                "phase": "run_end",
+            }
+        ],
+        run_id=RID,
+    )
+    w.finished(RID)
+    w.ingest()
+
+    monkeypatch.setenv("BTH_COLD_PROFILE", "coldprof")
+    cfg = tmp_path / "myxcel-cfg"
+    cfg.mkdir()
+    (cfg / "coldprof.toml").write_text('host = "coldhost"\ncold_root = "/cold"\n')
+    monkeypatch.setattr("bathos.output_tiers.config.myxcel_config_dir", lambda: cfg)
+    fake = FakeMyxcel(tmp_path / "remote")
+
+    def _forbid_decompress(*_args, **_kwargs):
+        raise AssertionError("ZstdDecompressor must not be invoked for packed unit checks")
+
+    monkeypatch.setattr(zstandard, "ZstdDecompressor", _forbid_decompress)
+
+    stg = tmp_path / "stg"
+    stg.mkdir()
+    ref = {
+        unit_rel: ReferenceEntry(
+            unit_rel, digest, None, "run_end", "e-hash", str(w.root), str(w.root / unit_rel)
+        )
+    }
+    built = build_archive(RUN, "proj", ref, w.root, stg)
+    assert built.archive_path.is_file()
+
+    hashed = hash_outputs(w.catalog, RID[:8], worktree_root=str(w.root))
+    assert hashed["all_match"] is True
+    assert hashed["files"][0]["status"] == "match"
+    assert hashed["files"][0]["size_bytes"] > 0
+
+    dry = cold_outputs(
+        w.catalog, RID[:8], dry_run=True, runner=fake, config_dir=cfg, worktree_root=str(w.root)
+    )
+    assert dry["ok"] is True
+    assert dry["dry_run"] is True
+    assert dry["total_bytes"] == hashed["files"][0]["size_bytes"]
+
+
+def test_unit_pack_reader_rejects_bool_n_members_and_conflicting_storage_names(
+    tmp_path: Path,
+) -> None:
+    from bathos.output_tiers.unit_pack_reader import DEFAULT_UNIT_PACK_READER
+
+    # 1. bool n_members (True == 1 in Python) must be rejected
+    unit_bool = tmp_path / "u_bool"
+    digest_bool, rec_bool = _make_xtrax_unit(unit_bool, {"a.txt": b"hi"})
+    rec_bool["storage"]["n_members"] = True
+    (unit_bool / "unit.json").write_text(json.dumps(rec_bool))
+    with pytest.raises(OutputTierError) as ei_bool:
+        DEFAULT_UNIT_PACK_READER.read_unit(tmp_path, "u_bool", digest_bool)
+    assert ei_bool.value.error_code == "outputs_drifted"
+
+    # 2. pack == "unit.json" or pack == index must be rejected
+    for bad_pack in ("unit.json", "members.idx.json"):
+        unit_name = tmp_path / f"u_{bad_pack}"
+        digest_n, rec_n = _make_xtrax_unit(unit_name, {"a.txt": b"hi"})
+        rec_n["storage"]["pack"] = bad_pack
+        (unit_name / "unit.json").write_text(json.dumps(rec_n))
+        with pytest.raises(OutputTierError) as ei_n:
+            DEFAULT_UNIT_PACK_READER.read_unit(tmp_path, f"u_{bad_pack}", digest_n)
+        assert ei_n.value.error_code == "outputs_drifted"
+
+
+@pytest.mark.parametrize("bad_member_rel", ["/abs/escape.bin", "../escape.bin"])
+def test_archive_and_reference_reject_bad_member_relpaths(
+    tmp_path: Path, bad_member_rel: str
+) -> None:
+    from bathos.output_tiers.reference import _check_plain_path
+
+    src, stg = tmp_path / "src", tmp_path / "stg"
+    stg.mkdir()
+    unit_rel = "outputs/bad_unit"
+    (src / unit_rel).mkdir(parents=True)
+
+    with pytest.raises(OutputTierError) as ei_plain:
+        _check_plain_path(src, src / "foo", bad_member_rel)
+    assert ei_plain.value.error_code == "invalid_param"
+
+    class _BadMemberReader:
+        def is_unit_dir(self, _root_path: Path, _rel: str) -> bool:
+            return True
+
+        def read_unit(
+            self, _root_path: Path, rel: str, expected_content_digest: str
+        ) -> PackedUnitInfo:
+            return PackedUnitInfo(
+                relpath=rel,
+                content_digest=expected_content_digest,
+                record_digest="rec",
+                storage_schema="custom.pack/1",
+                n_members=1,
+                members=(PackedUnitMember(bad_member_rel, "a" * 64, 1),),
+            )
+
+    ref = {
+        unit_rel: ReferenceEntry(
+            unit_rel, "digest-bad", None, "run_end", "e1", WT, str(src / unit_rel)
+        )
+    }
+    with pytest.raises(OutputTierError) as ei_arch:
+        build_archive(RUN, "proj", ref, src, stg, unit_reader=_BadMemberReader())
+    assert ei_arch.value.error_code == "invalid_param"

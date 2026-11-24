@@ -124,25 +124,33 @@ class AppendOnlyLedger[RecordT]:
         if not parquet_files:
             return []
 
-        tables = []
+        records: list[RecordT] = []
         for f in parquet_files:
             try:
-                tables.append(pq.read_table(f))
+                tbl = pq.read_table(f)
+                for field in self.fragment_schema:
+                    idx = tbl.schema.get_field_index(field.name)
+                    if idx != -1:
+                        col_type = tbl.schema.field(idx).type
+                        if col_type != field.type and not pa.types.is_null(col_type):
+                            pa.concat_tables(
+                                [
+                                    pa.table({field.name: pa.array([], type=field.type)}),
+                                    tbl.select([field.name]),
+                                ],
+                                promote_options="permissive",
+                            )
+                pydict = tbl.to_pydict()
+                file_records: list[RecordT] = []
+                for i in range(tbl.num_rows):
+                    if self.fragment_pydict_to_record is not None:
+                        file_records.append(self.fragment_pydict_to_record(pydict, i))
+                    else:
+                        values = {col: pydict[col][i] for col in pydict}
+                        file_records.append(self.record_from_values(values))
+                records.extend(file_records)
             except Exception as exc:  # noqa: BLE001 - one bad fragment must not crash compact()
                 event(f"{self.telemetry_prefix}.corrupt_fragment", path=str(f), error=str(exc))
-        if not tables:
-            return []
-
-        combined = pa.concat_tables(tables, promote_options="permissive")
-        pydict = combined.to_pydict()
-
-        records: list[RecordT] = []
-        for i in range(combined.num_rows):
-            if self.fragment_pydict_to_record is not None:
-                records.append(self.fragment_pydict_to_record(pydict, i))
-            else:
-                values = {col: pydict[col][i] for col in pydict}
-                records.append(self.record_from_values(values))
         return records
 
     def insert_warm_row_using_conn(
@@ -273,7 +281,7 @@ class AppendOnlyLedger[RecordT]:
 
         cat = Path(catalog_dir)
         if is_log_mode(cat):
-            con = connect_read(cat, read_only=True)
+            con = connect_read(cat, read_only=True, wire_validity=False, missing="empty")
             try:
                 return self.fetch_latest_record(con, key_filters)
             except duckdb.Error as exc:
@@ -288,7 +296,7 @@ class AppendOnlyLedger[RecordT]:
             return self.latest_record_from_fragments(cat, key_filters)
 
         try:
-            con = connect_read(cat, read_only=True)
+            con = connect_read(cat, read_only=True, wire_validity=False)
         except duckdb.ConnectionException as exc:
             if "different configuration" not in str(exc).lower():
                 raise

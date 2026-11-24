@@ -15,6 +15,7 @@ pattern ``trust_ledger.fold_trust_state`` uses for promotion state.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from collections.abc import Mapping
@@ -69,6 +70,9 @@ _ARCHIVED_COLUMNS = (
     "record_id",
     "script_sha256",
     "run_ids",
+)
+_ARCHIVED_LEGACY_COLUMNS = tuple(
+    c for c in _ARCHIVED_COLUMNS if c not in ("script_sha256", "run_ids")
 )
 
 _FRAGMENT_SCHEMA = pa.schema(
@@ -128,6 +132,8 @@ class ArchivedItemRecord:
 
 
 def _parse_json_list(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
     try:
         return json.loads(raw) if raw else []
     except (TypeError, ValueError):
@@ -204,9 +210,20 @@ def _fragments_dir(catalog_dir: Path | str) -> Path:
     return _LEDGER.fragments_dir(catalog_dir)
 
 
+def _ensure_table_schema(con: duckdb.DuckDBPyConnection) -> None:
+    """Create ``archived_items`` if absent and migrate 15-column legacy tables."""
+    con.execute(_TABLE_SCHEMA)
+    for alter_sql in (
+        "ALTER TABLE archived_items ADD COLUMN IF NOT EXISTS script_sha256 TEXT",
+        "ALTER TABLE archived_items ADD COLUMN IF NOT EXISTS run_ids TEXT",
+    ):
+        with contextlib.suppress(Exception):
+            con.execute(alter_sql)
+
+
 def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
-    con.execute(_TABLE_SCHEMA)
+    _ensure_table_schema(con)
     return con
 
 
@@ -217,6 +234,7 @@ _LEDGER: AppendOnlyLedger[ArchivedItemRecord] = AppendOnlyLedger(
     pk_col="record_id",
     order_col="recorded_at",
     columns=_ARCHIVED_COLUMNS,
+    legacy_columns=_ARCHIVED_LEGACY_COLUMNS,
     fragment_schema=_FRAGMENT_SCHEMA,
     runlog_kind="archived_item.recorded",
     telemetry_prefix="archived_items",
@@ -276,4 +294,4 @@ def latest_status(catalog_dir: Path | str, item_id: str) -> ArchivedItemRecord |
     """Return the latest-by-``recorded_at`` record for ``item_id``, or ``None`` if the item
     has never been archived. Folds "archived" -> possibly-later "restored", latest-wins,
     mirroring ``trust_ledger.latest_ledger_record``."""
-    return _LEDGER.latest_record_via_connect(catalog_dir, [("id", item_id)])
+    return _LEDGER.latest_record_log_aware(catalog_dir, [("id", item_id)])

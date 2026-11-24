@@ -776,15 +776,20 @@ def _ingest_archived_item_fragments(con: duckdb.DuckDBPyConnection, catalog_dir:
 
     Returns the number of fragment records ingested (post skip-if-present).
     """
-    import json
-
-    from bathos.archived_items import _TABLE_SCHEMA, read_archived_item_fragments
+    from bathos.archived_items import (
+        _ARCHIVED_COLUMNS,
+        _ensure_table_schema,
+        _record_to_warm_values,
+        read_archived_item_fragments,
+    )
 
     records = read_archived_item_fragments(catalog_dir)
     if not records:
         return 0
 
-    con.execute(_TABLE_SCHEMA)
+    _ensure_table_schema(con)
+    cols_sql = ", ".join(_ARCHIVED_COLUMNS)
+    placeholders = ", ".join("?" for _ in _ARCHIVED_COLUMNS)
     ingested = 0
     for record in records:
         existing = con.execute(
@@ -793,27 +798,8 @@ def _ingest_archived_item_fragments(con: duckdb.DuckDBPyConnection, catalog_dir:
         if existing:
             continue
         con.execute(
-            "INSERT INTO archived_items "
-            "(id, project_slug, event, kind, paths, pre_archive_sha, stub_commit_sha, verdict, "
-            "reason, superseded_by, bundle_sha256, bundle_path, archived_by, recorded_at, "
-            "record_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                record.id,
-                record.project_slug,
-                record.event,
-                record.kind,
-                json.dumps(record.paths),
-                record.pre_archive_sha,
-                record.stub_commit_sha,
-                record.verdict,
-                record.reason,
-                record.superseded_by,
-                record.bundle_sha256,
-                record.bundle_path,
-                record.archived_by,
-                record.recorded_at,
-                record.record_id,
-            ],
+            f"INSERT INTO archived_items ({cols_sql}) VALUES ({placeholders})",  # noqa: S608
+            _record_to_warm_values(record),
         )
         ingested += 1
     return ingested

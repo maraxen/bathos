@@ -432,3 +432,63 @@ class TestTechDebt3563UnverifiableAndDbErrors:
             assert fold_blast_radius_state(catalog_dir, "campaign", "camp-mixed-cfg") == "unverifiable"
         finally:
             rw_con.close()
+
+
+def test_flag_blast_radius_log_mode_reads_from_state_without_bathos_db(
+    catalog_dir, monkeypatch
+):
+    from bathos.blast_radius import BlastRadiusMatch, BlastRadiusReport, flag_blast_radius
+    from bathos.runlog.writer import reset_writers_for_test
+
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(catalog_dir))
+
+    m_a = BlastRadiusMatch(
+        run_id="run-log-a",
+        git_hash="abc123",
+        command="python a.py",
+        campaign_id="",
+        matched_files=["a.py"],
+        reason="first flag",
+    )
+    rep1 = BlastRadiusReport(
+        anchor_kind="file",
+        anchor_value="a.py",
+        changed_files=["a.py"],
+        affected=[m_a],
+        unverifiable=[],
+        unaffected_run_ids=[],
+        warnings=[],
+    )
+    recs1 = flag_blast_radius(rep1, catalog_dir)
+    assert len(recs1) == 1
+    assert recs1[0].from_state == "clean"
+    assert not (catalog_dir / "bathos.db").exists()
+
+    # Second batch: run-log-a transitions affected -> unverifiable (read from index.db),
+    # and run-log-b transitions clean -> affected -> unverifiable within the same batch.
+    m_b = BlastRadiusMatch(
+        run_id="run-log-b",
+        git_hash="def456",
+        command="python b.py",
+        campaign_id="",
+        matched_files=["b.py"],
+        reason="second flag",
+    )
+    rep2 = BlastRadiusReport(
+        anchor_kind="file",
+        anchor_value="b.py",
+        changed_files=["b.py"],
+        affected=[m_b],
+        unverifiable=[m_a, m_b],
+        unaffected_run_ids=[],
+        warnings=[],
+    )
+    recs2 = flag_blast_radius(rep2, catalog_dir)
+    assert not (catalog_dir / "bathos.db").exists()
+    by_pair = {(r.entity_id, r.to_state): r.from_state for r in recs2}
+    assert by_pair[("run-log-a", "unverifiable")] == "affected"
+    assert by_pair[("run-log-b", "affected")] == "clean"
+    assert by_pair[("run-log-b", "unverifiable")] == "affected"
+    assert fold_blast_radius_state(catalog_dir, "run", "run-log-a") == "unverifiable"
+    reset_writers_for_test()

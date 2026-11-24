@@ -119,6 +119,9 @@ def _refuse_kind(mode: int) -> str:
 def _check_plain_path(fs_root: Path, candidate: Path, relpath: str) -> None:
     """Refuse if any component between ``fs_root`` and ``candidate`` is a link, i.e. the file does not sit
     under ``fs_root`` by the path it was declared with (this also covers a path that resolves outside it)."""
+    problem = check_root_syntax(relpath)
+    if problem is not None:
+        raise OutputTierError("invalid_param", f"relpath {relpath!r} {problem}")
     expected = Path(os.path.realpath(fs_root)) / relpath
     if Path(os.path.realpath(candidate)) != expected:
         raise OutputTierError(

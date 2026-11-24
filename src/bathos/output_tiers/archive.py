@@ -252,6 +252,7 @@ def _expand_reference_members(
             raise OutputTierError(SPECIAL_FILE_IN_OUTPUTS, rel)
 
         for spec in candidates:
+            _check_relpath(spec.relpath)
             if spec.relpath in seen_members:
                 raise OutputTierError(
                     "invalid_param", f"duplicate archive member path {spec.relpath!r}"

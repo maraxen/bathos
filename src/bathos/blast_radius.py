@@ -23,8 +23,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import posixpath
 import re
 import subprocess
+import tomllib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -620,41 +622,132 @@ def _campaign_read_warning(exc: duckdb.Error) -> str:
 _UNBOUNDED_SCAN_LIMIT = 1_000_000
 
 
-_HEX_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_HEX_DIGEST_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{7,64}$", re.IGNORECASE)
+
+
+def _path_boundary_match(a: str, b: str) -> bool:
+    """True when *a* and *b* match at a full path-component boundary."""
+    a_norm = posixpath.normpath(a.replace("\\", "/"))
+    b_norm = posixpath.normpath(b.replace("\\", "/"))
+    if not a_norm or a_norm == "." or not b_norm or b_norm == ".":
+        return False
+    if a_norm == b_norm:
+        return True
+    if not b_norm.startswith("/") and a_norm.endswith("/" + b_norm):
+        return True
+    return not a_norm.startswith("/") and b_norm.endswith("/" + a_norm)
+
+
+def _toml_has_clause(doc: Mapping[str, Any], clause: str) -> bool:
+    """True when dotted *clause* (or bare key) exists as a structural TOML key/table."""
+    parts = [p for p in clause.split(".") if p]
+    if not parts:
+        return False
+
+    def _walk_dotted(node: Mapping[str, Any], rem: list[str]) -> bool:
+        if not rem:
+            return True
+        full_rem = ".".join(rem)
+        if full_rem in node:
+            return True
+        head = rem[0]
+        if head in node:
+            if len(rem) == 1:
+                return True
+            child = node[head]
+            if isinstance(child, Mapping):
+                return _walk_dotted(child, rem[1:])
+        return False
+
+    if _walk_dotted(doc, parts):
+        return True
+    if len(parts) == 1:
+        key = parts[0]
+        stack: list[Mapping[str, Any]] = [doc]
+        while stack:
+            cur = stack.pop()
+            if key in cur:
+                return True
+            for v in cur.values():
+                if isinstance(v, Mapping):
+                    stack.append(v)
+    return False
 
 
 def _sidecar_clause_matches(text: str, clause: str) -> bool:
-    """True when *clause* (e.g. 'outcomes.pass', 'outcomes.pass.condition', or key) appears in *text*."""
-    if clause in text or f"[{clause}]" in text:
-        return True
-    if "." in clause:
-        parent, _, leaf = clause.rpartition(".")
-        if f"[{parent}]" in text and leaf in text:
-            return True
-    return False
+    """True when *clause* (e.g. 'outcomes.pass', 'outcomes.pass.condition', or key) exists in TOML *text*."""
+    doc = tomllib.loads(text)
+    return _toml_has_clause(doc, clause)
+
+
+def _read_live_text_verified(
+    raw: str | None,
+    expected_sha256: str,
+    project_root: Path,
+    ctx: _MatchContext,
+    run_id: str | None,
+) -> str | None:
+    """Read live sidecar text only if *raw*'s bytes match *expected_sha256*."""
+    if not raw or not expected_sha256:
+        return None
+    expected_lower = expected_sha256.lower()
+    if raw.startswith("git:"):
+        try:
+            data = read_lock_bytes(raw, run_id, raw)
+        except (OSError, ValueError):
+            return None
+        if hashlib.sha256(data).hexdigest().lower() != expected_lower:
+            return None
+        if len(data) > _TEXT_SOURCE_CAP_BYTES and raw not in ctx.truncated:
+            ctx.truncated.append(raw)
+        return data[:_TEXT_SOURCE_CAP_BYTES].decode("utf-8", errors="replace")
+
+    p = Path(raw)
+    candidates = [p] if p.is_absolute() else [project_root / p, p]
+    for cand in candidates:
+        try:
+            data = cand.read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(data).hexdigest().lower() != expected_lower:
+            return None
+        if len(data) > _TEXT_SOURCE_CAP_BYTES:
+            key = str(cand)
+            if key not in ctx.truncated:
+                ctx.truncated.append(key)
+        return data[:_TEXT_SOURCE_CAP_BYTES].decode("utf-8", errors="replace")
+    return None
 
 
 def _resolve_sidecar_text(
     run: Run, base: str, is_sha: bool, ctx: _MatchContext, catalog_dir: Path
 ) -> str | None:
-    """Best-effort sidecar text lookup across run.sidecar_path, frozen snapshot, and anchor path."""
-    text = ctx.text_of(run.sidecar_path, run.id, run.sidecar_path or "")
-    if text is not None:
-        return text
-    if run.sidecar_sha256:
-        with contextlib.suppress(Exception):
-            from bathos.sidecar import sidecar_snapshot_path
+    """Resolve frozen sidecar snapshot first, else live file only when its SHA256 matches."""
+    if not run.sidecar_sha256:
+        return None
+    with contextlib.suppress(Exception):
+        from bathos.sidecar import sidecar_snapshot_path
 
-            snap = sidecar_snapshot_path(catalog_dir, run.sidecar_sha256)
-            if snap.is_file():
-                payload = json.loads(snap.read_text(encoding="utf-8"))
+        snap = sidecar_snapshot_path(catalog_dir, run.sidecar_sha256)
+        if snap.is_file():
+            raw = snap.read_text(encoding="utf-8")
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
                 raw_text = payload.get("raw_text") or payload.get("content")
                 if isinstance(raw_text, str):
                     return raw_text
-    if not is_sha:
-        text = ctx.text_of(base, run.id, run.sidecar_path or "")
-        if text is not None:
-            return text
+            return raw
+
+    text = _read_live_text_verified(
+        run.sidecar_path, run.sidecar_sha256, ctx.project_root, ctx, run.id
+    )
+    if text is not None:
+        return text
+    if not is_sha and not run.sidecar_path:
+        return _read_live_text_verified(base, run.sidecar_sha256, ctx.project_root, ctx, run.id)
     return None
 
 
@@ -675,7 +768,7 @@ def _assess_sidecar_run(
     matched_files: list[str] = []
 
     if is_sha:
-        needle = base.lower()
+        needle = base.lower().removeprefix("sha256:")
         for label, val in (
             ("sidecar_sha256", (run.sidecar_sha256 or "").lower()),
             ("component_sidecar_sha256", (run.component_sidecar_sha256 or "").lower()),
@@ -686,7 +779,7 @@ def _assess_sidecar_run(
             matched_files.append(run.sidecar_path)
     else:
         sp = (run.sidecar_path or "").replace("\\", "/")
-        if sp and (base_norm in sp or sp in base_norm):
+        if sp and _path_boundary_match(sp, base_norm):
             matched_via.append("sidecar path")
             matched_files.append(base)
         if disk_sha and run.sidecar_sha256 and run.sidecar_sha256.lower() == disk_sha.lower():
@@ -716,9 +809,20 @@ def _assess_sidecar_run(
             command=run.command,
             campaign_id=campaign_id,
             matched_files=matched_files,
-            reason=f"matches sidecar {base} via {via}, but sidecar text is unreadable to verify clause {clause!r}",
+            reason=f"matches sidecar {base} via {via}, but sidecar text is unreadable or modified to verify clause {clause!r}",
         )
-    if _sidecar_clause_matches(text, clause):
+    try:
+        matched_clause = _sidecar_clause_matches(text, clause)
+    except tomllib.TOMLDecodeError:
+        return "unverifiable", BlastRadiusMatch(
+            run_id=run.id,
+            git_hash=run.git_hash,
+            command=run.command,
+            campaign_id=campaign_id,
+            matched_files=matched_files,
+            reason=f"matches sidecar {base} via {via}, but sidecar text is unreadable/invalid TOML to verify clause {clause!r}",
+        )
+    if matched_clause:
         return "affected", BlastRadiusMatch(
             run_id=run.id,
             git_hash=run.git_hash,
@@ -730,6 +834,66 @@ def _assess_sidecar_run(
     return "unaffected", None
 
 
+def _one_way_path_sources(
+    run: Run, art_path: str, ctx: _MatchContext
+) -> dict[str, list[str]]:
+    """One-way path-boundary-aware search for *art_path* across run fields and sidecar/manifest texts."""
+    art_norm = posixpath.normpath(art_path.replace("\\", "/"))
+    if not art_norm or art_norm == ".":
+        return {}
+    pat = re.compile(rf"(?:^|[/\s'\"=]){re.escape(art_norm)}(?:$|[/\s'\",;\]\}}])")
+
+    labels: list[str] = []
+    hay_sources: list[tuple[str, str]] = [
+        ("command", (run.command or "").replace("\\", "/")),
+        *[("command", (arg or "").replace("\\", "/")) for arg in (run.argv or [])],
+        ("sidecar path", (run.sidecar_path or "").replace("\\", "/")),
+        ("manifest path", (run.manifest_path or "").replace("\\", "/")),
+        ("metadata", (run.metadata or "").replace("\\", "/")),
+        ("output_metadata", (run.output_metadata or "").replace("\\", "/")),
+    ]
+    for label, raw in (("sidecar text", run.sidecar_path), ("manifest text", run.manifest_path)):
+        text = ctx.text_of(raw, run.id, run.sidecar_path or "")
+        if text is not None:
+            hay_sources.append((label, text.replace("\\", "/")))
+
+    for label, hay in hay_sources:
+        if not hay or label in labels:
+            continue
+        if pat.search(hay):
+            labels.append(label)
+    return {art_path: labels} if labels else {}
+
+
+def _one_way_digest_sources(
+    run: Run, art_digest: str, ctx: _MatchContext
+) -> dict[str, list[str]]:
+    """One-way hex-boundary search for *art_digest* across run fields and sidecar/manifest texts."""
+    hex_part = art_digest.lower().removeprefix("sha256:").strip()
+    if len(hex_part) < 4:
+        return {}
+    pat = re.compile(rf"(?<![0-9a-f]){re.escape(hex_part)}")
+
+    labels: list[str] = []
+    hay_sources: list[tuple[str, str]] = [
+        ("command", run.command or ""),
+        *[("command", arg or "") for arg in (run.argv or [])],
+        ("metadata", run.metadata or ""),
+        ("output_metadata", run.output_metadata or ""),
+    ]
+    for label, raw in (("sidecar text", run.sidecar_path), ("manifest text", run.manifest_path)):
+        text = ctx.text_of(raw, run.id, run.sidecar_path or "")
+        if text is not None:
+            hay_sources.append((label, text))
+
+    for label, hay in hay_sources:
+        if not hay or label in labels:
+            continue
+        if pat.search(hay.lower()):
+            labels.append(label)
+    return {art_digest: labels} if labels else {}
+
+
 def _assess_input_artifact_run(
     run: Run,
     *,
@@ -739,36 +903,22 @@ def _assess_input_artifact_run(
     campaign_id: str,
 ) -> tuple[str, BlastRadiusMatch | None]:
     """Classify *run* against an input-artifact anchor (path, digest, or path@digest)."""
-    needles: list[str] = [art_path]
-    digest_needles: list[str] = []
-    if art_digest:
-        digest_needles.append(art_digest)
-        if art_digest.startswith("sha256:"):
-            digest_needles.append(art_digest.removeprefix("sha256:"))
+    path_sources = _one_way_path_sources(run, art_path, ctx) if art_path else {}
+    digest_sources = _one_way_digest_sources(run, art_digest, ctx) if art_digest else {}
 
-    path_sources = _run_match_sources(run, needles, ctx) if art_path else {}
-    # Also check output_metadata JSON if any reference is recorded there.
-    if art_path and run.output_metadata and art_path.replace("\\", "/") in run.output_metadata:
-        path_sources.setdefault(art_path, []).append("output_metadata")
-
-    digest_sources: dict[str, list[str]] = {}
-    if digest_needles:
-        digest_sources = _run_match_sources(run, digest_needles, ctx)
-        for dn in digest_needles:
-            if run.output_metadata and dn in run.output_metadata:
-                digest_sources.setdefault(dn, []).append("output_metadata")
-
-    if digest_needles:
-        if digest_sources:
+    if art_path and art_digest:
+        if path_sources and digest_sources:
             matched_d = list(digest_sources)
-            matched = [art_path] if art_path else matched_d
             return "affected", BlastRadiusMatch(
                 run_id=run.id,
                 git_hash=run.git_hash,
                 command=run.command,
                 campaign_id=campaign_id,
-                matched_files=matched,
-                reason=f"matches input artifact digest {art_digest} via {_via(digest_sources, matched_d)}",
+                matched_files=[art_path],
+                reason=(
+                    f"matches input artifact '{art_path}' ({_via(path_sources, [art_path])}) "
+                    f"and digest {art_digest} ({_via(digest_sources, matched_d)})"
+                ),
             )
         if path_sources:
             return "unverifiable", BlastRadiusMatch(
@@ -781,6 +931,19 @@ def _assess_input_artifact_run(
                     f"touches input artifact path '{art_path}' via {_via(path_sources, [art_path])}, "
                     f"but digest {art_digest} was not recorded on the run"
                 ),
+            )
+        return "unaffected", None
+
+    if art_digest:
+        if digest_sources:
+            matched_d = list(digest_sources)
+            return "affected", BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=matched_d,
+                reason=f"matches input artifact digest {art_digest} via {_via(digest_sources, matched_d)}",
             )
         return "unaffected", None
 
@@ -838,6 +1001,33 @@ def _resolve_instrument_spec(
     return val, None, None
 
 
+def _resolve_inst_git_repo(
+    pkg: str,
+    self_pkg: bool,
+    target_commit: str | None,
+    introduced_commit: str | None,
+    project_root: Path | None,
+) -> Path:
+    from bathos.version_resolver import is_valid_git_commit, key_prefix
+
+    base_root = project_root or Path.cwd()
+    if self_pkg or project_root is None:
+        return base_root
+    check_sha = target_commit or introduced_commit
+    if check_sha and is_valid_git_commit(check_sha, base_root):
+        return base_root
+    pkg_key = key_prefix(pkg)
+    for cand_name in (pkg, pkg_key, pkg.replace("_", "-")):
+        sibling = project_root.parent / cand_name
+        if (
+            sibling.is_dir()
+            and (sibling / ".git").exists()
+            and (not check_sha or is_valid_git_commit(check_sha, sibling))
+        ):
+            return sibling
+    return base_root
+
+
 def _assess_instrument_run(
     run: Run,
     *,
@@ -846,14 +1036,83 @@ def _assess_instrument_run(
     defect_entry: Any | None,
     campaign_id: str,
     ver_key: str,
+    project_root: Path | None = None,
+    catalog_dir: Path | None = None,
 ) -> tuple[str, BlastRadiusMatch | None, bool]:
     """Classify *run* against an instrument anchor.
 
     Returns ``(bucket, match_or_none, recorded_pkg_flag)``.
     """
-    from bathos.version_resolver import version_in_range
+    from packaging.version import InvalidVersion, Version
 
-    if not run.dependency_provenance:
+    from bathos.version_resolver import (
+        commit_in_range,
+        evaluate_predicate,
+        is_self_package,
+        is_valid_git_commit,
+        resolve_toolchain_version,
+        version_in_range,
+    )
+
+    if run.dependency_provenance:
+        try:
+            prov = json.loads(run.dependency_provenance)
+        except (json.JSONDecodeError, TypeError):
+            return (
+                "unverifiable",
+                BlastRadiusMatch(
+                    run_id=run.id,
+                    git_hash=run.git_hash,
+                    command=run.command,
+                    campaign_id=campaign_id,
+                    matched_files=[],
+                    reason="malformed dependency_provenance JSON -- cannot verify instrument version",
+                ),
+                False,
+            )
+        if not isinstance(prov, dict):
+            return (
+                "unverifiable",
+                BlastRadiusMatch(
+                    run_id=run.id,
+                    git_hash=run.git_hash,
+                    command=run.command,
+                    campaign_id=campaign_id,
+                    matched_files=[],
+                    reason="non-dict dependency_provenance -- cannot verify instrument version",
+                ),
+                False,
+            )
+        for cand_key in (ver_key, f"{pkg}_version"):
+            if cand_key in prov:
+                raw_val = prov.get(cand_key)
+                sval = str(raw_val).strip() if raw_val is not None else ""
+                if not sval or sval.lower() == "unknown":
+                    commit_key = cand_key.removesuffix("_version") + "_source_commit"
+                    cval = str(prov.get(commit_key) or "").strip()
+                    if not cval or cval.lower() == "unknown":
+                        return (
+                            "unverifiable",
+                            BlastRadiusMatch(
+                                run_id=run.id,
+                                git_hash=run.git_hash,
+                                command=run.command,
+                                campaign_id=campaign_id,
+                                matched_files=[],
+                                reason=f"recorded {cand_key} is {sval or 'empty'!r} -- cannot verify instrument version",
+                            ),
+                            True,
+                        )
+
+    ver, commit, v_source = resolve_toolchain_version(
+        run, project_root, pkg, catalog_dir=catalog_dir
+    )
+    if v_source == "unknown" or (not ver and not commit):
+        reason = (
+            "no recorded dependency_provenance -- cannot verify instrument version"
+            if not run.dependency_provenance
+            else f"dependency_provenance lacks {pkg} and version could not be resolved -- cannot verify instrument version"
+        )
         return (
             "unverifiable",
             BlastRadiusMatch(
@@ -862,77 +1121,172 @@ def _assess_instrument_run(
                 command=run.command,
                 campaign_id=campaign_id,
                 matched_files=[],
-                reason="no recorded dependency_provenance -- cannot verify instrument version",
+                reason=reason,
             ),
             False,
         )
-    try:
-        prov = json.loads(run.dependency_provenance)
-    except (json.JSONDecodeError, TypeError):
-        return (
-            "unverifiable",
-            BlastRadiusMatch(
-                run_id=run.id,
-                git_hash=run.git_hash,
-                command=run.command,
-                campaign_id=campaign_id,
-                matched_files=[],
-                reason="malformed dependency_provenance JSON -- cannot verify instrument version",
-            ),
-            False,
-        )
-    if not isinstance(prov, dict):
-        return (
-            "unverifiable",
-            BlastRadiusMatch(
-                run_id=run.id,
-                git_hash=run.git_hash,
-                command=run.command,
-                campaign_id=campaign_id,
-                matched_files=[],
-                reason="non-dict dependency_provenance -- cannot verify instrument version",
-            ),
-            False,
-        )
 
-    if ver_key not in prov:
-        return "unaffected", None, False
-
-    raw_ver = prov.get(ver_key)
-    ver = str(raw_ver).strip() if raw_ver is not None else ""
-    if not ver or ver.lower() == "unknown":
-        return (
-            "unverifiable",
-            BlastRadiusMatch(
-                run_id=run.id,
-                git_hash=run.git_hash,
-                command=run.command,
-                campaign_id=campaign_id,
-                matched_files=[],
-                reason=f"recorded {ver_key} is {ver or 'empty'!r} -- cannot verify instrument version",
-            ),
-            True,
-        )
+    recorded_pkg = True
+    ver_label = ver or commit or "unknown"
 
     if defect_entry is not None:
-        eco_ranges = [r for r in defect_entry.ranges if r.type == "ECOSYSTEM"]
-        if not eco_ranges or any(version_in_range(ver, r.introduced, r.fixed) for r in eco_ranges):
-            return (
-                "affected",
-                BlastRadiusMatch(
-                    run_id=run.id,
-                    git_hash=run.git_hash,
-                    command=run.command,
-                    campaign_id=campaign_id,
-                    matched_files=[],
-                    reason=f"instrument {pkg}=={ver} matches defect {defect_entry.id}",
-                ),
-                True,
-            )
-        return "unaffected", None, True
+        if not defect_entry.ranges:
+            matches_range = True
+            unverifiable_reason: str | None = None
+        else:
+            matches_range = False
+            evaluated_any = False
+            unverifiable_reason = None
+            for r in defect_entry.ranges:
+                if r.type == "ECOSYSTEM":
+                    if ver:
+                        try:
+                            Version(ver)
+                        except InvalidVersion:
+                            unverifiable_reason = (
+                                unverifiable_reason
+                                or f"unparseable {pkg} version {ver!r} -- cannot verify defect {defect_entry.id}"
+                            )
+                            continue
+                        evaluated_any = True
+                        last_aff = getattr(r, "last_affected", None)
+                        fixed_targets = (
+                            r.fixed_all
+                            if getattr(r, "fixed_all", None) and r.fixed is None
+                            else (r.fixed,)
+                        )
+                        if any(
+                            version_in_range(ver, r.introduced, f, last_affected=last_aff)
+                            for f in fixed_targets
+                        ):
+                            matches_range = True
+                            break
+                    else:
+                        unverifiable_reason = (
+                            unverifiable_reason
+                            or f"missing {pkg} version for ECOSYSTEM range -- cannot verify defect {defect_entry.id}"
+                        )
+                elif r.type == "GIT":
+                    self_pkg = is_self_package(pkg, run, project_root)
+                    target_commit = commit or (run.git_hash if self_pkg else None)
+                    repo_root = _resolve_inst_git_repo(
+                        pkg, self_pkg, target_commit, r.introduced, project_root
+                    )
+                    fixed_targets = r.fixed_all if getattr(r, "fixed_all", None) else r.fixed
+                    if target_commit and is_valid_git_commit(target_commit, repo_root):
+                        evaluated_any = True
+                        if commit_in_range(target_commit, r.introduced, fixed_targets, repo_root):
+                            matches_range = True
+                            break
+                    else:
+                        unverifiable_reason = (
+                            unverifiable_reason
+                            or f"unresolvable {pkg} commit for GIT range -- cannot verify defect {defect_entry.id}"
+                        )
+
+            if not matches_range:
+                if not evaluated_any or unverifiable_reason:
+                    return (
+                        "unverifiable",
+                        BlastRadiusMatch(
+                            run_id=run.id,
+                            git_hash=run.git_hash,
+                            command=run.command,
+                            campaign_id=campaign_id,
+                            matched_files=[],
+                            reason=unverifiable_reason
+                            or f"cannot evaluate defect {defect_entry.id} range for {pkg}",
+                        ),
+                        recorded_pkg,
+                    )
+                return "unaffected", None, recorded_pkg
+
+        if getattr(defect_entry, "predicate", None) is not None:
+            pred_match, pred_err = evaluate_predicate(defect_entry.predicate.condition, run)
+            if not pred_match:
+                if pred_err:
+                    return (
+                        "unverifiable",
+                        BlastRadiusMatch(
+                            run_id=run.id,
+                            git_hash=run.git_hash,
+                            command=run.command,
+                            campaign_id=campaign_id,
+                            matched_files=[],
+                            reason=(
+                                f"instrument {pkg}=={ver_label} matched defect {defect_entry.id} "
+                                f"range, but predicate unverified ({pred_err})"
+                            ),
+                        ),
+                        recorded_pkg,
+                    )
+                return "unaffected", None, recorded_pkg
+
+        return (
+            "affected",
+            BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=[],
+                reason=f"instrument {pkg}=={ver_label} matches defect {defect_entry.id}",
+            ),
+            recorded_pkg,
+        )
 
     if target_version is not None:
-        if ver == target_version:
+        if ver:
+            try:
+                parsed_v = Version(ver)
+            except InvalidVersion:
+                if ver == target_version or (
+                    commit and (commit == target_version or commit.startswith(target_version))
+                ):
+                    return (
+                        "affected",
+                        BlastRadiusMatch(
+                            run_id=run.id,
+                            git_hash=run.git_hash,
+                            command=run.command,
+                            campaign_id=campaign_id,
+                            matched_files=[],
+                            reason=f"instrument {pkg}=={ver} matches defective version {target_version}",
+                        ),
+                        recorded_pkg,
+                    )
+                return (
+                    "unverifiable",
+                    BlastRadiusMatch(
+                        run_id=run.id,
+                        git_hash=run.git_hash,
+                        command=run.command,
+                        campaign_id=campaign_id,
+                        matched_files=[],
+                        reason=f"unparseable {pkg} version {ver!r} -- cannot compare to {target_version}",
+                    ),
+                    recorded_pkg,
+                )
+            try:
+                parsed_target = Version(target_version)
+                is_match = parsed_v == parsed_target
+            except InvalidVersion:
+                is_match = ver == target_version
+            if is_match:
+                return (
+                    "affected",
+                    BlastRadiusMatch(
+                        run_id=run.id,
+                        git_hash=run.git_hash,
+                        command=run.command,
+                        campaign_id=campaign_id,
+                        matched_files=[],
+                        reason=f"instrument {pkg}=={ver} matches defective version {target_version}",
+                    ),
+                    recorded_pkg,
+                )
+            return "unaffected", None, recorded_pkg
+        if commit and (commit == target_version or commit.startswith(target_version)):
             return (
                 "affected",
                 BlastRadiusMatch(
@@ -941,11 +1295,22 @@ def _assess_instrument_run(
                     command=run.command,
                     campaign_id=campaign_id,
                     matched_files=[],
-                    reason=f"instrument {pkg}=={ver} matches defective version {target_version}",
+                    reason=f"instrument {pkg}@{commit} matches defective target {target_version}",
                 ),
-                True,
+                recorded_pkg,
             )
-        return "unaffected", None, True
+        return (
+            "unverifiable",
+            BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=[],
+                reason=f"instrument {pkg} version missing -- cannot compare to {target_version}",
+            ),
+            recorded_pkg,
+        )
 
     return (
         "affected",
@@ -955,9 +1320,9 @@ def _assess_instrument_run(
             command=run.command,
             campaign_id=campaign_id,
             matched_files=[],
-            reason=f"instrument {pkg}=={ver} recorded in dependency_provenance",
+            reason=f"instrument {pkg}=={ver_label} recorded in dependency_provenance",
         ),
-        True,
+        recorded_pkg,
     )
 
 
@@ -1081,6 +1446,13 @@ def assess_blast_radius(
             art_digest = raw_d.strip()
             if not art_path or not art_digest:
                 raise ValueError(f"malformed input_artifact anchor {input_artifact!r}")
+        elif anchor_value.lower().startswith("sha256:"):
+            hex_part = anchor_value[7:]
+            if not re.fullmatch(r"[0-9a-fA-F]{7,64}", hex_part):
+                raise ValueError(f"malformed input_artifact digest {input_artifact!r}")
+            art_digest = anchor_value
+        elif re.fullmatch(r"[0-9a-fA-F]{64}", anchor_value):
+            art_digest = anchor_value
         else:
             art_path = anchor_value
         if art_path:
@@ -1228,6 +1600,8 @@ def assess_blast_radius(
                 defect_entry=inst_defect,
                 campaign_id=camp_id,
                 ver_key=inst_ver_key,
+                project_root=project_root,
+                catalog_dir=Path(catalog_dir),
             )
             if recorded_pkg:
                 instrument_pkg_recorded_count += 1
@@ -1335,7 +1709,7 @@ def assess_blast_radius(
     elif anchor_kind == "instrument" and all_runs and instrument_pkg_recorded_count == 0 and not affected:
         warnings.append(
             f"no run recorded dependency_provenance for '{inst_pkg}' ({inst_ver_key}); "
-            "if '{inst_pkg}' was not listed in [provenance] track_packages, zero matches "
+            f"if '{inst_pkg}' was not listed in [provenance] track_packages, zero matches "
             "is unverified, not clean."
         )
 
@@ -1424,7 +1798,12 @@ def _flag_blast_radius_impl(
     existence (a `_connect()` side effect -- see the get_run() comment below)
     is unchanged from before this connection was shared.
     """
+    from bathos.runlog.emit import current_mode, in_unit_of_work
+    from bathos.runlog.mode import is_log_mode
+
+    log_mode = current_mode() if in_unit_of_work() else is_log_mode(Path(catalog_dir))
     records: list[BlastRadiusRecord] = []
+    batch_run_states: dict[str, str] = {}
     con: duckdb.DuckDBPyConnection | None = None
     try:
         for match, to_state in [
@@ -1433,16 +1812,6 @@ def _flag_blast_radius_impl(
         ]:
             shadow_verdict_json = None
             if to_state == "affected":
-                # Best-effort: the shadow verdict is purely observational (AC-10) and must
-                # never break the actual flagging write below. get_run() can raise here in
-                # a real, pre-existing cross-module scenario shared with trust_ledger.py:
-                # writing ANY ledger record creates bathos.db as a side effect of
-                # duckdb.connect() (see this module's own _connect()), and if that happens
-                # before bathos.compact.compact() has ever populated a `runs` table, a
-                # later get_run() sees bathos.db exists (query.py's _resolve_backend picks
-                # "warm") but finds no `runs` table there -- CatalogException, not a
-                # missing-run None. Caught here (backlog debt item filed for the deeper
-                # _resolve_backend assumption, not fixed in this module).
                 try:
                     run = get_run(match.run_id, Path(catalog_dir))
                 except duckdb.Error:
@@ -1450,14 +1819,21 @@ def _flag_blast_radius_impl(
                 if run is not None:
                     shadow_verdict_json = json.dumps(compute_shadow_auto_clear_verdict(run))
 
-            if con is None:
-                con = _connect(catalog_dir)
+            if log_mode:
+                from_state = batch_run_states.get(match.run_id)
+                if from_state is None:
+                    from_state = fold_blast_radius_state(catalog_dir, "run", match.run_id)
+                batch_run_states[match.run_id] = to_state
+            else:
+                if con is None:
+                    con = _connect(catalog_dir)
+                from_state = _fold_state_using_conn(con, "run", match.run_id)
 
             record = BlastRadiusRecord(
                 entity_type="run",
                 entity_id=match.run_id,
                 to_state=to_state,
-                from_state=_fold_state_using_conn(con, "run", match.run_id),
+                from_state=from_state,
                 anchor_kind=report.anchor_kind,
                 anchor_value=report.anchor_value,
                 matched_files=json.dumps(match.matched_files),

@@ -355,7 +355,8 @@ def test_append_ledger_record_flag_on_emits_event_only(catalog_dir, monkeypatch)
 
     frag = catalog_dir / "ledger" / f"ledger_{record.id}.parquet"
     assert not frag.exists()
-    assert fold_trust_state(catalog_dir, "cafef00d") is None  # no legacy warm row
+    assert not (catalog_dir / "bathos.db").exists()  # no legacy warm row/DB written
+    assert fold_trust_state(catalog_dir, "cafef00d") == "promoted"  # read from index.db in log mode
 
     lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
     recorded = [line for line in lines if line["kind"] == "trust_ledger.recorded"]
@@ -364,3 +365,35 @@ def test_append_ledger_record_flag_on_emits_event_only(catalog_dir, monkeypatch)
     assert recorded[0]["data"]["content_hash"] == "cafef00d"
     assert recorded[0]["data"]["to_state"] == "promoted"
     reset_writers_for_test()
+
+
+def test_latest_record_log_aware_unpopulated_log_mode_and_cool_only_fallback(
+    catalog_dir, monkeypatch
+):
+    from bathos.trust_ledger import latest_ledger_record, write_ledger_fragment
+
+    # 1. Cool-only legacy catalog (no bathos.db): reads cool fragment without creating bathos.db
+    write_ledger_fragment(
+        TrustLedgerRecord(
+            content_hash="e" * 64,
+            from_state="candidate",
+            to_state="promoted",
+            attestation_ref="att-cool",
+        ),
+        catalog_dir,
+    )
+    assert not (catalog_dir / "bathos.db").exists()
+    assert fold_trust_state(catalog_dir, "e" * 64) == "promoted"
+    rec = latest_ledger_record(catalog_dir, "e" * 64)
+    assert rec is not None and rec.attestation_ref == "att-cool"
+    assert not (catalog_dir / "bathos.db").exists()
+
+    # 2. Unpopulated log-mode catalog (no index.db, no bathos.db): returns None cleanly
+    empty_log_cat = catalog_dir.parent / "empty_log_cat"
+    empty_log_cat.mkdir()
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(empty_log_cat))
+    assert latest_ledger_record(empty_log_cat, "0" * 64) is None
+    assert fold_trust_state(empty_log_cat, "0" * 64) is None
+    assert not (empty_log_cat / "bathos.db").exists()
+    assert not (empty_log_cat / "index.db").exists()

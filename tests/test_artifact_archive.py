@@ -681,7 +681,10 @@ def test_append_archived_item_record_flag_on_emits_event_only(tmp_path, monkeypa
 
     frag = catalog_dir / "archived_items" / f"archived_{record.record_id}.parquet"
     assert not frag.exists()
-    assert latest_status(catalog_dir, "item-on") is None  # no legacy warm row
+    assert not (catalog_dir / "bathos.db").exists()  # no legacy warm row/DB written
+    status = latest_status(catalog_dir, "item-on")  # read from index.db in log mode
+    assert status is not None
+    assert status.event == "archived"
 
     lines = _read_jsonl_dir(Path.home() / ".bth" / "log" / "unaffiliated")
     recorded = [line for line in lines if line["kind"] == "archived_item.recorded"]
@@ -690,3 +693,95 @@ def test_append_archived_item_record_flag_on_emits_event_only(tmp_path, monkeypa
     assert recorded[0]["data"]["event"] == "archived"
     assert recorded[0]["data"]["id"] == "item-on"
     reset_writers_for_test()
+
+
+def test_latest_status_cool_only_and_unpopulated_log_mode_do_not_create_bathos_db(
+    tmp_path, monkeypatch
+):
+    from bathos.archived_items import (
+        ArchivedItemRecord,
+        latest_status,
+        write_archived_item_fragment,
+    )
+
+    cool_cat = tmp_path / "cool_cat"
+    cool_cat.mkdir()
+    write_archived_item_fragment(
+        ArchivedItemRecord(id="item-cool", project_slug="prolix", event="archived"),
+        cool_cat,
+    )
+    assert not (cool_cat / "bathos.db").exists()
+    st = latest_status(cool_cat, "item-cool")
+    assert st is not None and st.event == "archived"
+    assert not (cool_cat / "bathos.db").exists()
+
+    empty_log_cat = tmp_path / "empty_log_cat"
+    empty_log_cat.mkdir()
+    monkeypatch.setenv("BTH_LOG_MODE", "1")
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(empty_log_cat))
+    assert latest_status(empty_log_cat, "item-missing") is None
+    assert not (empty_log_cat / "bathos.db").exists()
+    assert not (empty_log_cat / "index.db").exists()
+
+
+def test_archived_items_15_to_17_col_migration_and_compact_preserves_fields(tmp_path):
+    import duckdb
+
+    from bathos.archived_items import (
+        _LEDGER,
+        ArchivedItemRecord,
+        latest_status,
+        write_archived_item_fragment,
+    )
+    from bathos.compact import compact
+
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+
+    # Seed a legacy 15-column archived_items table
+    con = duckdb.connect(str(catalog_dir / "bathos.db"))
+    con.execute("""
+        CREATE TABLE archived_items (
+            id TEXT NOT NULL, project_slug TEXT NOT NULL, event TEXT NOT NULL,
+            kind TEXT, paths TEXT, pre_archive_sha TEXT, stub_commit_sha TEXT,
+            verdict TEXT, reason TEXT, superseded_by TEXT, bundle_sha256 TEXT,
+            bundle_path TEXT, archived_by TEXT, recorded_at TEXT NOT NULL,
+            record_id TEXT PRIMARY KEY
+        )
+    """)
+    con.execute(
+        "INSERT INTO archived_items VALUES "
+        "('legacy-1', 'prolix', 'archived', 'experiment', '[]', '', '', '', '', '', '', '', "
+        "'me', '2026-01-01T00:00:00Z', 'rec-legacy-1')"
+    )
+    con.close()
+
+    # Read-only connection against un-migrated 15-col table uses legacy_columns fallback
+    ro = duckdb.connect(str(catalog_dir / "bathos.db"), read_only=True)
+    try:
+        legacy_rec = _LEDGER.latest_record_using_conn(ro, [("id", "legacy-1")])
+        assert legacy_rec is not None
+        assert legacy_rec.id == "legacy-1"
+        assert legacy_rec.script_sha256 is None
+        assert legacy_rec.run_ids == []
+    finally:
+        ro.close()
+
+    # Write a 17-col fragment with script_sha256 and run_ids and compact()
+    sha = "ab" * 32
+    write_archived_item_fragment(
+        ArchivedItemRecord(
+            id="item-17col",
+            project_slug="prolix",
+            event="archived",
+            script_sha256=sha,
+            run_ids=["run-1", "run-2"],
+        ),
+        catalog_dir,
+    )
+    compact(catalog_dir)
+
+    migrated = latest_status(catalog_dir, "item-17col")
+    assert migrated is not None
+    assert migrated.script_sha256 == sha
+    assert migrated.run_ids == ["run-1", "run-2"]
