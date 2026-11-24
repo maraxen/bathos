@@ -579,10 +579,11 @@ accuracy = "float"
 # ---------------------------------------------------------------------------
 
 
-def test_cli_lint_threshold_warning_appears(tmp_path, monkeypatch):
+def test_cli_lint_threshold_warning_appears(tmp_path, monkeypatch, bathos_test_home):
     from bathos.cli_cyclopts import app
     from tests._cyclopts_runner import CyclopticRunner
 
+    assert Path.home() == bathos_test_home
     monkeypatch.chdir(tmp_path)
     catalog_dir = tmp_path / ".bth" / "catalog"
     catalog_dir.mkdir(parents=True)

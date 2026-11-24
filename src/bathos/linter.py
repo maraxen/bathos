@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import fnmatch
 import re
 import tomllib
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
@@ -107,15 +109,223 @@ _DIR_RULES: dict[str, dict] = {
 }
 
 
+_NAMING_TOP_KEYS = frozenset({"exempt", "exempt_dirs"})
+_NAMING_DIR_KEYS = frozenset(
+    {"exempt", "extensions", "extra_extensions", "pattern", "enabled", "sidecar"}
+)
+_SIDECAR_LEVELS: dict[str, IssueSeverity | None] = {
+    "error": IssueSeverity.ERROR,
+    "warning": IssueSeverity.WARNING,
+    "none": None,
+}
+
+
+def _copy_default_dir_rules() -> dict[str, dict[str, Any]]:
+    return {
+        dir_name: {
+            "pattern": rules["pattern"],
+            "extensions": set(rules["extensions"]),
+            "sidecar": rules["sidecar"],
+            "enabled": True,
+            "custom_pattern": False,
+        }
+        for dir_name, rules in _DIR_RULES.items()
+    }
+
+
+def _parse_str_list(val: object, field_name: str) -> tuple[str, ...] | str:
+    """Return tuple of non-empty strings, or an error detail string."""
+    if not isinstance(val, list) or not all(isinstance(x, str) and x.strip() for x in val):
+        return f"{field_name} must be a list of non-empty strings"
+    return tuple(val)
+
+
+def _resolve_naming_config(
+    project_root: Path,
+) -> tuple[
+    dict[str, dict[str, Any]],
+    tuple[str, ...],
+    dict[str, tuple[str, ...]],
+    set[str],
+    list[LintIssue],
+]:
+    """Load `.bth.toml` `[lint.naming]` overrides and exemptions on top of `_DIR_RULES`."""
+    effective = _copy_default_dir_rules()
+    global_exempt: tuple[str, ...] = ()
+    dir_exempt: dict[str, tuple[str, ...]] = {}
+    exempt_dirs: set[str] = set()
+    config_issues: list[LintIssue] = []
+
+    bth_toml = project_root / ".bth.toml"
+    if not bth_toml.is_file():
+        return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+
+    def _err(detail: str) -> None:
+        config_issues.append(
+            LintIssue(
+                path=bth_toml,
+                directory="config",
+                issue="invalid_lint_config",
+                severity=IssueSeverity.ERROR,
+                detail=detail,
+            )
+        )
+
+    try:
+        raw = bth_toml.read_bytes()
+    except OSError as exc:
+        _err(f"cannot read {bth_toml}: {exc}")
+        return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        if b"naming" in raw.lower() or b"[lint" in raw.lower():
+            _err(f"cannot parse {bth_toml}: {exc}")
+        return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+
+    lint_tbl = data.get("lint")
+    if lint_tbl is None:
+        return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+    if not isinstance(lint_tbl, dict):
+        _err("[lint] must be a table")
+        return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+
+    naming_tbl = lint_tbl.get("naming")
+    if naming_tbl is None:
+        return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+    if not isinstance(naming_tbl, dict):
+        _err("[lint.naming] must be a table")
+        return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+
+    allowed_top = _NAMING_TOP_KEYS | set(_DIR_RULES)
+    unknown_top = sorted(set(naming_tbl) - allowed_top)
+    if unknown_top:
+        _err(f"[lint.naming] has unknown key(s): {unknown_top}")
+
+    if "exempt" in naming_tbl:
+        parsed = _parse_str_list(naming_tbl["exempt"], "[lint.naming].exempt")
+        if isinstance(parsed, str):
+            _err(parsed)
+        else:
+            global_exempt = parsed
+
+    if "exempt_dirs" in naming_tbl:
+        parsed = _parse_str_list(naming_tbl["exempt_dirs"], "[lint.naming].exempt_dirs")
+        if isinstance(parsed, str):
+            _err(parsed)
+        else:
+            for raw_dir in parsed:
+                norm_dir = raw_dir.strip().replace("\\", "/").removeprefix("scripts/").strip("/")
+                if norm_dir not in _DIR_RULES:
+                    _err(
+                        f"[lint.naming].exempt_dirs contains unknown directory {raw_dir!r}; "
+                        f"expected one of {sorted(_DIR_RULES)}"
+                    )
+                else:
+                    exempt_dirs.add(norm_dir)
+
+    for dir_name in _DIR_RULES:
+        if dir_name not in naming_tbl:
+            continue
+        dir_cfg = naming_tbl[dir_name]
+        section = f"[lint.naming.{dir_name}]"
+        if not isinstance(dir_cfg, dict):
+            _err(f"{section} must be a table")
+            continue
+        unknown_dir = sorted(set(dir_cfg) - _NAMING_DIR_KEYS)
+        if unknown_dir:
+            _err(f"{section} has unknown key(s): {unknown_dir}")
+
+        if "exempt" in dir_cfg:
+            parsed = _parse_str_list(dir_cfg["exempt"], f"{section}.exempt")
+            if isinstance(parsed, str):
+                _err(parsed)
+            else:
+                dir_exempt[dir_name] = parsed
+
+        if "enabled" in dir_cfg:
+            if not isinstance(dir_cfg["enabled"], bool):
+                _err(f"{section}.enabled must be a boolean")
+            else:
+                effective[dir_name]["enabled"] = dir_cfg["enabled"]
+
+        if "extensions" in dir_cfg:
+            parsed = _parse_str_list(dir_cfg["extensions"], f"{section}.extensions")
+            if isinstance(parsed, str):
+                _err(parsed)
+            elif any(not ext.startswith(".") or len(ext) < 2 for ext in parsed):
+                _err(f"{section}.extensions entries must start with '.' (e.g. '.py')")
+            else:
+                effective[dir_name]["extensions"] = set(parsed)
+
+        if "extra_extensions" in dir_cfg:
+            parsed = _parse_str_list(dir_cfg["extra_extensions"], f"{section}.extra_extensions")
+            if isinstance(parsed, str):
+                _err(parsed)
+            elif any(not ext.startswith(".") or len(ext) < 2 for ext in parsed):
+                _err(f"{section}.extra_extensions entries must start with '.' (e.g. '.sh')")
+            else:
+                effective[dir_name]["extensions"] = effective[dir_name]["extensions"] | set(parsed)
+
+        if "pattern" in dir_cfg:
+            pat_val = dir_cfg["pattern"]
+            if not isinstance(pat_val, str) or not pat_val:
+                _err(f"{section}.pattern must be a non-empty regex string")
+            else:
+                try:
+                    effective[dir_name]["pattern"] = re.compile(pat_val)
+                    effective[dir_name]["custom_pattern"] = True
+                except re.error as exc:
+                    _err(f"{section}.pattern is not a valid regex: {exc}")
+
+        if "sidecar" in dir_cfg:
+            sc_val = dir_cfg["sidecar"]
+            if not isinstance(sc_val, str) or sc_val.lower() not in _SIDECAR_LEVELS:
+                _err(f"{section}.sidecar must be one of {sorted(_SIDECAR_LEVELS)}")
+            else:
+                effective[dir_name]["sidecar"] = _SIDECAR_LEVELS[sc_val.lower()]
+
+    return effective, global_exempt, dir_exempt, exempt_dirs, config_issues
+
+
+def _is_naming_exempt(
+    script: Path,
+    project_root: Path,
+    scripts_dir: Path,
+    global_exempt: tuple[str, ...],
+    dir_exempt: tuple[str, ...],
+) -> bool:
+    rel_root = script.relative_to(project_root).as_posix()
+    rel_scripts = script.relative_to(scripts_dir).as_posix()
+    name = script.name
+    for pat in (*global_exempt, *dir_exempt):
+        norm = pat.strip().replace("\\", "/").lstrip("./")
+        if not norm:
+            continue
+        if "/" in norm:
+            if fnmatch.fnmatchcase(rel_root, norm) or fnmatch.fnmatchcase(rel_scripts, norm):
+                return True
+        elif fnmatch.fnmatchcase(name, norm):
+            return True
+    return False
+
+
 def lint_project(project_root: Path) -> list[LintIssue]:
     scripts_dir = project_root / "scripts"
-    issues: list[LintIssue] = []
+    effective_rules, global_exempt, dir_exempt, exempt_dirs, config_issues = (
+        _resolve_naming_config(project_root)
+    )
+    issues: list[LintIssue] = list(config_issues)
 
     if scripts_dir.exists():
-        for dir_name, rules in _DIR_RULES.items():
+        for dir_name, rules in effective_rules.items():
             dir_path = scripts_dir / dir_name
             if not dir_path.exists():
                 continue
+
+            dir_naming_disabled = dir_name in exempt_dirs or not rules.get("enabled", True)
+            per_dir_pats = dir_exempt.get(dir_name, ())
 
             for script in sorted(dir_path.iterdir()):
                 if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
@@ -131,36 +341,45 @@ def lint_project(project_root: Path) -> list[LintIssue]:
 
                 stem = script.stem
                 ext = script.suffix
+                exempt = dir_naming_disabled or _is_naming_exempt(
+                    script, project_root, scripts_dir, global_exempt, per_dir_pats
+                )
 
-                if ext not in rules["extensions"]:
-                    issues.append(
-                        LintIssue(
-                            path=script,
-                            directory=dir_name,
-                            issue="naming",
-                            severity=IssueSeverity.ERROR,
-                            detail=f"expected extension {rules['extensions']}, got {ext!r}",
+                if not exempt:
+                    if ext not in rules["extensions"]:
+                        issues.append(
+                            LintIssue(
+                                path=script,
+                                directory=dir_name,
+                                issue="naming",
+                                severity=IssueSeverity.ERROR,
+                                detail=f"expected extension {rules['extensions']}, got {ext!r}",
+                            )
                         )
-                    )
-                    continue
+                        continue
 
-                if not rules["pattern"].match(stem):
-                    expected = (
-                        "verb_noun"
-                        if dir_name not in ("debug", "explore", "scratch")
-                        else "YYMMDD_desc"
-                    )
-                    issues.append(
-                        LintIssue(
-                            path=script,
-                            directory=dir_name,
-                            issue="naming",
-                            severity=IssueSeverity.ERROR,
-                            detail=f"expected {expected} style, got {stem!r}",
+                    if not rules["pattern"].match(stem):
+                        if rules.get("custom_pattern"):
+                            expected = f"pattern {rules['pattern'].pattern!r}"
+                        elif dir_name not in ("debug", "explore", "scratch"):
+                            expected = "verb_noun"
+                        else:
+                            expected = "YYMMDD_desc"
+                        issues.append(
+                            LintIssue(
+                                path=script,
+                                directory=dir_name,
+                                issue="naming",
+                                severity=IssueSeverity.ERROR,
+                                detail=f"expected {expected} style, got {stem!r}",
+                            )
                         )
-                    )
 
-                if rules["sidecar"] is not None and find_sidecar(script) is None:
+                if (
+                    rules["sidecar"] is not None
+                    and ext in rules["extensions"]
+                    and find_sidecar(script) is None
+                ):
                     issues.append(
                         LintIssue(
                             path=script,

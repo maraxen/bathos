@@ -95,3 +95,71 @@ def test_venv_interpreter_symlinked_to_system_python_is_still_excluded(tmp_path)
     out = scaffold_postmortem_template(f"{interpreter} scripts/x.py", RUN_ID, workspace)
 
     assert out == script.parent / f"x.py.{RUN_ID}.bth.postmortem.toml"
+
+
+def test_config_flag_py_value_is_skipped_in_favor_of_script(tmp_path):
+    """Debt #3061: `--config cfg.py run.py` must resolve `run.py`, not `cfg.py`."""
+    _touch(tmp_path / "cfg.py")
+    script = _touch(tmp_path / "run.py")
+
+    out = scaffold_postmortem_template("python --config cfg.py run.py", RUN_ID, tmp_path)
+
+    assert out == script.parent / f"run.py.{RUN_ID}.bth.postmortem.toml"
+
+
+def test_equals_flag_and_multiple_value_flags_skipped(tmp_path):
+    _touch(tmp_path / "cfg.py")
+    _touch(tmp_path / "side.py")
+    script = _touch(tmp_path / "scripts" / "experiments" / "train.py")
+
+    cmd = (
+        "uv run --offline --with helper.py --config=cfg.py --sidecar side.py "
+        "scripts/experiments/train.py --out out.py"
+    )
+    out = scaffold_postmortem_template(cmd, RUN_ID, tmp_path)
+
+    assert out == script.parent / f"train.py.{RUN_ID}.bth.postmortem.toml"
+
+
+def test_short_bool_flags_do_not_swallow_script(tmp_path):
+    script = _touch(tmp_path / "scripts" / "x.py")
+
+    out = scaffold_postmortem_template("python -u scripts/x.py", RUN_ID, tmp_path)
+    assert out == script.parent / f"x.py.{RUN_ID}.bth.postmortem.toml"
+
+    sh = _touch(tmp_path / "scripts" / "slurm" / "go.sh")
+    out_sh = scaffold_postmortem_template("bash -eu scripts/slurm/go.sh --config cfg.py", RUN_ID, tmp_path)
+    assert out_sh == sh.parent / f"go.sh.{RUN_ID}.bth.postmortem.toml"
+
+
+def test_unknown_flag_prioritizes_unflagged_script_without_breaking_unknown_bool(tmp_path):
+    _touch(tmp_path / "cfg.py")
+    script = _touch(tmp_path / "run.py")
+
+    # Unflagged `run.py` beats `cfg.py` following unknown `--custom-cfg`
+    out = scaffold_postmortem_template("python --custom-cfg cfg.py run.py", RUN_ID, tmp_path)
+    assert out == script.parent / f"run.py.{RUN_ID}.bth.postmortem.toml"
+
+    # Unknown boolean flag before the only script still resolves `run.py`
+    out_bool = scaffold_postmortem_template("python --custom-bool run.py", RUN_ID, tmp_path)
+    assert out_bool == script.parent / f"run.py.{RUN_ID}.bth.postmortem.toml"
+
+
+def test_value_only_py_flag_without_script_falls_back_to_bth_postmortems(tmp_path):
+    _touch(tmp_path / "cfg.py")
+    tool = _touch(tmp_path / ".venv" / "bin" / "mytool")
+
+    out = scaffold_postmortem_template(f"{tool} --config cfg.py", RUN_ID, tmp_path)
+
+    assert out == tmp_path / ".bth" / "postmortems" / f"run_{RUN_ID}.bth.postmortem.toml"
+
+
+def test_python_module_and_end_of_options_marker(tmp_path):
+    _touch(tmp_path / "cfg.py")
+    _touch(tmp_path / "mod.py")
+    out_mod = scaffold_postmortem_template("python -m mod.py --config cfg.py", RUN_ID, tmp_path)
+    assert out_mod == tmp_path / ".bth" / "postmortems" / f"run_{RUN_ID}.bth.postmortem.toml"
+
+    script = _touch(tmp_path / "scripts" / "run.py")
+    out_sep = scaffold_postmortem_template("python -- scripts/run.py", RUN_ID, tmp_path)
+    assert out_sep == script.parent / f"run.py.{RUN_ID}.bth.postmortem.toml"

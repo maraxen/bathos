@@ -657,6 +657,108 @@ def find_run_for_scaffold(run_id: str, catalog_dir: Path) -> tuple[str, str] | N
     return None
 
 
+_KNOWN_BOOL_FLAGS: frozenset[str] = frozenset(
+    {
+        "-B",
+        "-E",
+        "-I",
+        "-O",
+        "-OO",
+        "-P",
+        "-S",
+        "-V",
+        "-b",
+        "-d",
+        "-e",
+        "-h",
+        "-i",
+        "-q",
+        "-s",
+        "-u",
+        "-v",
+        "-x",
+        "--all-extras",
+        "--allow-dirty",
+        "--dry-run",
+        "--frozen",
+        "--help",
+        "--isolated",
+        "--locked",
+        "--no-cache",
+        "--no-dev",
+        "--no-sidecar",
+        "--no-sync",
+        "--offline",
+        "--quiet",
+        "--refresh",
+        "--reinstall",
+        "--skip-preflight",
+        "--verbose",
+        "--version",
+    }
+)
+
+_SHORT_BOOL_CHARS: frozenset[str] = frozenset("BEIOPSVbdehiqsuvx")
+
+_KNOWN_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "-C",
+        "-W",
+        "-X",
+        "-c",
+        "-m",
+        "-o",
+        "-p",
+        "--campaign",
+        "--catalog-dir",
+        "--cfg",
+        "--checkpoint",
+        "--check-hash-based-pycs",
+        "--conf",
+        "--config",
+        "--directory",
+        "--env-file",
+        "--extra",
+        "--from-observation",
+        "--group",
+        "--log",
+        "--manifest",
+        "--out",
+        "--output",
+        "--package",
+        "--params",
+        "--project",
+        "--project-root",
+        "--python",
+        "--resume",
+        "--settings",
+        "--sidecar",
+        "--stage",
+        "--tag",
+        "--tags",
+        "--with",
+    }
+)
+
+
+def _flag_takes_value(flag: str) -> str:
+    """Classify a CLI flag token as ``'value'``, ``'bool'``, or ``'unknown'``."""
+    if "=" in flag:
+        return "bool"
+    if flag in _KNOWN_VALUE_FLAGS:
+        return "value"
+    if flag in _KNOWN_BOOL_FLAGS or flag.startswith("--no-"):
+        return "bool"
+    if (
+        len(flag) > 2
+        and flag.startswith("-")
+        and not flag.startswith("--")
+        and all(ch in _SHORT_BOOL_CHARS for ch in flag[1:])
+    ):
+        return "bool"
+    return "unknown"
+
+
 def _script_from_command(command: str, workspace_root: Path) -> Path | None:
     """The run's script, from its recorded command string, or None.
 
@@ -664,6 +766,11 @@ def _script_from_command(command: str, workspace_root: Path) -> Path | None:
     wins over any other existing file. Otherwise an absolute interpreter such as
     `/abs/.venv/bin/python3` is taken for the script, and the postmortem lands in
     `.venv/bin/` (EDQUOT on Engaging, debt #3046) where no walk can find it.
+
+    Value-taking flags (`--config cfg.py run.py` -> `run.py`, debt #3061) are skipped
+    so flag arguments do not shadow the actual script. Unflagged positional tokens outrank
+    tokens immediately following an unrecognized flag, so `--unknown-bool run.py` still
+    resolves `run.py` while `--unknown-cfg cfg.py run.py` selects `run.py`.
 
     Containment is lexical (`normpath`, no symlink resolution): a script symlinked into
     the workspace from elsewhere still counts, and its postmortem sits beside the link.
@@ -673,8 +780,31 @@ def _script_from_command(command: str, workspace_root: Path) -> Path | None:
 
     given = Path(os.path.abspath(workspace_root))
     roots = {given, Path(workspace_root).resolve()}
-    candidates = []
-    for part in shlex.split(command) if command else []:
+    unflagged: list[Path] = []
+    after_unknown_flag: list[Path] = []
+
+    tokens = shlex.split(command) if command else []
+    end_of_options = False
+    pending_flag: str | None = None
+
+    for part in tokens:
+        if pending_flag == "value":
+            pending_flag = None
+            continue
+
+        if not end_of_options and part == "--":
+            end_of_options = True
+            pending_flag = None
+            continue
+
+        if not end_of_options and part.startswith("-") and part != "-":
+            kind = _flag_takes_value(part)
+            pending_flag = kind if kind in ("value", "unknown") else None
+            continue
+
+        was_unknown_value = pending_flag == "unknown"
+        pending_flag = None
+
         p = Path(os.path.normpath(given / part))
         rel = None
         for root in roots:
@@ -685,14 +815,18 @@ def _script_from_command(command: str, workspace_root: Path) -> Path | None:
                 continue
         if rel is None or PRUNE_DIRS.intersection(rel.parts):
             continue
-        candidates.append(p)
+        if was_unknown_value:
+            after_unknown_flag.append(p)
+        else:
+            unflagged.append(p)
 
-    for p in candidates:
-        if p.suffix == ".py":
-            return p
-    for p in candidates:
-        if p.is_file():
-            return p
+    for candidates in (unflagged, after_unknown_flag):
+        for p in candidates:
+            if p.suffix == ".py":
+                return p
+        for p in candidates:
+            if p.is_file():
+                return p
     return None
 
 
