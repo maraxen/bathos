@@ -61,6 +61,8 @@ def _project_campaigns(
             "bypass_rate": 0.0,
             "unknown_rate": 0.0,
             "anomalies": [],
+            "stopping_threshold": campaign.stopping_threshold,
+            "evalue_trajectory": [],
         }
 
         # Query DuckDB for aggregates if catalog_dir provided and readable.
@@ -76,19 +78,53 @@ def _project_campaigns(
                 from bathos.index import connect_read
 
                 conn = connect_read(catalog_dir, read_only=True)
+                try:
+                    agg_sql = """
+                        SELECT outcome, COUNT(*) AS n,
+                          COUNT(*) FILTER (WHERE outcome_is_residual) AS n_residual,
+                          COUNT(*) FILTER (WHERE sidecar_mode = 'bypassed') AS n_bypassed,
+                          COUNT(*) FILTER (WHERE outcome IN ('unknown', '')) AS n_unknown
+                        FROM runs WHERE campaign_id = ? GROUP BY outcome
+                    """
 
-                agg_sql = """
-                    SELECT outcome, COUNT(*) AS n,
-                      COUNT(*) FILTER (WHERE outcome_is_residual) AS n_residual,
-                      COUNT(*) FILTER (WHERE sidecar_mode = 'bypassed') AS n_bypassed,
-                      COUNT(*) FILTER (WHERE outcome IN ('unknown', '')) AS n_unknown
-                    FROM runs WHERE campaign_id = ? GROUP BY outcome
-                """
+                    rows = conn.execute(agg_sql, [campaign.id]).fetchall()
+                    col_names = [d[0] for d in conn.description]
+                    row_dicts = [dict(zip(col_names, row)) for row in rows]
 
-                rows = conn.execute(agg_sql, [campaign.id]).fetchall()
-                col_names = [d[0] for d in conn.description]
-                row_dicts = [dict(zip(col_names, row)) for row in rows]
-                conn.close()
+                    stopping_threshold = campaign.stopping_threshold
+                    evalue_trajectory: list[dict] = []
+                    if campaign.mode == "sequential":
+                        try:
+                            if stopping_threshold is None:
+                                thr_row = conn.execute(
+                                    "SELECT stopping_threshold FROM campaigns WHERE id = ?",
+                                    [campaign.id],
+                                ).fetchone()
+                                if thr_row and thr_row[0] is not None:
+                                    stopping_threshold = float(thr_row[0])
+                            seq_rows = conn.execute(
+                                """
+                                SELECT cr.seq_position, cr.run_id, r.outcome, cr.evalue
+                                FROM campaign_runs cr
+                                INNER JOIN runs r ON cr.run_id = r.id
+                                WHERE cr.campaign_id = ? AND cr.evalue IS NOT NULL
+                                ORDER BY cr.seq_position ASC NULLS LAST, r.timestamp ASC, cr.run_id ASC
+                                """,
+                                [campaign.id],
+                            ).fetchall()
+                            evalue_trajectory = [
+                                {
+                                    "seq_position": srow[0],
+                                    "run_id": srow[1],
+                                    "outcome": srow[2] or "",
+                                    "evalue": float(srow[3]),
+                                }
+                                for srow in seq_rows
+                            ]
+                        except Exception:
+                            evalue_trajectory = []
+                finally:
+                    conn.close()
 
                 # Aggregate results
                 run_count = sum(r["n"] for r in row_dicts)
@@ -108,6 +144,8 @@ def _project_campaigns(
                     "bypass_rate": bypass_rate,
                     "unknown_rate": unknown_rate,
                     "anomalies": [],
+                    "stopping_threshold": stopping_threshold,
+                    "evalue_trajectory": evalue_trajectory,
                 }
             except Exception:
                 # If DuckDB query fails, use zeroed aggregates

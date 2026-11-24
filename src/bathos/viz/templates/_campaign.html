@@ -128,6 +128,50 @@
             </div>
             {% endif %}
 
+            {% if campaign.evalue_trajectory %}
+            <div class="detail-section" style="grid-column: 1 / -1;">
+              <h4>POPPER E<sub>n</sub> Sequence Trajectory</h4>
+              <div style="display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-bottom: 0.5rem; font-size: 0.85rem;">
+                <span><strong>Final E<sub>n</sub>:</strong> <span class="font-mono">{{ "%.4g"|format(campaign.final_en) }}</span></span>
+                {% if campaign.stopping_threshold %}
+                <span><strong>Threshold:</strong> <span class="font-mono">{{ "%.4g"|format(campaign.stopping_threshold) }}</span></span>
+                  {% if campaign.final_en >= campaign.stopping_threshold %}
+                  <span class="badge badge-green">Threshold Met</span>
+                  {% else %}
+                  <span class="badge badge-gray">In Progress</span>
+                  {% endif %}
+                {% endif %}
+              </div>
+              {% if campaign.en_chart_svg %}
+              <div style="margin-bottom: 0.75rem;">
+                {{ campaign.en_chart_svg | safe }}
+              </div>
+              {% endif %}
+              <table style="width: auto; font-size: 0.8rem;">
+                <thead>
+                  <tr>
+                    <th style="text-align: right;">n</th>
+                    <th>Run</th>
+                    <th>Outcome</th>
+                    <th style="text-align: right;">e<sub>n</sub></th>
+                    <th style="text-align: right;">E<sub>n</sub></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for pt in campaign.evalue_trajectory %}
+                  <tr>
+                    <td style="text-align: right;" class="font-mono">{{ pt.seq_position }}</td>
+                    <td class="font-mono">{{ pt.run_id_short or '—' }}</td>
+                    <td>{{ pt.outcome or '—' }}</td>
+                    <td style="text-align: right;" class="font-mono">{{ "%.4g"|format(pt.evalue) }}</td>
+                    <td style="text-align: right;" class="font-mono">{{ "%.4g"|format(pt.cumulative_en) }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% endif %}
+
           </div>
         </div>
       </td>

@@ -522,6 +522,54 @@ def _unimported_legacy_campaign(catalog_dir: Path | None, campaign_id: str) -> b
     )
 
 
+def _parse_run_metadata_dict(raw_meta: object) -> dict[str, object]:
+    """Parse a run's JSON metadata payload into a dict, returning {} on absence/error."""
+    if isinstance(raw_meta, dict):
+        return raw_meta
+    if isinstance(raw_meta, str) and raw_meta.strip() and raw_meta.strip() != "{}":
+        try:
+            parsed = json.loads(raw_meta)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {}
+
+
+def _read_run_metadata_for_evalue(
+    db, run_id: str, raw_meta: object = None
+) -> dict[str, object]:
+    """Resolve run result metadata for continuous e-value lookup.
+
+    Prefers ``raw_meta`` (from `runs.metadata` or cool `Run.metadata`), falling back
+    to querying `runs.metadata` or log-mode `run.finished` events on ``db``.
+    """
+    parsed = _parse_run_metadata_dict(raw_meta)
+    if parsed or db is None:
+        return parsed
+    try:
+        rows = db.execute("SELECT metadata FROM runs WHERE id = ?", [run_id]).fetchall()
+        if rows:
+            parsed = _parse_run_metadata_dict(rows[0][0])
+            if parsed:
+                return parsed
+    except duckdb.Error:
+        pass
+    try:
+        ev_rows = db.execute(
+            "SELECT data FROM events WHERE kind = 'run.finished' AND entity_key = ? "
+            "ORDER BY ts DESC, eid DESC LIMIT 1",
+            [json.dumps([run_id])],
+        ).fetchall()
+        if ev_rows:
+            ev_data = json.loads(ev_rows[0][0]) if isinstance(ev_rows[0][0], str) else ev_rows[0][0]
+            if isinstance(ev_data, dict):
+                return _parse_run_metadata_dict(ev_data.get("metadata"))
+    except (duckdb.Error, json.JSONDecodeError, TypeError):
+        pass
+    return {}
+
+
 def _add_run_to_campaign_impl(
     db,
     campaign_id: str,
@@ -570,18 +618,31 @@ def _add_run_to_campaign_impl(
     campaign_claim_path = claim_row[0] if claim_row else None
 
     run_sidecar_sha256 = ""
+    run_raw_metadata: object = None
     try:
         run_rows = db.execute(
-            "SELECT timestamp, outcome, sidecar_path, sidecar_sha256 FROM runs WHERE id = ?",
+            "SELECT timestamp, outcome, sidecar_path, sidecar_sha256, metadata FROM runs WHERE id = ?",
             [run_id],
         ).fetchall()
+        if run_rows:
+            run_timestamp, run_outcome, run_sidecar_path, raw_sha, run_raw_metadata = run_rows[0]
+            run_sidecar_sha256 = raw_sha or ""
     except duckdb.BinderException:
-        run_rows = [
-            (*r, "")
-            for r in db.execute(
-                "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
+        try:
+            run_rows = db.execute(
+                "SELECT timestamp, outcome, sidecar_path, sidecar_sha256 FROM runs WHERE id = ?",
+                [run_id],
             ).fetchall()
-        ]
+        except duckdb.BinderException:
+            run_rows = [
+                (*r, "")
+                for r in db.execute(
+                    "SELECT timestamp, outcome, sidecar_path FROM runs WHERE id = ?", [run_id]
+                ).fetchall()
+            ]
+        if run_rows:
+            run_timestamp, run_outcome, run_sidecar_path, raw_sha = run_rows[0]
+            run_sidecar_sha256 = raw_sha or ""
     if not run_rows:
         if log_mode and _unimported_legacy_run(catalog_dir, run_id):
             raise CampaignError(
@@ -590,8 +651,6 @@ def _add_run_to_campaign_impl(
                 "older bathos); run `bth migrate --import-legacy`, then retry."
             )
         raise CampaignError(f"Run not found: {run_id}")
-    run_timestamp, run_outcome, run_sidecar_path, raw_sha = run_rows[0]
-    run_sidecar_sha256 = raw_sha or ""
 
     from pathlib import Path as _P
 
@@ -742,10 +801,19 @@ def _add_run_to_campaign_impl(
         evalue = 1.0
         sidecar_stopping_threshold = None
         if resolved_sidecar is not None:
+            result_values = (
+                _read_run_metadata_for_evalue(db, run_id, run_raw_metadata)
+                if resolved_sidecar.popper_continuous is not None
+                else None
+            )
             evalue = (
                 1.0
                 if run_outcome in ("invalid_measurement", "invariant_fail")
-                else compute_evalue(resolved_sidecar, run_outcome or "unknown")
+                else compute_evalue(
+                    resolved_sidecar,
+                    run_outcome or "unknown",
+                    result_values=result_values,
+                )
             )
             sidecar_stopping_threshold = resolved_sidecar.popper_stopping_threshold
 
@@ -927,7 +995,7 @@ def link_cool_runs_to_campaigns(
             try:
                 cr_rows = db.execute(
                     """
-                    SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome, r.sidecar_sha256
+                    SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome, r.sidecar_sha256, r.metadata
                     FROM campaign_runs cr
                     INNER JOIN runs r ON cr.run_id = r.id
                     WHERE cr.campaign_id = ?
@@ -935,19 +1003,33 @@ def link_cool_runs_to_campaigns(
                     [cid],
                 ).fetchall()
             except duckdb.BinderException:
-                cr_rows = [
-                    (*row, "")
-                    for row in db.execute(
-                        """
-                        SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome
-                        FROM campaign_runs cr
-                        INNER JOIN runs r ON cr.run_id = r.id
-                        WHERE cr.campaign_id = ?
-                        """,
-                        [cid],
-                    ).fetchall()
-                ]
-            for run_id, ts, sidecar_path, outcome, sidecar_sha256 in cr_rows:
+                try:
+                    cr_rows = [
+                        (*row, "{}")
+                        for row in db.execute(
+                            """
+                            SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome, r.sidecar_sha256
+                            FROM campaign_runs cr
+                            INNER JOIN runs r ON cr.run_id = r.id
+                            WHERE cr.campaign_id = ?
+                            """,
+                            [cid],
+                        ).fetchall()
+                    ]
+                except duckdb.BinderException:
+                    cr_rows = [
+                        (*row, "", "{}")
+                        for row in db.execute(
+                            """
+                            SELECT cr.run_id, r.timestamp, r.sidecar_path, r.outcome
+                            FROM campaign_runs cr
+                            INNER JOIN runs r ON cr.run_id = r.id
+                            WHERE cr.campaign_id = ?
+                            """,
+                            [cid],
+                        ).fetchall()
+                    ]
+            for run_id, ts, sidecar_path, outcome, sidecar_sha256, run_meta in cr_rows:
                 if run_id not in by_id:
                     by_id[run_id] = SimpleNamespace(
                         id=run_id,
@@ -955,6 +1037,7 @@ def link_cool_runs_to_campaigns(
                         sidecar_path=sidecar_path,
                         sidecar_sha256=sidecar_sha256 or "",
                         outcome=outcome,
+                        metadata=run_meta or "{}",
                         campaign_id=cid,
                     )
         except duckdb.Error:
@@ -977,10 +1060,19 @@ def link_cool_runs_to_campaigns(
                 )
                 if sidecar is not None:
                     # invalid_measurement and invariant_fail are non-verdicts: neutral, like observed.
+                    result_values = (
+                        _read_run_metadata_for_evalue(db, run.id, getattr(run, "metadata", None))
+                        if sidecar.popper_continuous is not None
+                        else None
+                    )
                     evalue = (
                         1.0
                         if run.outcome in ("invalid_measurement", "invariant_fail")
-                        else compute_evalue(sidecar, run.outcome or "unknown")
+                        else compute_evalue(
+                            sidecar,
+                            run.outcome or "unknown",
+                            result_values=result_values,
+                        )
                     )
                     sidecar_stopping_threshold = sidecar.popper_stopping_threshold
             except SidecarError:

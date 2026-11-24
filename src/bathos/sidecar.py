@@ -456,6 +456,9 @@ class Sidecar:
     popper_alt_pass_rate: float | None = None
     popper_stopping_threshold: float | None = None
     popper_weights: dict[str, float] = field(default_factory=dict)
+    popper_continuous: ContinuousPopperSpec | None = None
+    # optional [hypothesis] structured rival/pilot/pitfall pre-registration (#3098)
+    hypothesis_spec: HypothesisSpec | None = None
     # reproduction metadata (experiment sidecars only)
     reproduction: ReproductionBlock | None = None
     # controls metadata (experiment sidecars only)
@@ -623,6 +626,48 @@ HOLDOUT_KEYS: frozenset[str] = frozenset(
     {"kind", "unit", "split_manifest", "description", "attestation"}
 )
 PROVENANCE_KEYS: frozenset[str] = frozenset({"derived_from_observation", "track_packages"})
+
+HYPOTHESIS_KEYS: frozenset[str] = frozenset(
+    {
+        "rivals",
+        "discriminating_pilot",
+        "which_source_may_lose",
+        "source_may_lose",
+        "pitfalls",
+        "remediations",
+    }
+)
+CONTINUOUS_POPPER_METHODS: frozenset[str] = frozenset({"gaussian", "subgaussian"})
+POPPER_CONTINUOUS_KEYS: frozenset[str] = frozenset(
+    {"metric", "null_mean", "alt_mean", "std", "null_std", "alt_std", "method"}
+)
+
+
+@dataclass
+class HypothesisSpec:
+    """Optional structured `[hypothesis]` block for rival/pilot/pitfall pre-registration (#3098)."""
+
+    rivals: list[str] = field(default_factory=list)
+    discriminating_pilot: str = ""
+    which_source_may_lose: str = ""
+    pitfalls: list[str] = field(default_factory=list)
+    remediations: list[str] = field(default_factory=list)
+    unknown_keys: list[str] = field(default_factory=list)
+    malformed_fields: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ContinuousPopperSpec:
+    """Optional `[popper.continuous]` spec deriving sequential e-values from a float metric."""
+
+    metric: str = ""
+    null_mean: float | None = None
+    alt_mean: float | None = None
+    std: float | None = None
+    null_std: float | None = None
+    alt_std: float | None = None
+    method: str = "gaussian"
+    unknown_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -896,6 +941,8 @@ def parse_sidecar(path: Path) -> Sidecar:
             weights = popper.get("weights", {})
             if isinstance(weights, dict):
                 sidecar.popper_weights = {k: float(v) for k, v in weights.items()}
+            if "continuous" in popper:
+                sidecar.popper_continuous = _parse_popper_continuous(popper["continuous"], path)
 
         # Parse [reproduction] block (optional)
         repro_data = data.get("reproduction", {})
@@ -1156,7 +1203,178 @@ def parse_sidecar(path: Path) -> Sidecar:
             if key not in HOLDOUT_KEYS:
                 logger.warning(f"Unknown key in [holdout]: {key!r}")
 
+    # Parse [hypothesis] block (optional, #3098)
+    if "hypothesis" in data:
+        sidecar.hypothesis_spec = _parse_hypothesis(data["hypothesis"], path)
+
     return sidecar
+
+
+def _parse_str_list_field(
+    raw_val: object, field_name: str, malformed: dict[str, str]
+) -> list[str]:
+    """Parse a list-of-non-empty-strings TOML field, recording shape issues in `malformed`."""
+    if raw_val is None:
+        return []
+    if not isinstance(raw_val, list):
+        malformed[field_name] = f"must be a list of strings, got {type(raw_val).__name__}"
+        return []
+    out: list[str] = []
+    for idx, item in enumerate(raw_val):
+        if not isinstance(item, str):
+            malformed[field_name] = (
+                f"entry [{idx}] must be a string, got {type(item).__name__}"
+            )
+            return []
+        stripped = item.strip()
+        if not stripped:
+            malformed[field_name] = f"entry [{idx}] must not be empty"
+            return []
+        out.append(stripped)
+    return out
+
+
+def _parse_hypothesis(raw: object, path: Path) -> HypothesisSpec:
+    """Parse top-level `[hypothesis]` table (#3098)."""
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [hypothesis] must be a table")
+
+    malformed: dict[str, str] = {}
+    unknown = sorted(set(raw) - HYPOTHESIS_KEYS)
+
+    rivals = _parse_str_list_field(raw.get("rivals"), "rivals", malformed)
+
+    raw_pilot = raw.get("discriminating_pilot")
+    if raw_pilot is None:
+        discriminating_pilot = ""
+    elif not isinstance(raw_pilot, str):
+        malformed["discriminating_pilot"] = (
+            f"must be a string, got {type(raw_pilot).__name__}"
+        )
+        discriminating_pilot = ""
+    else:
+        discriminating_pilot = raw_pilot.strip()
+
+    has_canonical_source = "which_source_may_lose" in raw
+    has_alias_source = "source_may_lose" in raw
+    which_source_may_lose = ""
+    if has_canonical_source:
+        raw_src = raw["which_source_may_lose"]
+        if not isinstance(raw_src, str):
+            malformed["which_source_may_lose"] = (
+                f"must be a string, got {type(raw_src).__name__}"
+            )
+        else:
+            which_source_may_lose = raw_src.strip()
+    if has_alias_source:
+        raw_alias = raw["source_may_lose"]
+        if not isinstance(raw_alias, str):
+            malformed["which_source_may_lose"] = (
+                f"must be a string, got {type(raw_alias).__name__}"
+            )
+        elif has_canonical_source and which_source_may_lose and raw_alias.strip() != which_source_may_lose:
+            malformed["which_source_may_lose"] = (
+                "conflicting 'which_source_may_lose' and 'source_may_lose' values"
+            )
+        elif not has_canonical_source:
+            which_source_may_lose = raw_alias.strip()
+
+    raw_pitfalls = raw.get("pitfalls")
+    raw_remediations = raw.get("remediations")
+    pitfalls: list[str] = []
+    remediations: list[str] = []
+
+    if isinstance(raw_pitfalls, list) and raw_pitfalls and all(
+        isinstance(item, dict) for item in raw_pitfalls
+    ):
+        for idx, item in enumerate(raw_pitfalls):
+            extra_item_keys = set(item) - {"pitfall", "description", "name", "remediation"}
+            if extra_item_keys:
+                malformed["pitfalls"] = (
+                    f"entry [{idx}] has unknown key(s): {', '.join(sorted(extra_item_keys))}"
+                )
+                break
+            p_val = item.get("pitfall")
+            if p_val is None:
+                p_val = item.get("description")
+            if p_val is None:
+                p_val = item.get("name")
+            r_val = item.get("remediation")
+            if not isinstance(p_val, str) or not p_val.strip():
+                malformed["pitfalls"] = f"entry [{idx}] requires a non-empty 'pitfall' string"
+                break
+            if not isinstance(r_val, str) or not r_val.strip():
+                malformed["remediations"] = (
+                    f"pitfalls[{idx}] requires a non-empty 'remediation' string"
+                )
+                break
+            pitfalls.append(p_val.strip())
+            remediations.append(r_val.strip())
+        if raw_remediations is not None:
+            remediations.extend(
+                _parse_str_list_field(raw_remediations, "remediations", malformed)
+            )
+    else:
+        pitfalls = _parse_str_list_field(raw_pitfalls, "pitfalls", malformed)
+        remediations = _parse_str_list_field(raw_remediations, "remediations", malformed)
+
+    return HypothesisSpec(
+        rivals=rivals,
+        discriminating_pilot=discriminating_pilot,
+        which_source_may_lose=which_source_may_lose,
+        pitfalls=pitfalls,
+        remediations=remediations,
+        unknown_keys=unknown,
+        malformed_fields=malformed,
+    )
+
+
+def _opt_popper_float(raw: dict[str, object], key: str, path: Path) -> float | None:
+    if key not in raw or raw[key] is None:
+        return None
+    val = raw[key]
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise SidecarError(
+            f"{path}: [popper.continuous].{key} must be a number, got {type(val).__name__}"
+        )
+    return float(val)
+
+
+def _parse_popper_continuous(raw: object, path: Path) -> ContinuousPopperSpec:
+    """Parse `[popper.continuous]` sub-table."""
+    if not isinstance(raw, dict):
+        raise SidecarError(f"{path}: [popper.continuous] must be a table")
+    unknown = sorted(set(raw) - POPPER_CONTINUOUS_KEYS)
+    metric_raw = raw.get("metric", "")
+    if metric_raw is None:
+        metric = ""
+    elif not isinstance(metric_raw, str):
+        raise SidecarError(
+            f"{path}: [popper.continuous].metric must be a string, got {type(metric_raw).__name__}"
+        )
+    else:
+        metric = metric_raw.strip()
+
+    method_raw = raw.get("method", "gaussian")
+    if method_raw is None:
+        method = "gaussian"
+    elif not isinstance(method_raw, str):
+        raise SidecarError(
+            f"{path}: [popper.continuous].method must be a string, got {type(method_raw).__name__}"
+        )
+    else:
+        method = method_raw.strip().lower()
+
+    return ContinuousPopperSpec(
+        metric=metric,
+        null_mean=_opt_popper_float(raw, "null_mean", path),
+        alt_mean=_opt_popper_float(raw, "alt_mean", path),
+        std=_opt_popper_float(raw, "std", path),
+        null_std=_opt_popper_float(raw, "null_std", path),
+        alt_std=_opt_popper_float(raw, "alt_std", path),
+        method=method,
+        unknown_keys=unknown,
+    )
 
 
 def _breakdown_number(path: Path, where: str, value) -> float:
@@ -2167,22 +2385,100 @@ def is_failure_outcome(sidecar: Sidecar | None, outcome_label: str) -> bool:
     return outcome_label not in derive_pass_labels(sidecar)
 
 
+def _resolve_continuous_stds(spec: ContinuousPopperSpec) -> tuple[float, float]:
+    """Return effective (null_std, alt_std) from a ContinuousPopperSpec, raising ValueError if invalid."""
+    sigma0 = spec.null_std if spec.null_std is not None else spec.std
+    sigma1 = spec.alt_std if spec.alt_std is not None else spec.std
+    if sigma0 is None or sigma1 is None:
+        raise ValueError("ContinuousPopperSpec requires 'std' or both 'null_std' and 'alt_std'")
+    if not (math.isfinite(sigma0) and sigma0 > 0):
+        raise ValueError(f"null_std/std must be finite and > 0, got {sigma0!r}")
+    if not (math.isfinite(sigma1) and sigma1 > 0):
+        raise ValueError(f"alt_std/std must be finite and > 0, got {sigma1!r}")
+    return float(sigma0), float(sigma1)
+
+
+def compute_continuous_evalue(
+    spec: ContinuousPopperSpec,
+    value: float,
+) -> float:
+    """Compute a strictly positive e-value for a continuous metric observation.
+
+    Supports ``method="gaussian"`` (normal likelihood ratio between
+    ``N(null_mean, sigma0^2)`` and ``N(alt_mean, sigma1^2)``) and
+    ``method="subgaussian"`` (exponential MGF e-value with variance proxy ``std^2``).
+    Log-evalue is clamped to ``[-700, 700]`` so the returned float is always finite and ``> 0``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Continuous metric value must be numeric, got {value!r}")
+    x = float(value)
+    if not math.isfinite(x):
+        raise ValueError(f"Continuous metric value must be finite, got {value!r}")
+    if spec.null_mean is None or not math.isfinite(spec.null_mean):
+        raise ValueError(f"ContinuousPopperSpec.null_mean must be finite, got {spec.null_mean!r}")
+    if spec.alt_mean is None or not math.isfinite(spec.alt_mean):
+        raise ValueError(f"ContinuousPopperSpec.alt_mean must be finite, got {spec.alt_mean!r}")
+
+    mu0 = float(spec.null_mean)
+    mu1 = float(spec.alt_mean)
+    sigma0, sigma1 = _resolve_continuous_stds(spec)
+
+    method = (spec.method or "gaussian").strip().lower()
+    if method == "gaussian":
+        log_e = (
+            math.log(sigma0 / sigma1)
+            + ((x - mu0) ** 2) / (2.0 * (sigma0**2))
+            - ((x - mu1) ** 2) / (2.0 * (sigma1**2))
+        )
+    elif method == "subgaussian":
+        if sigma0 != sigma1:
+            raise ValueError("subgaussian method requires equal null and alt std")
+        lam = (mu1 - mu0) / (sigma0**2)
+        log_e = lam * (x - mu0) - 0.5 * (lam**2) * (sigma0**2)
+    else:
+        raise ValueError(f"Unsupported continuous popper method {method!r}")
+
+    log_e = max(-700.0, min(700.0, log_e))
+    evalue = math.exp(log_e)
+    assert evalue > 0, f"compute_continuous_evalue produced non-positive value {evalue}"
+    return evalue
+
+
 def compute_evalue(
     sidecar: Sidecar,
     outcome_label: str,
     pass_labels: set[str] | None = None,
+    result_values: dict[str, typing.Any] | None = None,
 ) -> float:
     """Compute the likelihood-ratio e-value for a single run outcome.
 
-    Returns 1.0 (neutral) if the sidecar has no [popper] block.
-    Error, unknown and observed outcomes always return 1.0 (non-overridable).
-    """
-    if sidecar.popper_null_pass_rate is None:
-        return 1.0
+    When ``sidecar.popper_continuous`` is configured and ``result_values`` supplies a
+    finite numeric value for ``sidecar.popper_continuous.metric``, computes the
+    continuous metric e-value via :func:`compute_continuous_evalue`. Otherwise falls back
+    to discrete outcome e-value computation.
 
+    Returns 1.0 (neutral) if the sidecar has no [popper] block.
+    Error, unknown, observed, invalid_measurement, and invariant_fail outcomes always
+    return 1.0 (non-overridable).
+    """
     # Same neutral set as before plus invalid_measurement and invariant_fail; "" is deliberately
     # not here (it always fell through to the fail-direction formula, and still does).
     if outcome_label in ("error", "unknown", "observed", "invalid_measurement", "invariant_fail"):
+        return 1.0
+
+    if sidecar.popper_continuous is not None and isinstance(result_values, dict):
+        metric_name = sidecar.popper_continuous.metric
+        if metric_name and metric_name in result_values:
+            raw_val = result_values[metric_name]
+            if (
+                raw_val is not None
+                and not isinstance(raw_val, bool)
+                and isinstance(raw_val, (int, float))
+                and math.isfinite(float(raw_val))
+            ):
+                return compute_continuous_evalue(sidecar.popper_continuous, float(raw_val))
+
+    if sidecar.popper_null_pass_rate is None:
         return 1.0
 
     # Explicit weight override takes priority
@@ -2191,6 +2487,8 @@ def compute_evalue(
 
     null = sidecar.popper_null_pass_rate
     alt = sidecar.popper_alt_pass_rate
+    if alt is None:
+        return 1.0
 
     # Marginal: hard default 1.0
     if outcome_label == "marginal":

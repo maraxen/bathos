@@ -13,6 +13,7 @@ import duckdb
 
 from bathos.sidecar import (
     BREAKDOWN_DIRECTIONS,
+    CONTINUOUS_POPPER_METHODS,
     FORBIDDEN_HOLDOUT_KINDS,
     FORBIDDEN_SPLIT_UNITS,
     HOLDOUT_KINDS,
@@ -996,11 +997,191 @@ def _unknown_experiment_key_warnings(sidecar: Sidecar) -> list[str]:
     return warnings
 
 
+def _record_validation_error(
+    errors: list[ValidationError],
+    sidecar_path: Path | None,
+    field: str,
+    message: str,
+    reason: str | None = None,
+) -> None:
+    """Append a ValidationError and emit `sidecar.validate_error` telemetry when path is set."""
+    errors.append(ValidationError(field, message))
+    if sidecar_path:
+        event(
+            "sidecar.validate_error",
+            path=str(sidecar_path),
+            field=field,
+            reason=reason if reason is not None else message,
+        )
+
+
+def validate_hypothesis_block(
+    sidecar: Sidecar,
+    sidecar_path: Path | None = None,
+    *,
+    warnings: list[str] | None = None,
+) -> list[ValidationError]:
+    """Validate optional top-level `[hypothesis]` block (#3098).
+
+    Opt-in: returns ``[]`` when ``sidecar.hypothesis_spec`` is ``None`` so existing
+    sidecars remain valid. When declared, enforces non-empty structured fields for
+    rivals, discriminating_pilot, which_source_may_lose, pitfalls, and remediations.
+    """
+    errors: list[ValidationError] = []
+    spec = sidecar.hypothesis_spec
+    if spec is None:
+        return errors
+
+    if sidecar.kind != SidecarKind.EXPERIMENT:
+        _record_validation_error(
+            errors,
+            sidecar_path,
+            "hypothesis",
+            "[hypothesis] block is only valid in [experiment] sidecars",
+        )
+        return errors
+
+    for key in spec.unknown_keys:
+        _record_validation_error(
+            errors,
+            sidecar_path,
+            f"hypothesis.{key}",
+            f"Unknown key {key!r} in [hypothesis]",
+        )
+
+    for key, msg in spec.malformed_fields.items():
+        _record_validation_error(
+            errors,
+            sidecar_path,
+            f"hypothesis.{key}",
+            f"[hypothesis].{key} {msg}",
+        )
+
+    if not (sidecar.hypothesis.strip() or (sidecar.question or "").strip()):
+        _record_validation_error(
+            errors,
+            sidecar_path,
+            "hypothesis",
+            "[experiment].hypothesis (or question) must be non-empty when [hypothesis] is declared",
+        )
+
+    if "rivals" not in spec.malformed_fields:
+        if not spec.rivals:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "hypothesis.rivals",
+                "[hypothesis].rivals must be a non-empty list of rival hypotheses",
+            )
+        else:
+            seen_rivals: set[str] = set()
+            primary_norm = " ".join(sidecar.hypothesis.split()).lower()
+            for idx, rival in enumerate(spec.rivals):
+                if not isinstance(rival, str) or not rival.strip():
+                    _record_validation_error(
+                        errors,
+                        sidecar_path,
+                        "hypothesis.rivals",
+                        f"[hypothesis].rivals[{idx}] must be a non-empty string",
+                    )
+                    break
+                if "${" in rival:
+                    _record_validation_error(
+                        errors,
+                        sidecar_path,
+                        "hypothesis.rivals",
+                        f"unfilled template placeholder in hypothesis.rivals[{idx}] {rival!r}: "
+                        "template '${...}' must be filled in before the sidecar is valid",
+                    )
+                norm = " ".join(rival.split()).lower()
+                if primary_norm and norm == primary_norm:
+                    _record_validation_error(
+                        errors,
+                        sidecar_path,
+                        "hypothesis.rivals",
+                        f"[hypothesis].rivals[{idx}] duplicates [experiment].hypothesis",
+                    )
+                if norm in seen_rivals:
+                    _record_validation_error(
+                        errors,
+                        sidecar_path,
+                        "hypothesis.rivals",
+                        f"duplicate rival entry {rival!r} in [hypothesis].rivals",
+                    )
+                seen_rivals.add(norm)
+
+    for field_key, val in (
+        ("discriminating_pilot", spec.discriminating_pilot),
+        ("which_source_may_lose", spec.which_source_may_lose),
+    ):
+        if field_key in spec.malformed_fields:
+            continue
+        if not isinstance(val, str) or not val.strip():
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                f"hypothesis.{field_key}",
+                f"[hypothesis].{field_key} must be a non-empty string",
+            )
+        elif "${" in val:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                f"hypothesis.{field_key}",
+                f"unfilled template placeholder in hypothesis.{field_key} {val!r}: "
+                "template '${...}' must be filled in before the sidecar is valid",
+            )
+
+    for list_key, items in (("pitfalls", spec.pitfalls), ("remediations", spec.remediations)):
+        if list_key in spec.malformed_fields:
+            continue
+        if not items:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                f"hypothesis.{list_key}",
+                f"[hypothesis].{list_key} must be a non-empty list",
+            )
+            continue
+        for idx, item in enumerate(items):
+            if not isinstance(item, str) or not item.strip():
+                _record_validation_error(
+                    errors,
+                    sidecar_path,
+                    f"hypothesis.{list_key}",
+                    f"[hypothesis].{list_key}[{idx}] must be a non-empty string",
+                )
+                break
+            if "${" in item:
+                _record_validation_error(
+                    errors,
+                    sidecar_path,
+                    f"hypothesis.{list_key}",
+                    f"unfilled template placeholder in hypothesis.{list_key}[{idx}] {item!r}: "
+                    "template '${...}' must be filled in before the sidecar is valid",
+                )
+
+    if (
+        warnings is not None
+        and "pitfalls" not in spec.malformed_fields
+        and "remediations" not in spec.malformed_fields
+        and spec.pitfalls
+        and spec.remediations
+        and len(spec.remediations) < len(spec.pitfalls)
+    ):
+        warnings.append(
+            f"hypothesis.remediations: fewer remediations ({len(spec.remediations)}) than "
+            f"pitfalls ({len(spec.pitfalls)}) — ensure each pitfall has a remediation"
+        )
+
+    return errors
+
+
 def validate_popper_block(
     sidecar: Sidecar,
     sidecar_path: Path | None = None,
 ) -> list[ValidationError]:
-    """Validate [popper] block fields per the spec (Section 2.3 of #792 spec).
+    """Validate [popper] and optional [popper.continuous] block fields (Section 2.3 of #792 spec).
 
     Returns a list of ValidationError (empty if valid).
     WARNING-level entries use message prefixed with "WARNING:".
@@ -1012,93 +1193,65 @@ def validate_popper_block(
     """
     errors: list[ValidationError] = []
 
-    if sidecar.popper_null_pass_rate is None:
+    if sidecar.popper_null_pass_rate is None and sidecar.popper_continuous is None:
         return errors  # No [popper] block — nothing to validate
 
     # [popper] is only valid on experiment sidecars
     if sidecar.kind != SidecarKind.EXPERIMENT:
-        errors.append(
-            ValidationError(
-                "popper",
-                "[popper] block is only valid in [experiment] sidecars",
-            )
+        _record_validation_error(
+            errors,
+            sidecar_path,
+            "popper",
+            "[popper] block is only valid in [experiment] sidecars",
         )
-        if sidecar_path:
-            event(
-                "sidecar.validate_error",
-                path=str(sidecar_path),
-                field="popper",
-                reason="[popper] block is only valid in [experiment] sidecars",
-            )
         return errors  # No point validating further
 
     null = sidecar.popper_null_pass_rate
     alt = sidecar.popper_alt_pass_rate
     threshold = sidecar.popper_stopping_threshold
 
-    # null_pass_rate range
-    if null is None or not (0 < null < 1):
-        errors.append(
-            ValidationError(
+    validate_discrete = (
+        sidecar.popper_continuous is None or null is not None or alt is not None
+    )
+    if validate_discrete:
+        # null_pass_rate range
+        if null is None or not (0 < null < 1):
+            _record_validation_error(
+                errors,
+                sidecar_path,
                 "popper.null_pass_rate",
                 f"null_pass_rate must be in (0, 1), got {null!r}",
-            )
-        )
-        if sidecar_path:
-            event(
-                "sidecar.validate_error",
-                path=str(sidecar_path),
-                field="popper.null_pass_rate",
                 reason=f"null_pass_rate out of range: {null!r}",
             )
 
-    # alt_pass_rate range
-    if alt is None or not (0 < alt < 1):
-        errors.append(
-            ValidationError(
+        # alt_pass_rate range
+        if alt is None or not (0 < alt < 1):
+            _record_validation_error(
+                errors,
+                sidecar_path,
                 "popper.alt_pass_rate",
                 f"alt_pass_rate must be in (0, 1), got {alt!r}",
-            )
-        )
-        if sidecar_path:
-            event(
-                "sidecar.validate_error",
-                path=str(sidecar_path),
-                field="popper.alt_pass_rate",
                 reason=f"alt_pass_rate out of range: {alt!r}",
             )
 
-    # null != alt (no test power if equal)
-    if null is not None and alt is not None and null == alt:
-        errors.append(
-            ValidationError(
+        # null != alt (no test power if equal)
+        if null is not None and alt is not None and null == alt:
+            _record_validation_error(
+                errors,
+                sidecar_path,
                 "popper",
                 "null_pass_rate and alt_pass_rate are identical; no test power",
-            )
-        )
-        if sidecar_path:
-            event(
-                "sidecar.validate_error",
-                path=str(sidecar_path),
-                field="popper",
-                reason="null_pass_rate and alt_pass_rate are identical; no test power",
             )
 
     # stopping_threshold >= 1.0
     if threshold is None or threshold < 1.0:
-        errors.append(
-            ValidationError(
-                "popper.stopping_threshold",
-                f"stopping_threshold must be >= 1.0, got {threshold!r}",
-            )
+        _record_validation_error(
+            errors,
+            sidecar_path,
+            "popper.stopping_threshold",
+            f"stopping_threshold must be >= 1.0, got {threshold!r}",
+            reason=f"stopping_threshold below 1.0: {threshold!r}",
         )
-        if sidecar_path:
-            event(
-                "sidecar.validate_error",
-                path=str(sidecar_path),
-                field="popper.stopping_threshold",
-                reason=f"stopping_threshold below 1.0: {threshold!r}",
-            )
     elif threshold < 10.0:
         # Advisory, not an error — deliberately emits no sidecar.validate_error event.
         errors.append(
@@ -1112,47 +1265,142 @@ def validate_popper_block(
     declared_labels = set(sidecar.outcomes.keys())
     for key, val in sidecar.popper_weights.items():
         if key not in declared_labels and key not in ("error", "unknown", "marginal"):
-            errors.append(
-                ValidationError(
-                    f"popper.weights.{key}",
-                    f"Unknown outcome label {key!r} in [popper.weights] — not declared in [outcomes]",
-                )
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                f"popper.weights.{key}",
+                f"Unknown outcome label {key!r} in [popper.weights] — not declared in [outcomes]",
+                reason=f"Unknown outcome label {key!r} not declared in [outcomes]",
             )
-            if sidecar_path:
-                event(
-                    "sidecar.validate_error",
-                    path=str(sidecar_path),
-                    field=f"popper.weights.{key}",
-                    reason=f"Unknown outcome label {key!r} not declared in [outcomes]",
-                )
         if val <= 0:
-            errors.append(
-                ValidationError(
-                    f"popper.weights.{key}",
-                    f"Weight for {key!r} must be > 0, got {val!r}",
-                )
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                f"popper.weights.{key}",
+                f"Weight for {key!r} must be > 0, got {val!r}",
             )
-            if sidecar_path:
-                event(
-                    "sidecar.validate_error",
-                    path=str(sidecar_path),
-                    field=f"popper.weights.{key}",
-                    reason=f"Weight for {key!r} must be > 0, got {val!r}",
-                )
         if key == "error" and val != 1.0:
-            errors.append(
-                ValidationError(
-                    "popper.weights.error",
-                    f"Weight for 'error' must be exactly 1.0 (non-overridable), got {val!r}",
-                )
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.weights.error",
+                f"Weight for 'error' must be exactly 1.0 (non-overridable), got {val!r}",
+                reason=f"Weight for 'error' must be exactly 1.0, got {val!r}",
             )
-            if sidecar_path:
-                event(
-                    "sidecar.validate_error",
-                    path=str(sidecar_path),
-                    field="popper.weights.error",
-                    reason=f"Weight for 'error' must be exactly 1.0, got {val!r}",
+
+    # Validate [popper.continuous] if present
+    cont = sidecar.popper_continuous
+    if cont is not None:
+        for key in cont.unknown_keys:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                f"popper.continuous.{key}",
+                f"Unknown key {key!r} in [popper.continuous]",
+            )
+
+        if not cont.metric:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.continuous.metric",
+                "[popper.continuous].metric must be a non-empty [result_schema] float field",
+            )
+        elif cont.metric not in sidecar.result_schema:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.continuous.metric",
+                f"[popper.continuous].metric {cont.metric!r} is not declared in [result_schema]",
+            )
+        else:
+            metric_type = sidecar.result_schema.get(cont.metric)
+            if not isinstance(metric_type, str) or metric_type.lower() not in ("float", "double"):
+                _record_validation_error(
+                    errors,
+                    sidecar_path,
+                    "popper.continuous.metric",
+                    f"[popper.continuous].metric {cont.metric!r} must have float type in "
+                    f"[result_schema], got {metric_type!r}",
                 )
+
+        method = (cont.method or "gaussian").strip().lower()
+        if method not in CONTINUOUS_POPPER_METHODS:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.continuous.method",
+                f"Unsupported [popper.continuous].method {cont.method!r}; "
+                f"must be one of {sorted(CONTINUOUS_POPPER_METHODS)}",
+            )
+
+        if cont.null_mean is None or not math.isfinite(cont.null_mean):
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.continuous.null_mean",
+                f"[popper.continuous].null_mean must be a finite number, got {cont.null_mean!r}",
+            )
+        if cont.alt_mean is None or not math.isfinite(cont.alt_mean):
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.continuous.alt_mean",
+                f"[popper.continuous].alt_mean must be a finite number, got {cont.alt_mean!r}",
+            )
+
+        sigma0 = cont.null_std if cont.null_std is not None else cont.std
+        sigma1 = cont.alt_std if cont.alt_std is not None else cont.std
+        if sigma0 is None or not math.isfinite(sigma0) or sigma0 <= 0:
+            std_field = (
+                "popper.continuous.null_std"
+                if cont.null_std is not None
+                else "popper.continuous.std"
+            )
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                std_field,
+                f"[popper.continuous] standard deviation must be finite and > 0, got {sigma0!r}",
+            )
+        if sigma1 is None or not math.isfinite(sigma1) or sigma1 <= 0:
+            std_field = (
+                "popper.continuous.alt_std"
+                if cont.alt_std is not None
+                else "popper.continuous.std"
+            )
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                std_field,
+                f"[popper.continuous] standard deviation must be finite and > 0, got {sigma1!r}",
+            )
+        if (
+            method == "subgaussian"
+            and sigma0 is not None
+            and sigma1 is not None
+            and sigma0 != sigma1
+        ):
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.continuous.alt_std",
+                "subgaussian method requires a single std (null_std == alt_std)",
+            )
+        if (
+            cont.null_mean is not None
+            and cont.alt_mean is not None
+            and sigma0 is not None
+            and sigma1 is not None
+            and cont.null_mean == cont.alt_mean
+            and sigma0 == sigma1
+        ):
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "popper.continuous",
+                "null and alt continuous parameters are identical; no test power",
+            )
 
     return errors
 
@@ -2849,6 +3097,10 @@ def validate_sidecar(
     # Validate [popper] block if present
     popper_errors = validate_popper_block(sidecar, sidecar_path)
     errors.extend(popper_errors)
+
+    # Validate optional [hypothesis] block (#3098)
+    hypothesis_errors = validate_hypothesis_block(sidecar, sidecar_path, warnings=warnings)
+    errors.extend(hypothesis_errors)
 
     # Validate [reproduction] block if present
     repro_errors = validate_reproduction_block(sidecar, sidecar_path)
