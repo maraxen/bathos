@@ -747,3 +747,39 @@ def test_get_run_warm_with_cool_fallback_prefix_and_ambiguity(tmp_path: Path):
     got_warm_only = get_run("aaaa", cat, allow_cool_fallback=False)
     assert got_warm_only is not None
     assert got_warm_only.id == warm_id
+
+
+def test_outcome_provenance_and_index_row_override_normalization():
+    """#2224: outcome_provenance flags human overrides and _run_from_index_row normalizes NULL."""
+    from bathos.query import _run_from_index_row, outcome_provenance
+
+    overridden = _make_run("ovr-1")
+    overridden.outcome = "pass"
+    overridden.postmortem_verdict_override = "pass"
+    prov = outcome_provenance(overridden)
+    assert prov["is_overridden"] is True
+    assert prov["postmortem_verdict_override"] == "pass"
+    assert "human-overridden" in str(prov["note"])
+
+    plain = _make_run("ovr-2")
+    plain.outcome = "pass"
+    plain.postmortem_verdict_override = "none"
+    prov_plain = outcome_provenance(plain)
+    assert prov_plain["is_overridden"] is False
+    assert prov_plain["note"] == ""
+
+    hydrated = _run_from_index_row(
+        {
+            "id": "idx-1",
+            "project_slug": "p",
+            "command": "python x.py",
+            "argv": '["python", "x.py"]',
+            "git_hash": "abc",
+            "git_branch": "main",
+            "git_dirty": False,
+            "postmortem_verdict_override": None,
+            "postmortem_status": None,
+        }
+    )
+    assert hydrated.postmortem_verdict_override == "none"
+    assert hydrated.postmortem_status == "unassigned"

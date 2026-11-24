@@ -75,6 +75,8 @@ class ReproductionBlock:
     requires_parity_stem: str = (
         ""  # script stem that must have a passing parity run first (F3 gate)
     )
+    requires_pass_sidecar_sha256: str = ""  # optional sidecar SHA256 pin for requires_pass_stem
+    requires_pass_script_sha256: str = ""  # optional script SHA256 pin for requires_pass_stem
 
 
 @dataclass
@@ -904,6 +906,8 @@ def parse_sidecar(path: Path) -> Sidecar:
                 tolerance_pct=repro_data.get("tolerance_pct", None),
                 requires_pass_stem=repro_data.get("requires_pass_stem", ""),
                 requires_parity_stem=repro_data.get("requires_parity_stem", ""),
+                requires_pass_sidecar_sha256=repro_data.get("requires_pass_sidecar_sha256", ""),
+                requires_pass_script_sha256=repro_data.get("requires_pass_script_sha256", ""),
             )
             # Warn on unknown keys in [reproduction]
             for key in repro_data:
@@ -913,6 +917,8 @@ def parse_sidecar(path: Path) -> Sidecar:
                     "tolerance_pct",
                     "requires_pass_stem",
                     "requires_parity_stem",
+                    "requires_pass_sidecar_sha256",
+                    "requires_pass_script_sha256",
                 }:
                     logger.warning(f"Unknown key in [reproduction]: {key!r}")
 
@@ -2013,6 +2019,12 @@ def _parse_factors_and_exclusions(
     return declared, excluded
 
 
+def _quote_sql_ident(name: str) -> str:
+    """Quote a SQL identifier so DuckDB reserved keywords (e.g. `case`) never fail."""
+    escaped = str(name).replace('"', '""')
+    return f'"{escaped}"'
+
+
 def single_row_projection(row: dict) -> str:
     """Render a dict as a DuckDB single-row SELECT projection.
 
@@ -2041,7 +2053,7 @@ def single_row_projection(row: dict) -> str:
     outcome is `unknown` unless a condition tests `x IS NULL` explicitly.
     """
 
-    return ", ".join(f"{_sql_scalar_expr(v)} AS {k}" for k, v in row.items())
+    return ", ".join(f"{_sql_scalar_expr(v)} AS {_quote_sql_ident(k)}" for k, v in row.items())
 
 
 def _sql_scalar_expr(v: object) -> str:
@@ -2084,7 +2096,7 @@ def _sql_struct_expr(d: dict) -> str:
 def _struct_row_projection(row: dict) -> str:
     """Like single_row_projection, but each dict-valued column is a STRUCT, so `a.b` addresses it."""
     return ", ".join(
-        f"{_sql_struct_expr(v) if isinstance(v, dict) else _sql_scalar_expr(v)} AS {k}"
+        f"{_sql_struct_expr(v) if isinstance(v, dict) else _sql_scalar_expr(v)} AS {_quote_sql_ident(k)}"
         for k, v in row.items()
     )
 

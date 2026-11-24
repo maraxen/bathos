@@ -4,6 +4,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -457,6 +458,65 @@ def _resolve_run_epistemic_class(
     )
     resolved = resolve_epistemic_class(sidecar, stem_has_prior_runs=stem_has_runs)
     return resolved if resolved is not None else "confirmatory"
+
+
+_INTERNAL_METADATA_KEYS = frozenset(
+    {
+        "requires_waiver",
+        "derived_from_observation",
+        "holdout",
+        "holdout_verified",
+        "sanity_check",
+        "outcome_values",
+        "run_label",
+        "metadata",
+    }
+)
+
+
+def extract_numeric_outcome_values(
+    result: object,
+    sidecar: Sidecar | None = None,  # noqa: ARG001
+) -> dict[str, int | float]:
+    """Extract finite numeric values from an emitted result JSON object (#2218).
+
+    Booleans (``isinstance(True, int)`` in Python) and non-finite floats (NaN/inf)
+    are excluded. Nested dicts are flattened using dotted keys (e.g. ``metrics.loss``).
+    Internal bathos envelope keys are skipped so only measured values are emitted.
+    """
+    if not isinstance(result, dict):
+        return {}
+
+    extracted: dict[str, int | float] = {}
+
+    def _walk(obj: dict, prefix: str = "") -> None:
+        for key, val in obj.items():
+            if not prefix and key in _INTERNAL_METADATA_KEYS:
+                continue
+            dotted = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(val, dict):
+                _walk(val, dotted)
+            elif isinstance(val, bool):
+                continue
+            elif isinstance(val, int) or (isinstance(val, float) and math.isfinite(val)):
+                extracted[dotted] = val
+
+    _walk(result)
+    return extracted
+
+
+def _resolve_explicit_run_label(tags: list[str] | None) -> str:
+    """Resolve an explicit planned run label from ``BTH_RUN_LABEL`` or ``tags`` (#2220)."""
+    env_label = (os.environ.get("BTH_RUN_LABEL") or "").strip()
+    if env_label:
+        return env_label
+    for tag in tags or ():
+        for prefix in ("planned_run_label:", "run_label:", "planned_run:"):
+            if tag.startswith(prefix):
+                val = tag[len(prefix) :].strip()
+                if val:
+                    return val
+    return ""
 
 
 def _parse_result_dict(metadata: str) -> dict:
@@ -2373,6 +2433,25 @@ def _run_script_impl(
         metadata = _with_metadata_key(metadata, "holdout_verified", False)
     if sanity_check_record is not None:
         metadata = _with_metadata_key(metadata, "sanity_check", sanity_check_record)
+
+    explicit_run_label = _resolve_explicit_run_label(tags)
+    parsed_result_dict = _parse_result_dict(metadata)
+    if explicit_run_label and "run_label" not in parsed_result_dict:
+        metadata = _with_metadata_key(metadata, "run_label", explicit_run_label)
+
+    numeric_outcome_values = extract_numeric_outcome_values(parsed_result_dict, sidecar)
+    if numeric_outcome_values and "outcome_values" not in parsed_result_dict:
+        metadata = _with_metadata_key(
+            metadata,
+            "outcome_values",
+            {"outcome": outcome, "values": numeric_outcome_values},
+        )
+    event(
+        "run.outcome_evaluated",
+        run_uuid=run.id,
+        outcome=outcome,
+        outcome_values=numeric_outcome_values,
+    )
     run = dataclasses.replace(
         run,
         duration_s=time.monotonic() - start,

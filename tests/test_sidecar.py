@@ -1331,3 +1331,61 @@ def test_stoichiometry_and_reagents_boundary_errors(
     )
     with pytest.raises(SidecarError):
         parse_sidecar(path)
+
+
+def test_sql_reserved_keywords_quoted_in_projections_and_evaluate_outcome(tmp_path):
+    """#6645: DuckDB reserved keywords (case, order, group, select) must be quoted in projections."""
+    from bathos.sidecar import (
+        SidecarError,
+        _struct_row_projection,
+        evaluate_outcome,
+        parse_sidecar,
+        single_row_projection,
+    )
+
+    row = {"case": "edge", "order": 2, "group": "g1", "select": 0.5, 'weird"col': 1}
+    proj = single_row_projection(row)
+    assert 'AS "case"' in proj
+    assert 'AS "order"' in proj
+    assert 'AS "group"' in proj
+    assert 'AS "select"' in proj
+    assert 'AS "weird""col"' in proj
+
+    nested_row = {"case": "edge", "nested": {"order": 2}}
+    sproj = _struct_row_projection(nested_row)
+    assert 'AS "case"' in sproj
+    assert 'AS "nested"' in sproj
+
+    sidecar_path = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Reserved keyword column in result JSON"
+        [outcomes.pass]
+        condition = "temp_std < 5 AND \\"case\\" = 'edge'"
+        decision = "go"
+        reasoning = "ok"
+        [outcomes.fail]
+        condition = "TRUE"
+        decision = "stop"
+        reasoning = "fallback"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+        case = "str"
+        """,
+    )
+    sc = parse_sidecar(sidecar_path)
+    assert evaluate_outcome(sc, {"case": "edge", "order": 1, "temp_std": 2.0}) == "pass"
+    assert evaluate_outcome(sc, {"case": "other", "order": 1, "temp_std": 2.0}) == "fail"
+
+    # Negative control: genuinely invalid SQL still raises SidecarError
+    bad_path = tmp_path / "bad_kw.bth.toml"
+    bad_path.write_text(
+        '[experiment]\nhypothesis = "h"\n'
+        '[outcomes.pass]\ncondition = "nonexistent_col > 0"\ndecision = "go"\nreasoning = "r"\n'
+        '[outcomes.fail]\ncondition = "TRUE"\ndecision = "stop"\nreasoning = "r"\nis_residual = true\n'
+        '[result_schema]\ntemp_std = "float"\n'
+    )
+    with pytest.raises(SidecarError):
+        evaluate_outcome(parse_sidecar(bad_path), {"case": "edge", "temp_std": 1.0})

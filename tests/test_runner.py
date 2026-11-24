@@ -2868,3 +2868,83 @@ def test_bth_run_explicit_sidecar_wrapper_and_invalid_sidecar(
     )
     assert conflict_res.exit_code != 0
     assert not marker.exists()
+
+
+def test_structured_numeric_outcome_values_and_run_label_emission(
+    tmp_catalog: Path, tmp_path: Path, monkeypatch
+):
+    """#2218 & #2220: emit structured numeric outcome values & run_label without breaking metadata/BTH_RESULTS_PATH."""
+    from bathos import runner as runner_mod
+
+    init_catalog(tmp_catalog)
+    exp = tmp_path / "scripts" / "experiments"
+    exp.mkdir(parents=True)
+    script = exp / "ctx_2k.py"
+    script.write_text(
+        "import json, math, os\n"
+        'payload = {"temp_std": 2.25, "n_steps": 100, "converged": True, '
+        '"bad_nan": float("nan"), "metrics": {"loss": 0.125}, "note": "ok"}\n'
+        'with open(os.environ["BTH_RESULTS_PATH"], "w") as f:\n'
+        "    f.write(json.dumps(payload))\n"
+    )
+    (exp / "ctx_2k.bth.toml").write_text(_OUTCOME_SIDECAR)
+
+    captured_events: list[tuple[str, dict]] = []
+    orig_event = runner_mod.event
+    monkeypatch.setattr(
+        runner_mod,
+        "event",
+        lambda name, **kw: (captured_events.append((name, kw)), orig_event(name, **kw))[1],
+    )
+    monkeypatch.setenv("BTH_RUN_LABEL", "ctx_2k")
+
+    rc = run_script(
+        argv=[sys.executable, str(script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+    )
+    assert rc == 0
+
+    runs = read_runs(tmp_catalog)
+    assert len(runs) == 1
+    assert runs[0].outcome == "pass"
+
+    meta = json.loads(runs[0].metadata)
+    # Original BTH_RESULTS_PATH keys preserved untouched
+    assert meta["temp_std"] == 2.25
+    assert meta["n_steps"] == 100
+    assert meta["converged"] is True
+    assert meta["note"] == "ok"
+    assert meta["run_label"] == "ctx_2k"
+
+    # Structured numeric outcome values exclude booleans and NaN, flatten nested numerics
+    ov = meta["outcome_values"]
+    assert ov["outcome"] == "pass"
+    assert ov["values"] == {"temp_std": 2.25, "n_steps": 100, "metrics.loss": 0.125}
+    assert "converged" not in ov["values"]
+    assert "bad_nan" not in ov["values"]
+
+    eval_events = [kw for name, kw in captured_events if name == "run.outcome_evaluated"]
+    assert len(eval_events) == 1
+    assert eval_events[0]["outcome"] == "pass"
+    assert eval_events[0]["outcome_values"] == {"temp_std": 2.25, "n_steps": 100, "metrics.loss": 0.125}
+
+    # Negative control: script emitting no result JSON (and no BTH_RUN_LABEL) preserves empty metadata "{}"
+    monkeypatch.delenv("BTH_RUN_LABEL", raising=False)
+    silent_script = tmp_path / "silent.py"
+    silent_script.write_text("print('hi')\n")
+    rc2 = run_script(
+        argv=[sys.executable, str(silent_script)],
+        project_slug="testproj",
+        catalog_dir=tmp_catalog,
+        output_paths=[],
+        tags=[],
+        cwd=tmp_path,
+        no_sidecar=True,
+    )
+    assert rc2 == 0
+    silent_run = [r for r in read_runs(tmp_catalog) if r.id != runs[0].id][0]
+    assert silent_run.metadata == "{}"

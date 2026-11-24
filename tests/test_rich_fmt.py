@@ -179,3 +179,35 @@ def test_invalid_measurement_outcome_color_distinct_from_fail_and_error():
 
     invalid_color = _get_outcome_color("invalid_measurement")
     assert invalid_color not in (_get_outcome_color("fail"), _get_outcome_color("error"))
+
+
+def test_render_run_detail_and_table_surface_postmortem_verdict_override(sample_run):
+    """#2224: render_run_detail and render_runs_table must surface postmortem_verdict_override."""
+    sample_run.postmortem_status = "submitted"
+    sample_run.postmortem_verdict_override = "pass"
+    sample_run.postmortem_author = "researcher"
+
+    detail_out = io.StringIO()
+    render_run_detail(sample_run, console=Console(file=detail_out, force_terminal=True, width=200))
+    detail_text = detail_out.getvalue()
+    assert "Verdict Override" in detail_text
+    assert "human postmortem override" in detail_text
+    assert "Postmortem" in detail_text
+
+    # Even if postmortem_status was left unassigned, an active override must still surface
+    sample_run.postmortem_status = "unassigned"
+    detail_out2 = io.StringIO()
+    render_run_detail(sample_run, console=Console(file=detail_out2, force_terminal=True, width=200))
+    detail_text2 = detail_out2.getvalue()
+    assert "Verdict Override" in detail_text2
+    assert "Postmortem" in detail_text2
+
+    table_out = io.StringIO()
+    render_runs_table([sample_run], console=Console(file=table_out, force_terminal=True, width=200))
+    assert "(override)" in table_out.getvalue()
+
+    # Negative control: 'none' does not surface an override banner
+    sample_run.postmortem_verdict_override = "none"
+    clean_out = io.StringIO()
+    render_run_detail(sample_run, console=Console(file=clean_out, force_terminal=True, width=200))
+    assert "Verdict Override" not in clean_out.getvalue()

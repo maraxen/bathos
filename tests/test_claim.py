@@ -2153,6 +2153,76 @@ class TestPortableSidecarResolutionInClaim:
         assert res["sidecars_unreadable"] == 1
         assert res["sidecars_read"] == 0
 
+    def test_citation_contradicted_matches_run_label_and_outcome_vocabulary(self, tmp_path):
+        """#2220: planned_run_label naming a script/sidecar stem or tag fires with runs.outcome."""
+        import hashlib
+
+        import duckdb
+
+        from bathos.claim import citation_contradicted, contradicted_citations, parse_claim
+
+        claim_path = tmp_path / "claim.bth.toml"
+        claim_path.write_text(
+            """[claim]
+headline = "Sparse attention holds at 2k"
+kill_condition = "Sparse fails at 2k"
+kill_condition_satisfiable_by_null = false
+
+[[hypotheses]]
+id = "H_primary"
+label = "Sparse parity"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null hypothesis"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "ctx_2k"
+predicted_outcome = "pass"
+""",
+            encoding="utf-8",
+        )
+        claim = parse_claim(claim_path)
+
+        # Direct helper: matching run label + failed outcome contradicts H_primary
+        assert citation_contradicted(claim, "H_primary", "fail", run_labels=["ctx_2k"]) == "contradicted"
+        assert citation_contradicted(claim, "H_primary", "pass", run_labels=["ctx_2k"]) == "consistent"
+        assert citation_contradicted(claim, "H_primary", "unknown", run_labels=["ctx_2k"]) == "indeterminate"
+        assert citation_contradicted(claim, "H_primary", "fail", run_labels=["ctx_8k"]) == "indeterminate"
+
+        # End-to-end DB query using sidecar stem ("ctx_2k") against runs.outcome ("fail")
+        sidecar_path = tmp_path / "ctx_2k.bth.toml"
+        sidecar_path.write_text(
+            '[experiment]\nhypothesis = "h"\n'
+            '[[review.literature]]\nref = "10.1/sparse"\nclaim = "c"\n'
+            'bears_on = "H_primary"\ndisposition = "supports"\n'
+            '[outcomes.pass]\ncondition = "x < 5"\ndecision = "go"\nreasoning = "r"\n'
+            '[outcomes.fail]\ncondition = "x >= 5"\ndecision = "stop"\nreasoning = "r"\nis_residual = true\n'
+            '[result_schema]\nx = "float"\n',
+            encoding="utf-8",
+        )
+        sc_sha = hashlib.sha256(sidecar_path.read_bytes()).hexdigest()
+
+        db = duckdb.connect(":memory:")
+        db.execute(
+            "CREATE TABLE runs (id VARCHAR, sidecar_path VARCHAR, sidecar_sha256 VARCHAR, "
+            "outcome VARCHAR, command VARCHAR, argv VARCHAR, tags VARCHAR, metadata VARCHAR)"
+        )
+        db.execute("CREATE TABLE campaign_runs (campaign_id VARCHAR, run_id VARCHAR)")
+        db.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ["r1", str(sidecar_path), sc_sha, "fail", "python ctx_2k.py", '["python", "ctx_2k.py"]', "[]", "{}"],
+        )
+        db.execute("INSERT INTO campaign_runs VALUES (?, ?)", ["camp", "r1"])
+
+        res = contradicted_citations(db, "camp", claim, workspace_root=tmp_path)
+        assert res["supports_seen"] == 1
+        assert res["evaluable"] == 1
+        assert len(res["contradicted"]) == 1
+        assert res["contradicted"][0]["run_id"] == "r1"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

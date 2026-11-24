@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tomllib
+from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1719,50 +1720,165 @@ def review_coverage_check(
     }
 
 
-def citation_contradicted(claim, bears_on: str, observed_label: str) -> str:
+_NON_VERDICT_OUTCOMES = frozenset(
+    {"", "unknown", "observed", "error", "invalid_measurement", "invariant_fail"}
+)
+
+
+def _is_null_or_misspec_hypothesis(hypothesis_id: str) -> bool:
+    low = hypothesis_id.lower()
+    return "null" in low or "misspec" in low
+
+
+def _extract_run_labels(
+    *,
+    outcome: str = "",
+    sidecar_path: str = "",
+    command: str = "",
+    argv: object = None,
+    tags: object = None,
+    metadata: object = None,
+) -> set[str]:
+    """Collect candidate run labels matching `planned_run_label` (#2220)."""
+    labels: set[str] = set()
+    if outcome:
+        labels.add(outcome)
+
+    if sidecar_path:
+        name = Path(str(sidecar_path).replace("\\", "/")).name
+        stem = name[: -len(".bth.toml")] if name.endswith(".bth.toml") else Path(name).stem
+        if stem:
+            labels.add(stem)
+
+    if isinstance(metadata, str) and metadata.strip():
+        try:
+            metadata = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            metadata = None
+    if isinstance(metadata, dict):
+        for key in ("planned_run_label", "run_label", "script_stem"):
+            val = metadata.get(key)
+            if isinstance(val, str) and val.strip():
+                labels.add(val.strip())
+
+    if isinstance(tags, str) and tags.strip():
+        try:
+            tags = json.loads(tags)
+        except (json.JSONDecodeError, TypeError):
+            tags = [tags]
+    if isinstance(tags, (list, tuple)):
+        for tag in tags:
+            if not isinstance(tag, str):
+                continue
+            t = tag.strip()
+            if not t:
+                continue
+            labels.add(t)
+            for prefix in ("planned_run_label:", "run_label:", "planned_run:"):
+                if t.startswith(prefix):
+                    stripped = t[len(prefix) :].strip()
+                    if stripped:
+                        labels.add(stripped)
+
+    tokens: list[str] = []
+    if isinstance(argv, str) and argv.strip():
+        try:
+            argv = json.loads(argv)
+        except (json.JSONDecodeError, TypeError):
+            argv = None
+    if isinstance(argv, (list, tuple)):
+        tokens = [str(x) for x in argv if x]
+    elif command:
+        tokens = str(command).split()
+    for tok in tokens:
+        if tok.startswith("-"):
+            continue
+        norm = tok.replace("\\", "/")
+        if norm.endswith(".py"):
+            stem = Path(norm).stem
+            if stem:
+                labels.add(stem)
+            break
+
+    return labels
+
+
+def citation_contradicted(
+    claim,
+    bears_on: str,
+    observed_label: str,
+    *,
+    run_labels: Iterable[str] | None = None,
+    pass_labels: Iterable[str] | None = None,
+) -> str:
     """§8b objection 2's truth table: does an observed outcome contradict a `supports` citation?
 
     Returns one of:
 
-    - ``"contradicted"`` — a discriminability row for `observed_label` predicts the hypothesis
-      named by `bears_on` is *disfavoured*. The citation said the prior work supports it; the
-      run says otherwise. This is what opens a `citation_contradicted` obligation.
+    - ``"contradicted"`` — a discriminability row for `observed_label` (or a matching run label
+      via ``run_labels``) predicts the hypothesis named by `bears_on` is *disfavoured*. The
+      citation said the prior work supports it; the run says otherwise. This is what opens a
+      `citation_contradicted` obligation.
     - ``"consistent"`` — a row covers the label and does not disfavour the hypothesis.
     - ``"indeterminate"`` — **no discriminability row covers the observed label**, so nothing
       can be concluded either way.
 
-    The third case is the point of this function. §8b: "Silence must not read as confirmation,
-    and it must not read as refutation either." `discriminability` is optional
-    (`claim.py` defaults it to `[]`) and AC-04 only lints once there are >=2 entries, so a
-    confirmatory claim can legitimately carry an empty map — for which every citation is
-    indeterminate rather than silently consistent.
-
-    Evaluated at conclude, never at run-end: only conclude has the catalog and the claim in
-    hand (decision D1 puts the sole binding site there).
+    Supports both discriminability encodings (#2220):
+    1. Legacy outcome-indexed rows where ``planned_run_label`` names an outcome (``"fail"``)
+       and ``predicted_outcome`` names a hypothesis id (``"H2"``).
+    2. Run-indexed rows where ``planned_run_label`` names a planned run (script stem, tag, or
+       ``run_label``) and ``predicted_outcome`` names either a hypothesis id or an expected
+       outcome label (e.g. ``"pass"`` / ``"fail"``).
     """
-    if not bears_on or not observed_label:
+    if not bears_on or (not observed_label and not run_labels):
+        return "indeterminate"
+
+    candidate_labels = {lbl for lbl in (observed_label, *(run_labels or ())) if lbl}
+    if not candidate_labels:
         return "indeterminate"
 
     rows = [
         d
         for d in (claim.discriminability or [])
-        if isinstance(d, dict) and d.get("planned_run_label") == observed_label
+        if isinstance(d, dict) and d.get("planned_run_label") in candidate_labels
     ]
     if not rows:
         return "indeterminate"
+
+    pass_set = set(pass_labels) if pass_labels is not None else {"pass"}
+    pass_set.add("pass")
 
     covers = False
     for row in rows:
         a, b = row.get("hypothesis_a"), row.get("hypothesis_b")
         if bears_on not in (a, b):
             continue
+        predicted = str(row.get("predicted_outcome", "") or "").strip()
+        if not predicted or predicted.startswith("??"):
+            continue
+        # Encoding 1: predicted_outcome directly names the favoured hypothesis id.
+        if predicted in (a, b):
+            covers = True
+            if predicted != bears_on:
+                return "contradicted"
+            continue
+
+        # Encoding 2: predicted_outcome names an outcome label (e.g. "pass" vs "fail").
+        if observed_label in _NON_VERDICT_OUTCOMES:
+            continue
         covers = True
-        predicted = row.get("predicted_outcome", "")
-        # The row predicts which hypothesis this label favours. If it names the OTHER
-        # hypothesis, the observed label disfavours the one the citation vouched for.
-        favoured = predicted if predicted in (a, b) else None
-        if favoured is not None and favoured != bears_on:
-            return "contradicted"
+        if observed_label == predicted:
+            continue
+        pred_is_pass = predicted in pass_set
+        obs_is_pass = observed_label in pass_set
+        if pred_is_pass != obs_is_pass:
+            is_null = _is_null_or_misspec_hypothesis(bears_on)
+            # A primary hypothesis expects pass-direction outcomes when predicted='pass';
+            # a null/misspec hypothesis is contradicted when predicted='fail' yet observed='pass'.
+            if (not is_null and pred_is_pass and not obs_is_pass) or (
+                is_null and not pred_is_pass and obs_is_pass
+            ):
+                return "contradicted"
 
     return "consistent" if covers else "indeterminate"
 
@@ -1779,10 +1895,13 @@ def contradicted_citations(
     distinguishable from one that fired and found nothing. An empty `discriminability` map
     makes every citation indeterminate, and that must not look like a clean bill of health.
     """
+    from bathos.sidecar import derive_pass_labels
+
     cat_dir = _infer_catalog_dir(db, catalog_dir, workspace_root)
     try:
         rows = db.execute(
-            "SELECT r.id, r.sidecar_path, r.outcome, r.sidecar_sha256 FROM runs r "
+            "SELECT r.id, r.sidecar_path, r.outcome, r.sidecar_sha256, "
+            "r.command, r.argv, r.tags, r.metadata FROM runs r "
             "JOIN campaign_runs cr ON r.id = cr.run_id "
             "WHERE cr.campaign_id = ? AND ("
             "(r.sidecar_path IS NOT NULL AND r.sidecar_path != '') "
@@ -1791,21 +1910,35 @@ def contradicted_citations(
             [campaign_id],
         ).fetchall()
     except Exception:
-        rows = [
-            (rid, sp, out, "")
-            for rid, sp, out in db.execute(
-                "SELECT r.id, r.sidecar_path, r.outcome FROM runs r "
-                "JOIN campaign_runs cr ON r.id = cr.run_id "
-                "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
-                [campaign_id],
-            ).fetchall()
-        ]
+        try:
+            rows = [
+                (rid, sp, out, sha, "", None, None, None)
+                for rid, sp, out, sha in db.execute(
+                    "SELECT r.id, r.sidecar_path, r.outcome, r.sidecar_sha256 FROM runs r "
+                    "JOIN campaign_runs cr ON r.id = cr.run_id "
+                    "WHERE cr.campaign_id = ? AND ("
+                    "(r.sidecar_path IS NOT NULL AND r.sidecar_path != '') "
+                    "OR (r.sidecar_sha256 IS NOT NULL AND r.sidecar_sha256 != '')"
+                    ")",
+                    [campaign_id],
+                ).fetchall()
+            ]
+        except Exception:
+            rows = [
+                (rid, sp, out, "", "", None, None, None)
+                for rid, sp, out in db.execute(
+                    "SELECT r.id, r.sidecar_path, r.outcome FROM runs r "
+                    "JOIN campaign_runs cr ON r.id = cr.run_id "
+                    "WHERE cr.campaign_id = ? AND r.sidecar_path IS NOT NULL AND r.sidecar_path != ''",
+                    [campaign_id],
+                ).fetchall()
+            ]
 
     contradicted: list[dict] = []
     indeterminate: list[dict] = []
     supports_seen = 0
 
-    for run_id, sidecar_path, outcome, sidecar_sha256 in rows:
+    for run_id, sidecar_path, outcome, sidecar_sha256, command, argv, tags, metadata in rows:
         try:
             sc = _resolve_member_sidecar(
                 db,
@@ -1819,11 +1952,26 @@ def contradicted_citations(
             continue
         if sc is None or sc.review is None:
             continue
+        run_labels = _extract_run_labels(
+            outcome=outcome or "",
+            sidecar_path=sidecar_path or "",
+            command=command or "",
+            argv=argv,
+            tags=tags,
+            metadata=metadata,
+        )
+        pass_labels = derive_pass_labels(sc)
         for entry in sc.review.literature:
             if entry.disposition != "supports" or not entry.bears_on:
                 continue
             supports_seen += 1
-            verdict = citation_contradicted(claim, entry.bears_on, outcome or "")
+            verdict = citation_contradicted(
+                claim,
+                entry.bears_on,
+                outcome or "",
+                run_labels=run_labels,
+                pass_labels=pass_labels,
+            )
             record = {
                 "run_id": run_id,
                 "ref": entry.ref,

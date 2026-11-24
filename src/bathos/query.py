@@ -221,13 +221,34 @@ def _run_from_index_row(row: dict) -> Run:
     for f in fields(Run):
         if f.name not in row:
             continue
+        val = row[f.name]
         if f.name in ("argv", "output_paths", "tags"):
-            kwargs[f.name] = _json_list(row[f.name])
+            kwargs[f.name] = _json_list(val)
         elif f.name == "timestamp":
             kwargs[f.name] = timestamp if timestamp is not None else f.default_factory()
+        elif f.name in _WARM_FALSY_DEFAULTS:
+            kwargs[f.name] = val if val else copy.copy(_WARM_FALSY_DEFAULTS[f.name])
+        elif f.name in _WARM_NONE_FALSE:
+            kwargs[f.name] = False if val is None else val
         else:
-            kwargs[f.name] = row[f.name]
+            kwargs[f.name] = val
     return Run(**kwargs)
+
+
+def outcome_provenance(run: Run) -> dict[str, object]:
+    """Summarize outcome provenance, flagging active postmortem verdict overrides (#2224)."""
+    override = (getattr(run, "postmortem_verdict_override", None) or "").strip()
+    is_overridden = bool(override) and override.lower() != "none"
+    return {
+        "outcome": run.outcome,
+        "postmortem_verdict_override": override or "none",
+        "is_overridden": is_overridden,
+        "note": (
+            f"human-overridden via postmortem to {override!r} (not mechanically certified)"
+            if is_overridden
+            else ""
+        ),
+    }
 
 
 def _index_query_runs(catalog_dir: Path, query: str, params: list) -> list[Run]:

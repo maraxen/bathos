@@ -1544,3 +1544,99 @@ def test_validate_sidecar_with_result_json_catches_schema_and_condition_errors(t
     cli_bad = cli.invoke(app, ["validate-sidecar", str(sidecar_path), "--result", str(bad_json)])
     assert cli_bad.exit_code == 1
     assert "unknown" in cli_bad.output
+
+
+def test_outcome_partition_gap_warning_catches_boundary_and_multidim_gaps(tmp_path: Path):
+    """#2224: synthetic boundary probe warns on partition gaps while clean partitions stay silent."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import check_outcome_partition_gaps, validate_sidecar
+
+    # 1. Exact boundary gap at temp_std == 5.0 (< 5 vs > 5)
+    gap_boundary = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "gap at 5"
+        [outcomes.pass]
+        condition = "temp_std < 5"
+        decision = "go"
+        reasoning = "r"
+        [outcomes.fail]
+        condition = "temp_std > 5"
+        decision = "stop"
+        reasoning = "r"
+        is_residual = true
+        [result_schema]
+        temp_std = "float"
+        """,
+    )
+    res_gap = validate_sidecar(parse_sidecar(gap_boundary))
+    assert res_gap.ok is True
+    assert any("partition gap" in w and "5.0" in w for w in res_gap.warnings)
+
+    # 2. Multi-dimensional conjunction gap (a < 5 AND b > 0 vs a >= 5)
+    gap_multi = tmp_path / "multi_gap.bth.toml"
+    gap_multi.write_text(
+        textwrap.dedent(
+            """
+            [experiment]
+            hypothesis = "multi dim gap"
+            [outcomes.pass]
+            condition = "a < 5 AND b > 0"
+            decision = "go"
+            reasoning = "r"
+            [outcomes.fail]
+            condition = "a >= 5"
+            decision = "stop"
+            reasoning = "r"
+            is_residual = true
+            [result_schema]
+            a = "int"
+            b = "float"
+            """
+        )
+    )
+    multi_warnings = check_outcome_partition_gaps(parse_sidecar(gap_multi))
+    assert any("partition gap" in w for w in multi_warnings)
+
+    # 3. Clean partition (< 5 vs >= 5) emits no partition-gap warning
+    clean = tmp_path / "clean.bth.toml"
+    clean.write_text(gap_boundary.read_text().replace("temp_std > 5", "temp_std >= 5"))
+    res_clean = validate_sidecar(parse_sidecar(clean))
+    assert res_clean.ok is True
+    assert not any("partition gap" in w for w in res_clean.warnings)
+
+
+def test_reproduction_sha256_pin_validation(tmp_path: Path):
+    """deferred:requires-pass-stem-hashpin: invalid SHA256 pin in [reproduction] is rejected."""
+    from bathos.sidecar import parse_sidecar
+    from bathos.validate import validate_sidecar
+
+    bad_pin = _write_toml(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "bad pin"
+        [outcomes.pass]
+        condition = "x > 0"
+        decision = "go"
+        reasoning = "r"
+        [outcomes.fail]
+        condition = "x <= 0"
+        decision = "stop"
+        reasoning = "r"
+        is_residual = true
+        [result_schema]
+        x = "float"
+        [reproduction]
+        requires_pass_stem = "baseline"
+        requires_pass_sidecar_sha256 = "not-a-hex-digest"
+        """,
+    )
+    res_bad = validate_sidecar(parse_sidecar(bad_pin))
+    assert res_bad.ok is False
+    assert any(e.field == "reproduction.requires_pass_sidecar_sha256" for e in res_bad.errors)
+
+    good_pin = tmp_path / "good_pin.bth.toml"
+    good_pin.write_text(bad_pin.read_text().replace("not-a-hex-digest", "a" * 64))
+    assert validate_sidecar(parse_sidecar(good_pin)).ok is True

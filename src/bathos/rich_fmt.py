@@ -30,7 +30,7 @@ def render_runs_table(runs: list[Run], console: Console | None = None) -> None:
     table.add_column("ID", style="cyan")
     table.add_column("Project", style="magenta")
     table.add_column("Status", style="yellow")
-    table.add_column("Outcome", style="green")
+    table.add_column("Outcome", style="green", no_wrap=True)
     table.add_column("Duration", style="blue")
     table.add_column("Campaign", style="white")
     table.add_column("Branch", style="green")
@@ -46,7 +46,11 @@ def render_runs_table(runs: list[Run], console: Console | None = None) -> None:
 
         # Format outcome with color
         outcome_color = _get_outcome_color(run.outcome)
-        outcome_text = Text(run.outcome or "—", style=outcome_color)
+        override = (getattr(run, "postmortem_verdict_override", None) or "").strip()
+        outcome_label = run.outcome or "—"
+        if override and override.lower() != "none":
+            outcome_label = f"{outcome_label} (override)"
+        outcome_text = Text(outcome_label, style=outcome_color)
 
         # Format duration
         duration_str = _format_duration(run.duration_s)
@@ -112,10 +116,19 @@ def render_run_detail(run: Run, console: Console | None = None) -> None:
     # Outcome Panel
     status_color = _get_status_color(run.status)
     outcome_color = _get_outcome_color(run.outcome)
+    override = (getattr(run, "postmortem_verdict_override", None) or "").strip()
+    has_override = bool(override) and override.lower() != "none"
 
     outcome_info = (
         f"[bold]Status:[/bold] {Text(run.status, style=status_color)}\n"
         f"[bold]Outcome:[/bold] {Text(run.outcome or '—', style=outcome_color)}\n"
+    )
+    if has_override:
+        outcome_info += (
+            f"[bold]Verdict Override:[/bold] [yellow]{override} "
+            "(human postmortem override — not mechanically certified)[/yellow]\n"
+        )
+    outcome_info += (
         f"[bold]Residual:[/bold] {'yes' if run.outcome_is_residual else 'no'}\n"
         f"[bold]Tags:[/bold] {', '.join(run.tags) if run.tags else '—'}\n"
     )
@@ -133,11 +146,12 @@ def render_run_detail(run: Run, console: Console | None = None) -> None:
 
     console.print(Panel(outcome_info, title="Outcome", expand=False))
 
-    # Postmortem Panel (only if postmortem_status != "unassigned")
-    if run.postmortem_status != "unassigned":
+    # Postmortem Panel (if postmortem assigned or verdict override active)
+    if run.postmortem_status != "unassigned" or has_override:
         postmortem_info = (
             f"[bold]Status:[/bold] {run.postmortem_status}\n"
             f"[bold]Hypothesis Status:[/bold] {run.postmortem_hypothesis_status}\n"
+            f"[bold]Verdict Override:[/bold] {override or 'none'}\n"
             f"[bold]Author:[/bold] {run.postmortem_author or '—'}\n"
             f"[bold]Summary:[/bold] {run.postmortem_summary or '—'}\n"
             f"[bold]Path:[/bold] {run.postmortem_path or '—'}"

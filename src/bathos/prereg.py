@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import re
+import shlex
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -378,37 +381,241 @@ def check_component_sidecar_drift(
     return baseline != current_component_sidecar_sha256
 
 
+_STEM_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_RUNNER_WRAPPER_EXECUTABLES = frozenset({"env", "timeout", "nice", "taskset", "stdbuf", "ionice", "numactl", "nohup", "setsid"})
+_RUNNER_INTERPRETERS = frozenset({"python", "python3", "uv", "run", "bash", "sh"})
+_RUNNER_VALUE_FLAGS = frozenset(
+    {
+        "-c",
+        "-m",
+        "-W",
+        "-X",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "--project",
+        "--directory",
+        "--python",
+        "-p",
+        "--extra",
+        "--group",
+        "--only-group",
+        "--no-group",
+        "--package",
+        "--from",
+        "--index",
+        "--default-index",
+        "--index-url",
+        "--extra-index-url",
+        "--env-file",
+        "--config-file",
+        "--cache-dir",
+        "--prerelease",
+        "--resolution",
+    }
+)
+
+
+def _normalize_sha256_pin(pin: str | None) -> tuple[str | None, bool]:
+    """Normalize an optional SHA256 pin string; returns ``(hex_or_none, malformed)``."""
+    if pin is None:
+        return None, False
+    cleaned = pin.strip().lower()
+    if not cleaned:
+        return None, False
+    if cleaned.startswith("sha256:"):
+        cleaned = cleaned[len("sha256:") :].strip()
+    if not _STEM_SHA256_RE.fullmatch(cleaned):
+        return None, True
+    return cleaned, False
+
+
+def _parse_requires_pass_spec(requires_pass_stem: str) -> tuple[str, str | None, bool]:
+    """Split ``stem`` and optional inline ``@sha256:<hex>`` pin."""
+    raw = (requires_pass_stem or "").strip()
+    if "@" not in raw:
+        return raw, None, False
+    stem_part, _, pin_part = raw.partition("@")
+    pin, malformed = _normalize_sha256_pin(pin_part)
+    if pin is None:
+        # An '@' with an empty or non-64-hex pin fails closed.
+        return stem_part.strip(), None, True
+    return stem_part.strip(), pin, malformed
+
+
+def _extract_script_token(command: str, argv: object = None) -> str | None:
+    """Return the executed script token from ``argv`` or ``command`` (skipping flags/wrappers)."""
+    tokens: list[str] = []
+    if isinstance(argv, str) and argv.strip():
+        try:
+            parsed = json.loads(argv)
+            if isinstance(parsed, list):
+                tokens = [str(x) for x in parsed if x is not None]
+        except (json.JSONDecodeError, TypeError):
+            tokens = []
+    elif isinstance(argv, (list, tuple)):
+        tokens = [str(x) for x in argv if x is not None]
+    elif command:
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+
+    if not tokens:
+        return None
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        base = Path(tok.replace("\\", "/")).name.lower()
+        if tok == "--":
+            i += 1
+            continue
+        if base in _RUNNER_WRAPPER_EXECUTABLES:
+            i += 1
+            continue
+        if base in _RUNNER_INTERPRETERS or base.startswith("python3."):
+            i += 1
+            continue
+        if tok in _RUNNER_VALUE_FLAGS:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        if "=" in tok and not tok.endswith(".py") and "/" not in tok and "\\" not in tok:
+            i += 1
+            continue
+        return tok
+    return None
+
+
+def _matches_exact_stem(
+    stem: str,
+    *,
+    command: str = "",
+    argv: object = None,
+    sidecar_path: str = "",
+) -> bool:
+    """Exact script-stem / sidecar-stem match (replaces loose substring matching)."""
+    if not stem:
+        return False
+    norm_stem = stem.replace("\\", "/").strip()
+    has_sep = "/" in norm_stem
+    target_stem = norm_stem[:-3] if norm_stem.endswith(".py") else norm_stem
+
+    if sidecar_path:
+        sp_norm = sidecar_path.replace("\\", "/").strip()
+        sp_name = sp_norm.rsplit("/", 1)[-1]
+        sp_stem = (
+            sp_name[: -len(".bth.toml")] if sp_name.endswith(".bth.toml") else Path(sp_name).stem
+        )
+        if has_sep:
+            sp_base = sp_norm[: -len(".bth.toml")] if sp_norm.endswith(".bth.toml") else sp_norm
+            if sp_base == target_stem or sp_base.endswith("/" + target_stem):
+                return True
+        elif sp_stem == target_stem:
+            return True
+
+    script_tok = _extract_script_token(command, argv)
+    if not script_tok:
+        return False
+    tok_norm = script_tok.replace("\\", "/").strip()
+    if has_sep:
+        tok_no_ext = tok_norm[:-3] if tok_norm.endswith(".py") else tok_norm
+        return tok_no_ext == target_stem or tok_no_ext.endswith("/" + target_stem)
+
+    tok_name = tok_norm.rsplit("/", 1)[-1]
+    tok_stem = Path(tok_name).stem
+    return tok_stem == target_stem
+
+
+def _matches_hash_pins(
+    *,
+    sidecar_sha256: str,
+    script_sha256: str,
+    pin_any: str | None,
+    pin_sidecar: str | None,
+    pin_script: str | None,
+) -> bool:
+    sc_sha = (sidecar_sha256 or "").strip().lower()
+    sr_sha = (script_sha256 or "").strip().lower()
+    if pin_sidecar is not None and sc_sha != pin_sidecar:
+        return False
+    if pin_script is not None and sr_sha != pin_script:
+        return False
+    return not (pin_any is not None and pin_any not in {sc_sha, sr_sha})
+
+
 def check_reproduction_prerequisite(
     requires_pass_stem: str,
     catalog_dir: Path,
+    *,
+    expected_sidecar_sha256: str | None = None,
+    expected_script_sha256: str | None = None,
+    expected_sha256: str | None = None,
 ) -> bool:
-    """Check if a passing run of requires_pass_stem exists in the catalog.
+    """Check if a passing run of ``requires_pass_stem`` exists in the catalog.
 
-    Returns True if a matching run exists. False otherwise.
+    Uses exact script-stem / sidecar-stem matching (never substring matching) and
+    supports optional SHA256 content-hash pinning either via ``stem@sha256:<hex>``
+    inline syntax or via ``expected_sidecar_sha256`` / ``expected_script_sha256`` /
+    ``expected_sha256`` keyword arguments.
 
     Uses warm-then-cool fallback pattern:
-    - Warm path: DuckDB query on bathos.db (fast)
+    - Warm path: DuckDB query on bathos.db / index.db (fast)
     - Cool-tier fallback: PyArrow glob scan of runs/**/*.parquet (slower)
-
-    Args:
-        requires_pass_stem: Script stem to search for (e.g. 'alanine_dipeptide')
-        catalog_dir: Path to catalog directory (~/.bth/catalog)
-
-    Returns:
-        True if a passing run is found, False otherwise.
     """
     import pyarrow.parquet as pq
 
-    # Warm path: query DuckDB if available
+    stem, inline_pin, inline_bad = _parse_requires_pass_spec(requires_pass_stem)
+    pin_any, any_bad = _normalize_sha256_pin(expected_sha256)
+    pin_sidecar, sc_bad = _normalize_sha256_pin(expected_sidecar_sha256)
+    pin_script, sr_bad = _normalize_sha256_pin(expected_script_sha256)
+    if not stem or inline_bad or any_bad or sc_bad or sr_bad:
+        return False
+    if inline_pin is not None:
+        if pin_any is not None and pin_any != inline_pin:
+            return False
+        pin_any = inline_pin
+
+    # Warm / index path: query DuckDB if available
     if catalog_readable(catalog_dir):
         try:
             with connect_read(catalog_dir, read_only=True) as conn:
-                rows = conn.execute(
-                    "SELECT 1 FROM runs WHERE command LIKE ? AND outcome = 'pass' LIMIT 1",
-                    [f"%{requires_pass_stem}%"],
-                ).fetchall()
-                if rows:
-                    return True
+                leaf = stem.replace("\\", "/").rsplit("/", 1)[-1]
+                if leaf.endswith(".py"):
+                    leaf = leaf[:-3]
+                like_pat = f"%{leaf}%"
+                try:
+                    rows = conn.execute(
+                        "SELECT command, argv, sidecar_path, sidecar_sha256, script_sha256 "
+                        "FROM runs WHERE outcome = 'pass' "
+                        "AND (command LIKE ? OR sidecar_path LIKE ?)",
+                        [like_pat, like_pat],
+                    ).fetchall()
+                except Exception:
+                    rows = [
+                        (cmd, None, "", "", "")
+                        for (cmd,) in conn.execute(
+                            "SELECT command FROM runs WHERE outcome = 'pass' AND command LIKE ?",
+                            [like_pat],
+                        ).fetchall()
+                    ]
+                for cmd, argv_val, sp_val, sc_sha, sr_sha in rows:
+                    if _matches_exact_stem(
+                        stem,
+                        command=cmd or "",
+                        argv=argv_val,
+                        sidecar_path=sp_val or "",
+                    ) and _matches_hash_pins(
+                        sidecar_sha256=sc_sha or "",
+                        script_sha256=sr_sha or "",
+                        pin_any=pin_any,
+                        pin_sidecar=pin_sidecar,
+                        pin_script=pin_script,
+                    ):
+                        return True
         except Exception as e:
             logger.warning(f"Warm tier reproduction prerequisite check failed: {e}")
 
@@ -418,14 +625,36 @@ def check_reproduction_prerequisite(
         if not runs_dir.exists():
             return False
 
+        want_cols = ["command", "argv", "sidecar_path", "outcome", "sidecar_sha256", "script_sha256"]
         for parquet_file in sorted(runs_dir.glob("**/*.parquet")):
             try:
-                table = pq.read_table(str(parquet_file), columns=["command", "outcome"])
-                cmds = table.column("command").to_pylist()
-                outcomes = table.column("outcome").to_pylist()
-
-                for cmd, outcome in zip(cmds, outcomes):
-                    if cmd and requires_pass_stem in cmd and outcome == "pass":
+                avail = set(pq.read_schema(str(parquet_file)).names)
+                read_cols = [c for c in want_cols if c in avail]
+                if "outcome" not in read_cols or ("command" not in read_cols and "sidecar_path" not in read_cols):
+                    continue
+                table = pq.read_table(str(parquet_file), columns=read_cols)
+                data = table.to_pydict()
+                n_rows = len(data["outcome"])
+                for idx in range(n_rows):
+                    if data["outcome"][idx] != "pass":
+                        continue
+                    cmd = data.get("command", [""] * n_rows)[idx] or ""
+                    argv_val = data.get("argv", [None] * n_rows)[idx]
+                    sp_val = data.get("sidecar_path", [""] * n_rows)[idx] or ""
+                    sc_sha = data.get("sidecar_sha256", [""] * n_rows)[idx] or ""
+                    sr_sha = data.get("script_sha256", [""] * n_rows)[idx] or ""
+                    if _matches_exact_stem(
+                        stem,
+                        command=cmd,
+                        argv=argv_val,
+                        sidecar_path=sp_val,
+                    ) and _matches_hash_pins(
+                        sidecar_sha256=sc_sha,
+                        script_sha256=sr_sha,
+                        pin_any=pin_any,
+                        pin_sidecar=pin_sidecar,
+                        pin_script=pin_script,
+                    ):
                         return True
             except Exception as e:
                 logger.warning(f"Failed to read {parquet_file}: {e}")

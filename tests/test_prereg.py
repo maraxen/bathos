@@ -917,3 +917,78 @@ def test_gate_check_snapshots_sidecar_and_survives_worktree_removal(tmp_path):
         )
         is None
     )
+
+
+def test_reproduction_prerequisite_exact_stem_and_hashpin_warm_and_cool(tmp_path):
+    """deferred:prereg-script-stem + requires-pass-stem-hashpin: exact stem + optional SHA256 pin."""
+    from bathos.catalog import init_catalog, write_run
+    from bathos.compact import compact
+    from bathos.prereg import check_reproduction_prerequisite
+    from bathos.schema import Run
+
+    def _run_for(cmd: str, argv: list[str], *, outcome: str = "pass", sc_sha: str = "", sr_sha: str = "") -> Run:
+        return Run(
+            project_slug="proj",
+            command=cmd,
+            argv=argv,
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            outcome=outcome,
+            sidecar_sha256=sc_sha,
+            script_sha256=sr_sha,
+        )
+
+    good_sc_sha = "a" * 64
+    good_sr_sha = "b" * 64
+    other_sha = "c" * 64
+
+    # 1. Cool-tier negative controls: substring lookalikes and CLI-arg mentions must NOT match "baseline"
+    cool_only = tmp_path / "cool_cat"
+    init_catalog(cool_only)
+    write_run(_run_for("python scripts/experiments/baseline_v2.py", ["python", "scripts/experiments/baseline_v2.py"]), cool_only)
+    write_run(_run_for("python scripts/experiments/my_baseline.py", ["python", "scripts/experiments/my_baseline.py"]), cool_only)
+    write_run(_run_for("python scripts/experiments/other.py --tag baseline", ["python", "scripts/experiments/other.py", "--tag", "baseline"]), cool_only)
+    assert check_reproduction_prerequisite("baseline", cool_only) is False
+
+    # Add exact stem passing run AFTER lookalike -> cool-tier finds exact stem
+    write_run(
+        _run_for(
+            "uv run python scripts/experiments/baseline.py --seed 1",
+            ["uv", "run", "python", "scripts/experiments/baseline.py", "--seed", "1"],
+            sc_sha=good_sc_sha,
+            sr_sha=good_sr_sha,
+        ),
+        cool_only,
+    )
+    assert check_reproduction_prerequisite("baseline", cool_only) is True
+    assert check_reproduction_prerequisite(f"baseline@sha256:{good_sc_sha}", cool_only) is True
+    assert check_reproduction_prerequisite(f"baseline@sha256:{other_sha}", cool_only) is False
+    assert check_reproduction_prerequisite("baseline@badpin", cool_only) is False
+    assert check_reproduction_prerequisite("baseline", cool_only, expected_sidecar_sha256=good_sc_sha) is True
+    assert check_reproduction_prerequisite("baseline", cool_only, expected_sidecar_sha256=other_sha) is False
+    assert check_reproduction_prerequisite("baseline", cool_only, expected_script_sha256=good_sr_sha) is True
+    assert check_reproduction_prerequisite("baseline", cool_only, expected_script_sha256=other_sha) is False
+
+    # 2. Warm-tier: lookalike only -> False; lookalike + exact stem -> True (verifies no SQL LIMIT 1 truncation)
+    warm_only = tmp_path / "warm_cat"
+    init_catalog(warm_only)
+    write_run(_run_for("python scripts/experiments/baseline_v2.py", ["python", "scripts/experiments/baseline_v2.py"]), warm_only)
+    compact(warm_only)
+    assert check_reproduction_prerequisite("baseline", warm_only) is False
+
+    write_run(
+        _run_for(
+            "python scripts/experiments/baseline.py",
+            ["python", "scripts/experiments/baseline.py"],
+            sc_sha=good_sc_sha,
+            sr_sha=good_sr_sha,
+        ),
+        warm_only,
+    )
+    compact(warm_only)
+    assert check_reproduction_prerequisite("baseline", warm_only) is True
+    assert check_reproduction_prerequisite(f"baseline@sha256:{good_sc_sha}", warm_only) is True
+    assert check_reproduction_prerequisite(f"baseline@sha256:{other_sha}", warm_only) is False
+    assert check_reproduction_prerequisite("baseline", warm_only, expected_script_sha256=good_sr_sha) is True
+    assert check_reproduction_prerequisite("baseline", warm_only, expected_script_sha256=other_sha) is False

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import re
@@ -19,6 +20,7 @@ from bathos.sidecar import (
     RESERVED_OUTCOME_LABELS,
     InvariantSpec,
     Sidecar,
+    SidecarError,
     SidecarKind,
     _condition_value,
     breakdown_summary_columns,
@@ -26,6 +28,7 @@ from bathos.sidecar import (
     columns_referenced,
     evaluate_adversarial_check_detailed,
     evaluate_invariants,
+    evaluate_outcome,
     expand_breakdown_aggregates,
     holdout_rank,
     parse_source,
@@ -422,6 +425,242 @@ def _check_shadowed_outcomes(sidecar: Sidecar) -> list[ValidationError]:
         prior.append((label, cond, norm, parsed))
 
     return errors
+
+
+_NUM_LITERAL_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?![A-Za-z0-9_.])"
+)
+_MAX_PARTITION_SAMPLES = 128
+
+
+def _flatten_schema_types(schema: dict[str, Any], prefix: str = "") -> dict[str, str]:
+    """Return dotted_field -> type_str for scalar leaf fields in `[result_schema]`."""
+    out: dict[str, str] = {}
+    for key, val in schema.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        if isinstance(val, str):
+            out[dotted] = val
+        elif isinstance(val, dict):
+            out.update(_flatten_schema_types(val, dotted))
+    return out
+
+
+def _default_dummy_for_type(field_type: str) -> Any:
+    return {
+        "int": 0,
+        "float": 0.0,
+        "bool": False,
+        "str": "",
+        "dict": {},
+        "list": [],
+    }.get(field_type, "")
+
+
+def _assign_dotted(target: dict[str, Any], dotted_key: str, value: Any) -> None:
+    parts = dotted_key.split(".")
+    cur = target
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def _extract_condition_literals(
+    conditions: list[str], schema_types: dict[str, str]
+) -> tuple[dict[str, set[float]], set[float], set[str], set[str]]:
+    """Extract per-field numeric thresholds, global numeric literals, string literals, and IS-NULL fields."""
+    per_field_nums: dict[str, set[float]] = {k: set() for k in schema_types}
+    global_nums: set[float] = set()
+    str_literals: set[str] = set()
+    null_checked_fields: set[str] = set()
+
+    for cond in conditions:
+        for m_str in _SQL_STRING_RE.finditer(cond):
+            raw = m_str.group(0)[1:-1].replace("''", "'")
+            str_literals.add(raw)
+        stripped = _strip_sql_string_literals(cond)
+
+        for col_name in schema_types:
+            if re.search(
+                rf"(?<![A-Za-z0-9_.]){re.escape(col_name)}\s+IS\s+(?:NOT\s+)?NULL\b",
+                stripped,
+                re.IGNORECASE,
+            ):
+                null_checked_fields.add(col_name)
+
+        # Associate explicit field-comparison thresholds with that field
+        for pat, field_idx, num_idx in ((_CMP_LEFT_RE, 1, 3), (_CMP_RIGHT_RE, 3, 1)):
+            for part in _split_top_level_and(stripped) or [stripped]:
+                m = pat.match(_unwrap_parens(part))
+                if m and m.group(field_idx) in per_field_nums:
+                    try:
+                        val = float(m.group(num_idx))
+                        if math.isfinite(val):
+                            per_field_nums[m.group(field_idx)].add(val)
+                    except ValueError:
+                        pass
+
+        for m_num in _NUM_LITERAL_RE.finditer(stripped):
+            try:
+                val = float(m_num.group(1))
+                if math.isfinite(val):
+                    global_nums.add(val)
+            except ValueError:
+                pass
+
+    return per_field_nums, global_nums, str_literals, null_checked_fields
+
+
+def _boundary_candidates_for_field(
+    field_type: str,
+    field_nums: set[float],
+    global_nums: set[float],
+    str_literals: set[str],
+    include_null: bool,
+) -> list[Any]:
+    """Build compact synthetic boundary-case values for a single schema field."""
+    vals: list[Any] = []
+    if field_type == "bool":
+        vals = [False, True]
+    elif field_type == "str":
+        seen_s = list(dict.fromkeys([*sorted(str_literals)[:5], "", "__unseen__"]))
+        vals = seen_s[:7]
+    elif field_type == "int":
+        nums = field_nums or global_nums
+        cands: set[int] = {-1, 0, 1}
+        for c in sorted(nums)[:4]:
+            cands.update({math.floor(c) - 1, math.floor(c), math.ceil(c), math.ceil(c) + 1})
+        sorted_c = sorted(cands)
+        for a, b in zip(sorted_c, sorted_c[1:]):
+            if b - a > 1:
+                cands.add((a + b) // 2)
+        vals = sorted(cands)[:11]
+    elif field_type == "float":
+        nums = field_nums or global_nums
+        cands_f: set[float] = {-1.0, 0.0, 1.0}
+        for c in sorted(nums)[:4]:
+            eps = max(1e-6, abs(c) * 1e-6)
+            cands_f.update({c - eps, float(c), c + eps})
+        sorted_f = sorted(cands_f)
+        for a, b in zip(sorted_f, sorted_f[1:]):
+            if b - a > 1e-3:
+                cands_f.add((a + b) / 2.0)
+        vals = sorted(cands_f)[:11]
+    else:
+        vals = [_default_dummy_for_type(field_type)]
+
+    if include_null and None not in vals:
+        return [*vals, None]
+    return vals
+
+
+def check_outcome_partition_gaps(sidecar: Sidecar) -> list[str]:
+    """Probe `[outcomes]` against synthetic boundary inputs to detect partition gaps (#2224).
+
+    Returns a list of warning strings when any synthetic boundary input evaluates to
+    ``'unknown'`` (i.e. matches no declared outcome condition).
+    """
+    if not sidecar.outcomes or not sidecar.result_schema:
+        return []
+
+    conditions = [
+        spec.condition.strip()
+        for spec in sidecar.outcomes.values()
+        if spec.condition and spec.condition.strip()
+    ]
+    if not conditions or any("${" in c for c in conditions):
+        return []
+
+    schema_types = _flatten_schema_types(sidecar.result_schema)
+    if not schema_types:
+        return []
+
+    schema_keys = set(schema_types)
+    referenced: list[str] = []
+    for cond in conditions:
+        stripped = _strip_sql_string_literals(cond)
+        for col in sorted(columns_referenced(stripped, schema_keys)):
+            if col not in referenced:
+                referenced.append(col)
+    if not referenced:
+        return []
+
+    per_field_nums, global_nums, str_literals, null_checked = _extract_condition_literals(
+        conditions, schema_types
+    )
+    field_candidates: dict[str, list[Any]] = {
+        col_name: _boundary_candidates_for_field(
+            schema_types[col_name],
+            per_field_nums[col_name],
+            global_nums,
+            str_literals,
+            include_null=col_name in null_checked,
+        )
+        for col_name in referenced
+    }
+
+    base_row: dict[str, Any] = {}
+    for col_name, ftype in schema_types.items():
+        _assign_dotted(base_row, col_name, _default_dummy_for_type(ftype))
+
+    # Build bounded combinations across referenced fields.
+    total = 1
+    for cands in field_candidates.values():
+        total *= max(len(cands), 1)
+
+    samples: list[dict[str, Any]] = []
+    if total <= _MAX_PARTITION_SAMPLES:
+        for combo in itertools.product(*(field_candidates[f] for f in referenced)):
+            samples.append(dict(zip(referenced, combo, strict=True)))
+    else:
+        # One-at-a-time sweeps anchored at each representative value, plus diagonal corners.
+        seen_keys: set[tuple[Any, ...]] = set()
+        anchors = [field_candidates[f][0] for f in referenced]
+        for idx, field in enumerate(referenced):
+            for val in field_candidates[field]:
+                row_vals = list(anchors)
+                row_vals[idx] = val
+                key = tuple(row_vals)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    samples.append(dict(zip(referenced, row_vals, strict=True)))
+                    if len(samples) >= _MAX_PARTITION_SAMPLES:
+                        break
+            if len(samples) >= _MAX_PARTITION_SAMPLES:
+                break
+        if len(samples) < _MAX_PARTITION_SAMPLES:
+            max_len = max(len(v) for v in field_candidates.values())
+            for k in range(max_len):
+                row_vals = [
+                    field_candidates[f][min(k, len(field_candidates[f]) - 1)]
+                    for f in referenced
+                ]
+                key = tuple(row_vals)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    samples.append(dict(zip(referenced, row_vals, strict=True)))
+                    if len(samples) >= _MAX_PARTITION_SAMPLES:
+                        break
+
+    for assignment in samples:
+        probe = json.loads(json.dumps(base_row))
+        for field, val in assignment.items():
+            _assign_dotted(probe, field, val)
+        try:
+            outcome = evaluate_outcome(sidecar, probe)
+        except SidecarError:
+            return []
+        if outcome == "unknown":
+            witness = ", ".join(f"{k}={v!r}" for k, v in assignment.items())
+            return [
+                f"outcomes: outcome partition gap detected for synthetic boundary input "
+                f"({witness}) -> 'unknown'; tighten [outcomes] thresholds or add an "
+                "unconditional residual branch"
+            ]
+    return []
 
 
 _EXPECTED_TYPES_DOC = ("int", "float", "str", "bool", "dict", "list")
@@ -966,6 +1205,25 @@ def validate_reproduction_block(
                     path=str(sidecar_path),
                     field="reproduction.reproduces_run",
                     reason=f"Invalid UUID format: {repro.reproduces_run}",
+                )
+
+    for pin_field, pin_val in (
+        ("reproduction.requires_pass_sidecar_sha256", repro.requires_pass_sidecar_sha256),
+        ("reproduction.requires_pass_script_sha256", repro.requires_pass_script_sha256),
+    ):
+        if pin_val and not re.match(r"^(?:sha256:)?[0-9a-fA-F]{64}$", pin_val.strip()):
+            errors.append(
+                ValidationError(
+                    pin_field,
+                    f"{pin_field} must be a 64-character hex SHA256 digest, got {pin_val!r}",
+                )
+            )
+            if sidecar_path:
+                event(
+                    "sidecar.validate_error",
+                    path=str(sidecar_path),
+                    field=pin_field,
+                    reason=f"Invalid SHA256 digest: {pin_val}",
                 )
 
     return errors
@@ -2547,6 +2805,12 @@ def validate_sidecar(
                     field=err.field,
                     reason=err.message,
                 )
+
+    # Probe synthetic boundary inputs against [outcomes] to surface partition gaps (#2224)
+    if sidecar.outcomes and not any(
+        e.field.startswith("outcomes.") and e.field.endswith(".condition") for e in errors
+    ):
+        warnings.extend(check_outcome_partition_gaps(sidecar))
 
     # At least one result_schema field must appear in conditions
     if sidecar.result_schema and sidecar.outcomes:
