@@ -37,12 +37,17 @@ _ATTRIBUTION_REMAINDER_RE = re.compile(r"^\s*(?:[-—–]\s*)?$")
 _DEHYPHENATE_WRAP_RE = re.compile(r"([A-Za-z0-9])-\s*\n\s*([A-Za-z0-9])")
 
 # Extraction guard patterns (#2345)
-_WIDE_GUTTER_RE = re.compile(r"\S(?:\s{4,}|\t{2,})\S")
-_GUTTER_SPLIT_RE = re.compile(r"\s{4,}|\t{2,}")
+_WIDE_GUTTER_RE = re.compile(r"\S(?:\s{4,}|\t+)\S")
+_GUTTER_SPLIT_RE = re.compile(r"\s{4,}|\t+")
 _ALPHA_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _PROSE_COL_JUMP_RE = re.compile(r"[a-z,;:]\s{4,}[A-Z][a-z]+")
+_PIPE_TABLE_SEP_RE = re.compile(r"(?:^|\s)\|(?:\s|$)")
+_UNIT_PATTERN = (
+    r"ms|ns|us|µs|kg|mg|ug|km|cm|mm|nm|GB|MB|KB|TB|Hz|kHz|MHz|GHz|dB|kcal|kJ|mol|mM|uM|nM|pM"
+)
 _PURE_NUMERIC_CELL_RE = re.compile(
-    r"^(?:[-+]?\d+(?:,\d{3})*(?:\.\d+)?%?(?:\s*[±+/-]\s*\d+(?:\.\d+)?%?)?|n/?a|—|-)$",
+    rf"^(?:[-+\u2212]?\d+(?:,\d{{3}})*(?:\.\d+)?(?:%|\s*(?:{_UNIT_PATTERN}))?"
+    rf"(?:\s*[±+/-]\s*\d+(?:\.\d+)?(?:%|\s*(?:{_UNIT_PATTERN}))?)?|n/?a|—|-)$",
     re.IGNORECASE,
 )
 
@@ -53,25 +58,32 @@ _STRUCTURAL_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _FIGURE_REF_RE = re.compile(
-    r"\b(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?|bar\s+graph|scatter\s+plot|plot|chart|graph|curve)\b",
+    r"\b(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?"
+    r"|(?:bar|scatter|line|box|violin|roc|pr|loss|training|learning)\s+(?:plot|chart|graph|curve)s?"
+    r"|(?:plot|chart|graph|curve)\s*\d+[A-Za-z]?"
+    r"|(?:in|from|on|see|of|shown\s+in)\s+(?:the\s+|this\s+|that\s+)?(?:plot|chart|graph|curve)s?"
+    r"|(?:the|this|that)\s+(?:plot|chart|graph|curve)s?)\b",
     re.IGNORECASE,
 )
 _VISUAL_READ_CUE_RE = re.compile(
     r"\b(?:visually(?:\s+read|\s+estimated)?|read\s+off|read\s+from|estimated\s+from|"
-    r"eyeballed(?:\s+from)?|from\s+(?:the\s+)?(?:fig(?:ure)?|plot|chart|graph|curve))\b",
+    r"eyeballed(?:\s+from)?|from\s+(?:the\s+|this\s+|that\s+)?(?:fig(?:ure)?|plot|chart|graph|curve)s?)\b",
     re.IGNORECASE,
 )
 _FIGURE_CAPTION_LINE_RE = re.compile(r"^\s*(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?)\s*[:.\-—]", re.IGNORECASE)
+_CAPTION_BREAK_LINE_RE = re.compile(
+    r"^\s*(?:#+\s+|(?:Table|Tab\.?|Section|Sec\.?|Algorithm|Listing)\s+\d+|\d+(?:\.\d+)*\s+[A-Z])",
+    re.IGNORECASE,
+)
 _TABLE_LINE_RE = re.compile(r"^\s*(?:Table\s+\d+|Tab\.?\s+\d+|\|.*\|)", re.IGNORECASE)
 
 _NUMBER_METRIC_RE = re.compile(
     r"(?<![A-Za-z0-9_.])"
-    r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?"
-    r"(?:[eE][-+]?\d+|%|-fold\b|[x×]\b"
-    r"|\s*(?:ms|ns|us|µs|kg|mg|ug|km|cm|mm|nm|GB|MB|KB|TB|Hz|kHz|MHz|GHz|dB|kcal|kJ|mol|mM|uM|nM|pM)\b"
-    r")?"
+    r"[-+\u2212]?\d+(?:,\d{3})*(?:\.\d+)?"
+    rf"(?:[eE][-+\u2212]?\d+|%|-fold\b|[x×]\b|\s*(?:{_UNIT_PATTERN})\b)?"
     r"(?![A-Za-z0-9_])"
 )
+_NUMBER_UNIT_SPLIT_RE = re.compile(rf"^(?P<num>.+?)\s*(?P<unit>{_UNIT_PATTERN})$")
 
 
 @dataclass(frozen=True)
@@ -173,6 +185,7 @@ def _normalize_citation_text(text: str, *, strip_outer_quotes: bool) -> str:
         .replace("\u2019", "'")
         .replace("\u201c", '"')
         .replace("\u201d", '"')
+        .replace("\u2212", "-")
         .replace("\u00ad", "")
     )
     normalized = _DEHYPHENATE_WRAP_RE.sub(r"\1\2", normalized)
@@ -191,7 +204,9 @@ def _normalize_citation_text(text: str, *, strip_outer_quotes: bool) -> str:
 def _is_two_column_interleaved_line(line: str) -> str | None:
     """Return a diagnostic reason if ``line`` looks like interleaved two-column PDF text."""
     stripped = line.strip()
-    if not stripped or "|" in stripped:
+    if not stripped:
+        return None
+    if _TABLE_LINE_RE.match(stripped) is not None or _PIPE_TABLE_SEP_RE.search(stripped) is not None:
         return None
     if _WIDE_GUTTER_RE.search(stripped) is None:
         return None
@@ -200,9 +215,15 @@ def _is_two_column_interleaved_line(line: str) -> str | None:
     if len(segments) < 2:
         return None
 
-    # Predominantly numeric multi-column rows are likely tables, not prose interleaving.
+    # Predominantly numeric multi-column rows or aligned tables with numeric cells are not prose interleaving.
     numeric_segments = sum(1 for seg in segments if _PURE_NUMERIC_CELL_RE.match(seg))
-    if numeric_segments >= 2 or (len(segments) >= 3 and numeric_segments >= len(segments) - 1):
+    if numeric_segments >= 2 or (len(segments) >= 3 and numeric_segments >= 1):
+        return None
+
+    # Aligned 3+ column table headers of short labels without sentence punctuation.
+    if len(segments) >= 3 and all(
+        len(seg.split()) <= 3 and not re.search(r"[.?!]", seg) for seg in segments
+    ):
         return None
 
     prose_segments = [seg for seg in segments if len(_ALPHA_WORD_RE.findall(seg)) >= 2]
@@ -243,7 +264,7 @@ def _is_table_grounding_line(line: str) -> bool:
 
 
 def _normalize_number_token(token: str) -> str:
-    norm = unicodedata.normalize("NFKC", token).strip()
+    norm = unicodedata.normalize("NFKC", token).replace("\u2212", "-").strip()
     norm = re.sub(r"(?<=\d),(?=\d{3}\b)", "", norm)
     norm = re.sub(r"\s+", " ", norm)
     return norm
@@ -253,7 +274,7 @@ def _extract_cited_numbers(text: str) -> list[str]:
     """Extract cited numeric/metric tokens from prose after stripping structural labels."""
     cleaned = _MARKDOWN_HEADING_OR_LIST_RE.sub("", text)
     cleaned = _STRUCTURAL_LABEL_RE.sub(" ", cleaned)
-    cleaned = unicodedata.normalize("NFKC", cleaned)
+    cleaned = unicodedata.normalize("NFKC", cleaned).replace("\u2212", "-")
     seen: list[str] = []
     for match in _NUMBER_METRIC_RE.finditer(cleaned):
         tok = _normalize_number_token(match.group(0))
@@ -262,17 +283,36 @@ def _extract_cited_numbers(text: str) -> list[str]:
     return seen
 
 
+def _escape_numeric_core(num_part: str) -> str:
+    """Escape a normalized numeric token while allowing case-insensitive scientific 'e'/'E'."""
+    escaped = re.escape(num_part)
+    return re.sub(r"(?<=\d)[eE](?=(?:\\[-+])?\d)", "[eE]", escaped)
+
+
 def _number_present_in_text(token: str, normalized_text: str) -> bool:
     """Return True if ``token`` matches a numeric/metric occurrence in ``normalized_text``."""
     target = _normalize_number_token(token)
-    norm_haystack = re.sub(r"(?<=\d),(?=\d{3}\b)", "", unicodedata.normalize("NFKC", normalized_text))
-    escaped = re.escape(target)
-    # Allow optional space before '%' or unit suffix in source text.
+    norm_haystack = re.sub(
+        r"(?<=\d),(?=\d{3}\b)",
+        "",
+        unicodedata.normalize("NFKC", normalized_text).replace("\u2212", "-"),
+    )
+    has_explicit_sign = target.startswith(("-", "+"))
+    lookbehind = r"(?<![A-Za-z0-9_.])" if has_explicit_sign else r"(?<![A-Za-z0-9_.+-])"
+    trailing_guard = r"(?![A-Za-z0-9_%×]|-fold\b|\.\d|\s*%)"
+
     if target.endswith("%"):
-        num_part = re.escape(target[:-1].strip())
-        pattern = re.compile(rf"(?<![A-Za-z0-9_.]){num_part}\s*(?:%|percent\b)(?![A-Za-z0-9_])", re.I)
+        num_part = _escape_numeric_core(target[:-1].strip())
+        pattern = re.compile(rf"{lookbehind}{num_part}\s*(?:%|(?i:percent)\b){trailing_guard}")
     else:
-        pattern = re.compile(rf"(?<![A-Za-z0-9_.]){escaped}(?![A-Za-z0-9_.])")
+        unit_match = _NUMBER_UNIT_SPLIT_RE.match(target)
+        if unit_match is not None:
+            num_part = _escape_numeric_core(unit_match.group("num").strip())
+            unit_part = re.escape(unit_match.group("unit"))
+            pattern = re.compile(rf"{lookbehind}{num_part}\s*{unit_part}{trailing_guard}")
+        else:
+            core = _escape_numeric_core(target)
+            pattern = re.compile(rf"{lookbehind}{core}{trailing_guard}")
     return pattern.search(norm_haystack) is not None
 
 
@@ -371,10 +411,13 @@ def _load_manifest_and_sources(sources_root: Path) -> dict[str, _LoadedSource]:
         table_lines: set[int] = set()
         figure_caption_lines: set[int] = set()
 
+        in_figure_caption = False
+        prev_coord: tuple[int, int] | None = None
         for idx, raw_line in enumerate(source_text.splitlines(), start=1):
             clean_line = raw_line.rstrip("\r\n")
             if is_numbered:
                 if not clean_line.strip():
+                    in_figure_caption = False
                     continue
                 match = _NUMBERED_LINE_RE.match(clean_line)
                 if match is None:
@@ -393,6 +436,11 @@ def _load_manifest_and_sources(sources_root: Path) -> dict[str, _LoadedSource]:
                     raise CitationVerificationError(
                         f"{source_path}:{idx}: duplicate coordinate (Page {page_num}, Line {line_num})"
                     )
+                if prev_coord is not None and (
+                    prev_coord[0] != page_num or line_num != prev_coord[1] + 1
+                ):
+                    in_figure_caption = False
+                prev_coord = coord
                 line_body = match.group(3)
                 lines_map[coord] = line_body
                 coord_to_file_line[coord] = idx
@@ -403,10 +451,21 @@ def _load_manifest_and_sources(sources_root: Path) -> dict[str, _LoadedSource]:
             two_col_reason = _is_two_column_interleaved_line(line_body)
             if two_col_reason is not None:
                 two_column_lines[idx] = two_col_reason
-            if _is_table_grounding_line(line_body):
+            is_table = _is_table_grounding_line(line_body)
+            if is_table:
                 table_lines.add(idx)
             if _FIGURE_CAPTION_LINE_RE.match(line_body):
+                in_figure_caption = True
                 figure_caption_lines.add(idx)
+            elif in_figure_caption:
+                if (
+                    not line_body.strip()
+                    or is_table
+                    or _CAPTION_BREAK_LINE_RE.match(line_body) is not None
+                ):
+                    in_figure_caption = False
+                else:
+                    figure_caption_lines.add(idx)
 
         if is_numbered:
             ordered_text = "\n".join(lines_map[coord] for coord in sorted(lines_map))

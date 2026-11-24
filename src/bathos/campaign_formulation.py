@@ -8,6 +8,7 @@ Requires three pre-registration planning artifacts before a claim-bound campaign
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,6 +16,12 @@ from typing import Any
 from bathos.campaigns import CampaignError
 
 MAX_FORMULATION_FALLBACK_BOUND = 10
+_PLACEHOLDER_RE = re.compile(r"\$\{[^}]*\}|\b(?:TODO|TBD|FIXME)\b", re.IGNORECASE)
+
+
+def _check_no_placeholder(value: str | None, label: str, errors: list[str]) -> None:
+    if value and _PLACEHOLDER_RE.search(value):
+        errors.append(f"{label} contains unresolved placeholder text {value!r}")
 
 
 @dataclass(frozen=True)
@@ -176,6 +183,11 @@ def _parse_decision_tree(
         )
         next_branch = _clean_str(item.get("next_branch")) or None
         fallback_to = _clean_str(item.get("fallback_to")) or None
+        raw_terminal = item.get("terminal", False)
+        if not isinstance(raw_terminal, bool):
+            raise CampaignError(
+                f"formulation.decision_tree[{branch_id}].terminal must be a boolean, got {raw_terminal!r}"
+            )
         branches.append(
             DecisionBranch(
                 branch_id=branch_id,
@@ -185,7 +197,7 @@ def _parse_decision_tree(
                 next_branch=next_branch,
                 fallback_to=fallback_to,
                 max_fallbacks=branch_max_fb,
-                terminal=bool(item.get("terminal", False)),
+                terminal=raw_terminal,
             )
         )
     return tuple(branches), max_fallbacks, max_depth
@@ -249,6 +261,7 @@ def _check_decision_tree_cycles_and_depth(
     branches: tuple[DecisionBranch, ...],
     fallback_bound: int | None,
     max_depth: int | None,
+    max_allowed_depth: int,
     errors: list[str],
 ) -> None:
     by_id: dict[str, DecisionBranch] = {}
@@ -294,42 +307,51 @@ def _check_decision_tree_cycles_and_depth(
             )
             return
 
-    # Verify fallback chain lengths do not exceed bounded limits.
-    def _fallback_chain_len(node_id: str) -> int:
-        seen: set[str] = set()
-        curr = node_id
-        steps = 0
-        while curr in by_id and curr not in seen:
-            seen.add(curr)
-            nxt = by_id[curr].fallback_to
-            if nxt is None:
-                break
-            steps += 1
-            curr = nxt
-        return steps
+    # Verify fallback chain lengths (including interleaved next_branch + fallback_to paths)
+    # and overall path depths do not exceed bounded limits.
+    fb_memo: dict[str, int] = {}
+    depth_memo: dict[str, int] = {}
+
+    def _max_fallback_steps(node_id: str) -> int:
+        if node_id in fb_memo:
+            return fb_memo[node_id]
+        node = by_id[node_id]
+        best = 0
+        if node.fallback_to is not None and node.fallback_to in by_id:
+            best = max(best, 1 + _max_fallback_steps(node.fallback_to))
+        if node.next_branch is not None and node.next_branch in by_id:
+            best = max(best, _max_fallback_steps(node.next_branch))
+        fb_memo[node_id] = best
+        return best
 
     def _max_path_depth(node_id: str) -> int:
+        if node_id in depth_memo:
+            return depth_memo[node_id]
         node = by_id[node_id]
         children = [c for c in (node.next_branch, node.fallback_to) if c is not None and c in by_id]
-        if not children:
-            return 1
-        return 1 + max(_max_path_depth(c) for c in children)
+        res = 1 if not children else 1 + max(_max_path_depth(c) for c in children)
+        depth_memo[node_id] = res
+        return res
 
     for branch in branches:
-        fb_len = _fallback_chain_len(branch.branch_id)
+        fb_len = _max_fallback_steps(branch.branch_id)
         effective_fb_bound = branch.max_fallbacks if branch.max_fallbacks is not None else fallback_bound
         if effective_fb_bound is not None and fb_len > effective_fb_bound:
             errors.append(
                 f"decision_tree fallback chain from {branch.branch_id!r} has length {fb_len}, "
                 f"exceeding max_fallbacks={effective_fb_bound}"
             )
-        if max_depth is not None:
-            depth = _max_path_depth(branch.branch_id)
-            if depth > max_depth:
-                errors.append(
-                    f"decision_tree path depth from {branch.branch_id!r} is {depth}, "
-                    f"exceeding max_depth={max_depth}"
-                )
+        depth = _max_path_depth(branch.branch_id)
+        if max_depth is not None and depth > max_depth:
+            errors.append(
+                f"decision_tree path depth from {branch.branch_id!r} is {depth}, "
+                f"exceeding max_depth={max_depth}"
+            )
+        elif depth > max_allowed_depth:
+            errors.append(
+                f"decision_tree path depth from {branch.branch_id!r} is {depth}, "
+                f"exceeding max_allowed_depth={max_allowed_depth}"
+            )
 
 
 def validate_formulation(
@@ -371,6 +393,12 @@ def validate_formulation(
                 errors.append(f"formulation.matrix[{idx}] missing non-empty 'readout'")
             if not row.confound_control:
                 errors.append(f"formulation.matrix[{idx}] missing non-empty 'confound_control'")
+            _check_no_placeholder(row.hypothesis, f"formulation.matrix[{idx}].hypothesis", errors)
+            _check_no_placeholder(row.arm, f"formulation.matrix[{idx}].arm", errors)
+            _check_no_placeholder(row.readout, f"formulation.matrix[{idx}].readout", errors)
+            _check_no_placeholder(
+                row.confound_control, f"formulation.matrix[{idx}].confound_control", errors
+            )
             key = (row.hypothesis, row.arm, row.readout)
             if all(key):
                 if key in seen_rows:
@@ -405,16 +433,21 @@ def validate_formulation(
             "with bounded fallbacks"
         )
     else:
+        if formulation.max_fallbacks is not None and formulation.max_fallbacks > max_allowed_depth:
+            errors.append(
+                f"formulation max_fallbacks ({formulation.max_fallbacks}) exceeds maximum allowed "
+                f"({max_allowed_depth})"
+            )
+        if formulation.max_depth is not None and formulation.max_depth > max_allowed_depth:
+            errors.append(
+                f"formulation max_depth ({formulation.max_depth}) exceeds maximum allowed "
+                f"({max_allowed_depth})"
+            )
         tree_bound = (
             formulation.max_fallbacks
             if formulation.max_fallbacks is not None
             else formulation.max_depth
         )
-        if tree_bound is not None and tree_bound > max_allowed_depth:
-            errors.append(
-                f"formulation fallback bound ({tree_bound}) exceeds maximum allowed "
-                f"({max_allowed_depth})"
-            )
 
         any_fallback_declared = False
         for branch in formulation.decision_tree:
@@ -426,6 +459,24 @@ def validate_formulation(
                 errors.append(
                     f"decision_tree branch {branch.branch_id!r} missing non-empty 'action'"
                 )
+            _check_no_placeholder(
+                branch.branch_id, f"decision_tree branch {branch.branch_id!r}.branch_id", errors
+            )
+            _check_no_placeholder(
+                branch.condition, f"decision_tree branch {branch.branch_id!r}.condition", errors
+            )
+            _check_no_placeholder(
+                branch.action, f"decision_tree branch {branch.branch_id!r}.action", errors
+            )
+            _check_no_placeholder(
+                branch.fallback, f"decision_tree branch {branch.branch_id!r}.fallback", errors
+            )
+            _check_no_placeholder(
+                branch.next_branch, f"decision_tree branch {branch.branch_id!r}.next_branch", errors
+            )
+            _check_no_placeholder(
+                branch.fallback_to, f"decision_tree branch {branch.branch_id!r}.fallback_to", errors
+            )
             branch_bound = branch.max_fallbacks if branch.max_fallbacks is not None else tree_bound
             if branch.max_fallbacks is not None and branch.max_fallbacks > max_allowed_depth:
                 errors.append(
@@ -446,7 +497,7 @@ def validate_formulation(
                     "bounded 'fallback' or 'fallback_to' (or set terminal=true)"
                 )
 
-        if not any_fallback_declared and tree_bound is None:
+        if not any_fallback_declared:
             errors.append(
                 "formulation.decision_tree must declare at least one bounded fallback path "
                 "with 'max_fallbacks' or 'max_depth'"
@@ -456,6 +507,7 @@ def validate_formulation(
             formulation.decision_tree,
             fallback_bound=tree_bound,
             max_depth=formulation.max_depth,
+            max_allowed_depth=max_allowed_depth,
             errors=errors,
         )
 
@@ -471,6 +523,14 @@ def validate_formulation(
                 errors.append(f"formulation.reuse_table[{idx}] missing non-empty 'already_done'")
             if not entry.used_by:
                 errors.append(f"formulation.reuse_table[{idx}] missing non-empty 'used_by'")
+            _check_no_placeholder(
+                entry.already_done, f"formulation.reuse_table[{idx}].already_done", errors
+            )
+            _check_no_placeholder(entry.used_by, f"formulation.reuse_table[{idx}].used_by", errors)
+            _check_no_placeholder(
+                entry.artifact_ref, f"formulation.reuse_table[{idx}].artifact_ref", errors
+            )
+            _check_no_placeholder(entry.notes, f"formulation.reuse_table[{idx}].notes", errors)
 
     return FormulationValidationResult(
         ok=len(errors) == 0,

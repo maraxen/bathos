@@ -192,3 +192,87 @@ def test_lint_project_and_stat007_card_and_context(tmp_path: Path):
     assert card.applies_when == "has_unit_of_independence_risk"
     assert evaluate_applies_when(card.applies_when, {"has_unit_of_independence_risk": True})
     assert not evaluate_applies_when(card.applies_when, {"has_unit_of_independence_risk": False})
+
+
+def test_pooled_unit_with_converged_and_pooled_metric_no_false_positive(tmp_path: Path):
+    _write_sidecar(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Pool MD replicas per build"
+        [outcomes.pass]
+        condition = "converged = true AND pooled_rmsd < 2.0"
+        decision = "go"
+        [breakdown]
+        unit = "build"
+        [result_schema]
+        n_replicas = "int"
+        converged = "bool"
+        pooled_rmsd = "float"
+        """,
+    )
+    assert check_unit_of_independence(tmp_path) == []
+
+
+def test_generic_breakdown_waive_does_not_silence_stat007(tmp_path: Path):
+    _write_sidecar(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Per-replica gate with unrelated breakdown waiver"
+        [outcomes.pass]
+        condition = "per_replica_converged = true"
+        decision = "go"
+        [breakdown]
+        waive = "single metric"
+        [result_schema]
+        n_replicas = "int"
+        per_replica_converged = "bool"
+        """,
+        stem="generic_waive",
+    )
+    issues = check_unit_of_independence(tmp_path)
+    assert any(i.issue == "per_replica_convergence_gate" for i in issues)
+    assert any(i.issue == "missing_unit_of_independence" for i in issues)
+
+    _write_sidecar(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Explicitly waived STAT-007 under breakdown"
+        [outcomes.pass]
+        condition = "per_replica_converged = true"
+        decision = "go"
+        [breakdown]
+        waive = "STAT-007: starting structures are non-exchangeable"
+        [result_schema]
+        n_replicas = "int"
+        per_replica_converged = "bool"
+        """,
+        stem="explicit_stat007_waive",
+    )
+    explicit_issues = [
+        i for i in check_unit_of_independence(tmp_path) if "explicit_stat007_waive" in str(i.path)
+    ]
+    assert explicit_issues == []
+
+
+def test_negated_anti_pattern_requires_word_boundary(tmp_path: Path):
+    _write_sidecar(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "We know each replica must converge and nano replica-split null is used"
+        [outcomes.pass]
+        condition = "pooled_rmsd < 2.0"
+        decision = "go"
+        [breakdown]
+        unit = "build"
+        [result_schema]
+        n_replicas = "int"
+        pooled_rmsd = "float"
+        """,
+    )
+    kinds = {i.issue for i in check_unit_of_independence(tmp_path)}
+    assert "per_replica_convergence_gate" in kinds
+    assert "replica_split_null" in kinds

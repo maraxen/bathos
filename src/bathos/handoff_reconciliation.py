@@ -10,6 +10,7 @@ Provides pure core types and functions for:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,9 +39,9 @@ class RolloutPolicy:
 
     promotion_threshold: float = 0.95
     demotion_threshold: float = 0.90
-    min_samples_for_promotion: int = 20
+    min_samples_for_promotion: int = 80
     min_samples_for_demotion: int = 5
-    window_size: int = 50
+    window_size: int = 100
     max_consecutive_disagreements: int = 3
 
     def __post_init__(self) -> None:
@@ -59,6 +60,16 @@ class RolloutPolicy:
             )
         if self.window_size < 1:
             raise ValueError(f"window_size must be >= 1, got {self.window_size}")
+        if self.min_samples_for_promotion > self.window_size:
+            raise ValueError(
+                f"min_samples_for_promotion ({self.min_samples_for_promotion}) must be <= "
+                f"window_size ({self.window_size})"
+            )
+        if self.min_samples_for_demotion > self.window_size:
+            raise ValueError(
+                f"min_samples_for_demotion ({self.min_samples_for_demotion}) must be <= "
+                f"window_size ({self.window_size})"
+            )
         if self.max_consecutive_disagreements < 1:
             raise ValueError(
                 "max_consecutive_disagreements must be >= 1, "
@@ -97,6 +108,8 @@ class AgreementMetrics:
     agreement_rate: float
     lifetime_agreement_rate: float
     consecutive_disagreements: int
+    wilson_lower_bound: float = 0.0
+    clean_streak: int = 0
 
 
 @dataclass(frozen=True)
@@ -224,6 +237,25 @@ def evaluate_agreement_rate(samples: Sequence[AgreementSample]) -> float:
     return agreed / len(samples)
 
 
+def wilson_score_lower_bound(
+    agreed_count: int,
+    total_count: int,
+    *,
+    z: float = 1.96,
+) -> float:
+    """Compute the one-sided Wilson score lower bound (95% default, z=1.96)."""
+    if total_count <= 0:
+        return 0.0
+    if agreed_count <= 0:
+        return 0.0
+    p_hat = min(1.0, agreed_count / total_count)
+    z2 = z * z
+    denom = 1.0 + z2 / total_count
+    center = p_hat + z2 / (2.0 * total_count)
+    radius = z * math.sqrt((p_hat * (1.0 - p_hat) + z2 / (4.0 * total_count)) / total_count)
+    return max(0.0, (center - radius) / denom)
+
+
 def compute_agreement_metrics(
     samples: Sequence[AgreementSample],
     *,
@@ -238,12 +270,19 @@ def compute_agreement_metrics(
     disagreed_count = len(window) - agreed_count
     rolling_rate = (agreed_count / len(window)) if window else 0.0
     lifetime_rate = (sum(1 for s in samples if s.agreed) / total) if total else 0.0
+    wilson_lb = wilson_score_lower_bound(agreed_count, len(window))
 
     consecutive_disagreements = 0
     for sample in reversed(samples):
         if sample.agreed:
             break
         consecutive_disagreements += 1
+
+    clean_streak = 0
+    for sample in reversed(samples):
+        if not sample.agreed:
+            break
+        clean_streak += 1
 
     return AgreementMetrics(
         total_samples=total,
@@ -253,6 +292,8 @@ def compute_agreement_metrics(
         agreement_rate=rolling_rate,
         lifetime_agreement_rate=lifetime_rate,
         consecutive_disagreements=consecutive_disagreements,
+        wilson_lower_bound=wilson_lb,
+        clean_streak=clean_streak,
     )
 
 
@@ -260,6 +301,8 @@ def evaluate_rollout_gate(
     current_mode: ReconciliationMode,
     metrics: AgreementMetrics,
     policy: RolloutPolicy,
+    *,
+    samples_since_demotion: int | None = None,
 ) -> RolloutTransition:
     """Evaluate whether staged rollout mode should promote, demote, or stay unchanged."""
     advisories: list[str] = []
@@ -280,10 +323,56 @@ def evaluate_rollout_gate(
                 auto_apply_allowed=False,
                 advisories=(reason,),
             )
-        if metrics.agreement_rate >= policy.promotion_threshold:
+
+        required_clean_streak = min(
+            policy.min_samples_for_promotion, policy.min_samples_for_demotion
+        )
+        effective_clean_streak = (
+            metrics.window_samples
+            if metrics.disagreed_count == 0 and metrics.consecutive_disagreements == 0
+            else (0 if metrics.consecutive_disagreements > 0 else metrics.clean_streak)
+        )
+        if (
+            samples_since_demotion is not None
+            and samples_since_demotion < policy.min_samples_for_demotion
+        ):
             reason = (
-                f"promoted advisory -> automatic: rolling agreement {metrics.agreement_rate:.3f} "
-                f">= {policy.promotion_threshold:.3f} across {metrics.window_samples} samples"
+                f"staying in advisory: demotion cooldown active "
+                f"({samples_since_demotion}/{policy.min_samples_for_demotion} new samples)"
+            )
+            advisories.append(reason)
+            return RolloutTransition(
+                previous_mode=current_mode,
+                new_mode=ReconciliationMode.ADVISORY,
+                transition="unchanged",
+                reason=reason,
+                metrics=metrics,
+                auto_apply_allowed=False,
+                advisories=tuple(advisories),
+            )
+
+        if metrics.consecutive_disagreements > 0 or effective_clean_streak < required_clean_streak:
+            reason = (
+                f"staying in advisory: clean streak {effective_clean_streak} "
+                f"< required {required_clean_streak} after disagreement"
+            )
+            advisories.append(reason)
+            return RolloutTransition(
+                previous_mode=current_mode,
+                new_mode=ReconciliationMode.ADVISORY,
+                transition="unchanged",
+                reason=reason,
+                metrics=metrics,
+                auto_apply_allowed=False,
+                advisories=tuple(advisories),
+            )
+
+        wilson_lb = wilson_score_lower_bound(metrics.agreed_count, metrics.window_samples)
+        if wilson_lb >= policy.promotion_threshold and metrics.agreement_rate >= policy.promotion_threshold:
+            reason = (
+                f"promoted advisory -> automatic: wilson 95% lower bound {wilson_lb:.3f} "
+                f"(raw {metrics.agreement_rate:.3f}) >= {policy.promotion_threshold:.3f} "
+                f"across {metrics.window_samples} samples"
             )
             return RolloutTransition(
                 previous_mode=current_mode,
@@ -295,8 +384,8 @@ def evaluate_rollout_gate(
                 advisories=(),
             )
         reason = (
-            f"staying in advisory: rolling agreement {metrics.agreement_rate:.3f} "
-            f"< promotion_threshold {policy.promotion_threshold:.3f}"
+            f"staying in advisory: wilson 95% lower bound {wilson_lb:.3f} "
+            f"(raw {metrics.agreement_rate:.3f}) < promotion_threshold {policy.promotion_threshold:.3f}"
         )
         advisories.append(reason)
         return RolloutTransition(
@@ -365,6 +454,7 @@ class HandoffReconciliationTracker:
     policy: RolloutPolicy = field(default_factory=RolloutPolicy)
     mode: ReconciliationMode = ReconciliationMode.ADVISORY
     history: list[AgreementSample] = field(default_factory=list)
+    last_demotion_sample_index: int | None = None
 
     def metrics(self) -> AgreementMetrics:
         """Compute current rolling and lifetime agreement metrics."""
@@ -373,8 +463,22 @@ class HandoffReconciliationTracker:
     def evaluate_gate(self) -> RolloutTransition:
         """Evaluate rollout transition for the current state and update mode."""
         metrics = self.metrics()
-        decision = evaluate_rollout_gate(self.mode, metrics, self.policy)
+        samples_since_demotion = (
+            len(self.history) - self.last_demotion_sample_index
+            if self.last_demotion_sample_index is not None
+            else None
+        )
+        decision = evaluate_rollout_gate(
+            self.mode,
+            metrics,
+            self.policy,
+            samples_since_demotion=samples_since_demotion,
+        )
         self.mode = decision.new_mode
+        if decision.transition == "demoted":
+            self.last_demotion_sample_index = len(self.history)
+        elif decision.transition == "promoted":
+            self.last_demotion_sample_index = None
         return decision
 
     def record_sample(self, sample: AgreementSample) -> RolloutTransition:
@@ -454,6 +558,7 @@ class HandoffReconciliationTracker:
         """Serialize tracker state to a JSON-compatible dictionary."""
         return {
             "mode": self.mode.value,
+            "last_demotion_sample_index": self.last_demotion_sample_index,
             "policy": {
                 "promotion_threshold": self.policy.promotion_threshold,
                 "demotion_threshold": self.policy.demotion_threshold,
@@ -483,36 +588,147 @@ class HandoffReconciliationTracker:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> HandoffReconciliationTracker:
-        """Restore tracker state from :meth:`to_dict` output."""
-        raw_policy = payload.get("policy") or {}
-        policy = RolloutPolicy(
-            promotion_threshold=float(raw_policy.get("promotion_threshold", 0.95)),
-            demotion_threshold=float(raw_policy.get("demotion_threshold", 0.90)),
-            min_samples_for_promotion=int(raw_policy.get("min_samples_for_promotion", 20)),
-            min_samples_for_demotion=int(raw_policy.get("min_samples_for_demotion", 5)),
-            window_size=int(raw_policy.get("window_size", 50)),
-            max_consecutive_disagreements=int(
-                raw_policy.get("max_consecutive_disagreements", 3)
-            ),
-        )
-        mode = ReconciliationMode(str(payload.get("mode", ReconciliationMode.ADVISORY.value)))
-        history: list[AgreementSample] = []
-        for raw_sample in payload.get("history") or []:
-            discs = tuple(
-                FieldDiscrepancy(
-                    field_name=str(d["field_name"]),
-                    handoff_value=d.get("handoff_value"),
-                    catalog_value=d.get("catalog_value"),
-                    reason=str(d.get("reason", "")),
-                )
-                for d in (raw_sample.get("discrepancies") or [])
+        """Restore tracker state from :meth:`to_dict` output with strict validation."""
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"Tracker payload must be a mapping, got {type(payload).__name__}")
+
+        raw_policy_obj = payload.get("policy")
+        if raw_policy_obj is None:
+            raw_policy: Mapping[str, Any] = {}
+        elif isinstance(raw_policy_obj, Mapping):
+            raw_policy = raw_policy_obj
+        else:
+            raise ValueError(
+                f"Tracker payload 'policy' must be a mapping, got {type(raw_policy_obj).__name__}"
             )
+
+        def _req_float(key: str, default: float) -> float:
+            val = raw_policy.get(key, default)
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise ValueError(f"policy.{key} must be a number, got {val!r}")
+            fval = float(val)
+            if not math.isfinite(fval):
+                raise ValueError(f"policy.{key} must be finite, got {val!r}")
+            return fval
+
+        def _req_int(key: str, default: int) -> int:
+            val = raw_policy.get(key, default)
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise ValueError(f"policy.{key} must be an integer, got {val!r}")
+            return val
+
+        policy = RolloutPolicy(
+            promotion_threshold=_req_float("promotion_threshold", 0.95),
+            demotion_threshold=_req_float("demotion_threshold", 0.90),
+            min_samples_for_promotion=_req_int("min_samples_for_promotion", 80),
+            min_samples_for_demotion=_req_int("min_samples_for_demotion", 5),
+            window_size=_req_int("window_size", 100),
+            max_consecutive_disagreements=_req_int("max_consecutive_disagreements", 3),
+        )
+
+        raw_mode = payload.get("mode", ReconciliationMode.ADVISORY.value)
+        if not isinstance(raw_mode, str):
+            raise ValueError(f"Tracker payload 'mode' must be a string, got {raw_mode!r}")
+        try:
+            persisted_mode = ReconciliationMode(raw_mode)
+        except ValueError as exc:
+            raise ValueError(f"Invalid reconciliation mode {raw_mode!r}") from exc
+
+        raw_history = payload.get("history")
+        if raw_history is None:
+            raw_history = []
+        elif not isinstance(raw_history, (list, tuple)):
+            raise ValueError(
+                f"Tracker payload 'history' must be a list, got {type(raw_history).__name__}"
+            )
+
+        history: list[AgreementSample] = []
+        for idx, raw_sample in enumerate(raw_history):
+            if not isinstance(raw_sample, Mapping):
+                raise ValueError(f"history[{idx}] must be a mapping, got {type(raw_sample).__name__}")
+            sample_id = raw_sample.get("sample_id")
+            if not isinstance(sample_id, str) or not sample_id:
+                raise ValueError(f"history[{idx}].sample_id must be a non-empty string, got {sample_id!r}")
+            agreed = raw_sample.get("agreed")
+            if not isinstance(agreed, bool):
+                raise ValueError(f"history[{idx}].agreed must be a bool, got {agreed!r}")
+            timestamp = raw_sample.get("timestamp", "")
+            if not isinstance(timestamp, str):
+                raise ValueError(f"history[{idx}].timestamp must be a string, got {timestamp!r}")
+            raw_discs = raw_sample.get("discrepancies")
+            if raw_discs is None:
+                raw_discs = []
+            elif not isinstance(raw_discs, (list, tuple)):
+                raise ValueError(
+                    f"history[{idx}].discrepancies must be a list, got {type(raw_discs).__name__}"
+                )
+            discs_list: list[FieldDiscrepancy] = []
+            for d_idx, d in enumerate(raw_discs):
+                if not isinstance(d, Mapping):
+                    raise ValueError(
+                        f"history[{idx}].discrepancies[{d_idx}] must be a mapping"
+                    )
+                field_name = d.get("field_name")
+                if not isinstance(field_name, str) or not field_name:
+                    raise ValueError(
+                        f"history[{idx}].discrepancies[{d_idx}].field_name must be a non-empty string"
+                    )
+                reason = d.get("reason", "")
+                if not isinstance(reason, str):
+                    raise ValueError(
+                        f"history[{idx}].discrepancies[{d_idx}].reason must be a string"
+                    )
+                discs_list.append(
+                    FieldDiscrepancy(
+                        field_name=field_name,
+                        handoff_value=d.get("handoff_value"),
+                        catalog_value=d.get("catalog_value"),
+                        reason=reason,
+                    )
+                )
             history.append(
                 AgreementSample(
-                    sample_id=str(raw_sample["sample_id"]),
-                    agreed=bool(raw_sample["agreed"]),
-                    discrepancies=discs,
-                    timestamp=str(raw_sample.get("timestamp", "")),
+                    sample_id=sample_id,
+                    agreed=agreed,
+                    discrepancies=tuple(discs_list),
+                    timestamp=timestamp,
                 )
             )
-        return cls(policy=policy, mode=mode, history=history)
+
+        raw_demoted_idx = payload.get("last_demotion_sample_index")
+        if raw_demoted_idx is not None:
+            if isinstance(raw_demoted_idx, bool) or not isinstance(raw_demoted_idx, int):
+                raise ValueError(
+                    f"last_demotion_sample_index must be an integer or null, got {raw_demoted_idx!r}"
+                )
+            if raw_demoted_idx < 0 or raw_demoted_idx > len(history):
+                raise ValueError(
+                    f"last_demotion_sample_index ({raw_demoted_idx}) out of bounds for history length {len(history)}"
+                )
+
+        # Replay history to verify whether AUTOMATIC mode is actually earned by qualifying history.
+        replay = cls(policy=policy, mode=ReconciliationMode.ADVISORY)
+        for sample in history:
+            replay.record_sample(sample)
+
+        if persisted_mode == ReconciliationMode.AUTOMATIC:
+            mode = replay.mode
+            last_demotion_idx = (
+                replay.last_demotion_sample_index
+                if mode == ReconciliationMode.ADVISORY
+                else None
+            )
+        else:
+            mode = ReconciliationMode.ADVISORY
+            last_demotion_idx = (
+                raw_demoted_idx
+                if raw_demoted_idx is not None
+                else replay.last_demotion_sample_index
+            )
+
+        return cls(
+            policy=policy,
+            mode=mode,
+            history=history,
+            last_demotion_sample_index=last_demotion_idx,
+        )

@@ -215,3 +215,66 @@ def test_hyg008_card_is_wired():
     card = load_corpus().by_id()["HYG-008"]
     assert card.source_check == "check_correction_sweep"
     assert card.severity == "warning"
+
+
+def test_markdown_quoted_ack_list_and_boundary_and_nested_schema_and_toml_deliberate(
+    tmp_path: Path,
+):
+    _write_file(
+        tmp_path / ".bth" / "corrections.toml",
+        """
+        [[corrections]]
+        id = "CORR-1"
+        summary = "Avoid converged = true and boltz-2"
+        old_assumptions = ["converged = true", "boltz-2"]
+        """,
+    )
+    # 1. Markdown frontmatter quoted list entry acknowledges CORR-1
+    _write_file(
+        tmp_path / "specs" / "acked.md",
+        """
+        ---
+        correction_ack = ["CORR-1"]
+        ---
+        Uses converged = true deliberately.
+        """,
+    )
+    # 2. Substring/compound variants must NOT false-positive; TOML # bth:deliberate is respected
+    _write_file(
+        tmp_path / "scripts" / "experiments" / "clean_variants.bth.toml",
+        """
+        [experiment]
+        hypothesis = "Compare my-boltz-2000; legacy note boltz-2" # bth:deliberate
+        [outcomes.pass]
+        condition = "not_converged = true"
+        decision = "go"
+        [result_schema]
+        not_converged = "bool"
+        """,
+    )
+    clean_report = sweep_corrections(tmp_path)
+    assert clean_report.clean, f"unexpected hits: {clean_report.hits}"
+
+    # 3. Nested [result_schema.*] keys are scanned and unannotated TOML lines still hit
+    _write_file(
+        tmp_path / "scripts" / "experiments" / "nested_hit.bth.toml",
+        """
+        [experiment]
+        hypothesis = "Check nested schema"
+        [result_schema.metrics]
+        boltz-2 = "float"
+        """,
+    )
+    hit_report = sweep_corrections(tmp_path)
+    assert any("result_schema.metrics.boltz-2 (schema key)" in h.location for h in hit_report.hits)
+
+    # 4. Malformed TOML surfaces parse error instead of silent text fallback
+    _write_file(
+        tmp_path / "scripts" / "experiments" / "broken.bth.toml",
+        """
+        [experiment
+        hypothesis = "unclosed"
+        """,
+    )
+    err_report = sweep_corrections(tmp_path)
+    assert any("failed to parse TOML" in e for e in err_report.errors)

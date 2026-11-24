@@ -2766,9 +2766,37 @@ _SEEDS_AS_N_RE = re.compile(
     re.IGNORECASE,
 )
 _NEGATED_ANTI_PATTERN_RE = re.compile(
-    r"(?:avoid|no|not|without|drop|dropped|never|instead\s+of)\s+[^.;\n]{0,40}$",
+    r"\b(?:avoid|no|not|without|drop|dropped|never|instead\s+of)\s+[^.;\n]{0,40}$",
     re.IGNORECASE,
 )
+_POOLED_CONV_METRIC_RE = re.compile(
+    r"\b(?:pooled_\w+|block_bootstrap\w*|ensemble_\w+)\b",
+    re.IGNORECASE,
+)
+_STAT007_WAIVE_RE = re.compile(
+    r"\b(?:stat[-_]?007|unit[-_ ]of[-_ ]independence)\b",
+    re.IGNORECASE,
+)
+_STAT008_WAIVE_RE = re.compile(
+    r"\b(?:stat[-_]?008|source[-_/ ]batch[-_ ]confound)\b",
+    re.IGNORECASE,
+)
+
+
+def _breakdown_waives_rule(tbl: dict[str, Any], rule_re: re.Pattern[str], flag_key: str) -> bool:
+    """Return True only if ``[breakdown]`` explicitly waives the given STAT rule."""
+    flag_val = tbl.get(flag_key)
+    if flag_val is True or (isinstance(flag_val, str) and bool(flag_val.strip())):
+        return True
+    waive_rules = tbl.get("waive_rules")
+    if isinstance(waive_rules, str) and rule_re.search(waive_rules):
+        return True
+    if isinstance(waive_rules, list) and any(
+        isinstance(item, str) and rule_re.search(item) for item in waive_rules
+    ):
+        return True
+    waive = tbl.get("waive")
+    return isinstance(waive, str) and bool(rule_re.search(waive))
 
 
 def _has_unnegated_prose_match(prose: str, pattern: re.Pattern[str]) -> bool:
@@ -2781,12 +2809,17 @@ def _has_unnegated_prose_match(prose: str, pattern: re.Pattern[str]) -> bool:
 
 def _extract_unit_of_independence(data: dict[str, Any], schema_keys: set[str], prose: str) -> tuple[str, bool]:
     """Return ``(declared_unit, explicitly_waived)`` from sidecar tables."""
-    for tbl_name in ("breakdown", "independence", "pooling", "units"):
+    for tbl_name in ("independence", "pooling", "units"):
         tbl = data.get(tbl_name)
         if isinstance(tbl, dict):
             waive = tbl.get("waive")
             if isinstance(waive, str) and waive.strip():
                 return "", True
+    breakdown_tbl = data.get("breakdown")
+    if isinstance(breakdown_tbl, dict) and _breakdown_waives_rule(
+        breakdown_tbl, _STAT007_WAIVE_RE, "waive_independence"
+    ):
+        return "", True
 
     for tbl_name in ("independence", "pooling", "units", "breakdown", "holdout"):
         tbl = data.get(tbl_name)
@@ -2849,12 +2882,25 @@ def assess_unit_of_independence_sidecar(data: dict[str, Any], sidecar_path: Path
     conv_hit = _PER_REPLICA_CONVERGENCE_RE.search(schema_joined) or _PER_REPLICA_CONVERGENCE_RE.search(
         expr_joined
     )
+    has_pooled_unit = bool(declared_unit) and declared_unit.lower() not in {
+        "replica",
+        "replicas",
+        "seed",
+        "seeds",
+    }
+    has_pooled_conv_expr = has_pooled_unit and any(
+        _POOLED_CONV_METRIC_RE.search(expr) for _, expr in exprs
+    )
+    expr_generic_conv_hit = any(
+        _GENERIC_CONVERGED_RE.search(expr)
+        and not (has_pooled_unit and _POOLED_CONV_METRIC_RE.search(expr))
+        for _, expr in exprs
+    )
+    schema_generic_conv_hit = (not has_pooled_conv_expr) and any(
+        _GENERIC_CONVERGED_RE.search(k) and "pooled" not in k.lower() for k in schema_keys
+    )
     generic_conv_hit = bool(
-        has_replica_context
-        and (
-            _GENERIC_CONVERGED_RE.search(expr_joined)
-            or any(_GENERIC_CONVERGED_RE.search(k) and "pooled" not in k.lower() for k in schema_keys)
-        )
+        has_replica_context and (expr_generic_conv_hit or schema_generic_conv_hit)
     )
     if conv_hit or generic_conv_hit or _has_unnegated_prose_match(prose, _PER_REPLICA_CONVERGENCE_PROSE_RE):
         issues.append(
@@ -2979,6 +3025,17 @@ _COVARIATE_RE = re.compile(
     r"source_r2|batch_r2|coverage_r2|source_auroc|batch_auroc|sources?)\b",
     re.IGNORECASE,
 )
+_COVARIATE_PROSE_RE = re.compile(
+    r"\b(?:data_source|source_id|dataset_id|dataset_identity|source_batch|"
+    r"batch_id|batch|coverage|missing_residues|pdb_vs_md|sim_vs_pdb|origin_collapse|"
+    r"within_source\w*|within_batch\w*|per_source\w*|per_batch\w*|"
+    r"pc1_source\w*|pc1_batch\w*|pc1_coverage\w*|axis_source\w*|axis_batch\w*|axis_coverage\w*|"
+    r"source_r2|batch_r2|coverage_r2|source_auroc|batch_auroc|"
+    r"data\s+sources?|multiple\s+sources?|different\s+sources?|across\s+sources?|"
+    r"between\s+sources?|source[- ]specific|"
+    r"source\s+(?:confound\w*|bias\w*|effect\w*|leakage|label\w*|group\w*|shift\w*|stratifi\w*))\b",
+    re.IGNORECASE,
+)
 _CONFOUND_DIAGNOSTIC_COL_RE = re.compile(
     r"^(?:pc\d+_(?:source|batch|coverage)\w*|axis_(?:source|batch|coverage)\w*|"
     r"(?:source|batch|coverage)_(?:r2|corr|auroc|variance)|"
@@ -2997,12 +3054,16 @@ def assess_source_batch_confound_sidecar(
     data: dict[str, Any], sidecar_path: Path
 ) -> list[LintIssue]:
     """Evaluate one parsed sidecar dict for STAT-008 source/batch/coverage confounds (#3095)."""
-    for tbl_name in ("confounds", "breakdown"):
-        tbl = data.get(tbl_name)
-        if isinstance(tbl, dict):
-            waive = tbl.get("waive")
-            if isinstance(waive, str) and waive.strip():
-                return []
+    confounds_tbl = data.get("confounds")
+    if isinstance(confounds_tbl, dict):
+        waive = confounds_tbl.get("waive")
+        if isinstance(waive, str) and waive.strip():
+            return []
+    breakdown_tbl = data.get("breakdown")
+    if isinstance(breakdown_tbl, dict) and _breakdown_waives_rule(
+        breakdown_tbl, _STAT008_WAIVE_RE, "waive_confounds"
+    ):
+        return []
 
     schema_keys = _collect_schema_keys(data.get("result_schema"))
     exprs = _collect_sidecar_expressions(data)
@@ -3026,14 +3087,13 @@ def assess_source_batch_confound_sidecar(
     if not has_proj_or_clf:
         return []
 
-    confounds_tbl = data.get("confounds")
     has_confounds_tbl = isinstance(confounds_tbl, dict) and bool(confounds_tbl)
     has_covariates = bool(
         has_confounds_tbl
         or _COVARIATE_RE.search(schema_joined)
         or _COVARIATE_RE.search(expr_joined)
         or _COVARIATE_RE.search(factor_joined)
-        or _COVARIATE_RE.search(prose)
+        or _COVARIATE_PROSE_RE.search(prose)
     )
     if not has_covariates:
         return []
@@ -3098,8 +3158,23 @@ def check_source_batch_confound(project_root: Path) -> list[LintIssue]:
     return issues
 
 
+def _validate_finite_floats(values: Sequence[float], name: str) -> None:
+    for idx, val in enumerate(values):
+        if isinstance(val, bool):
+            raise ValueError(f"{name}[{idx}] must be a finite number, got {val!r}")
+        try:
+            finite = math.isfinite(val)
+        except TypeError as exc:
+            raise ValueError(f"{name}[{idx}] must be a finite number, got {val!r}") from exc
+        if not finite:
+            raise ValueError(f"{name}[{idx}] must be a finite number, got {val!r}")
+
+
 def _categorical_eta_squared(values: Sequence[float], labels: Sequence[str]) -> float | None:
-    if len(values) != len(labels) or len(values) < 2:
+    if len(values) != len(labels):
+        raise ValueError("values and labels length must match")
+    _validate_finite_floats(values, "values")
+    if len(values) < 2:
         return None
     mean_all = sum(values) / len(values)
     ss_total = sum((v - mean_all) ** 2 for v in values)
@@ -3115,7 +3190,11 @@ def _categorical_eta_squared(values: Sequence[float], labels: Sequence[str]) -> 
 
 
 def _pearson_r2(xs: Sequence[float], ys: Sequence[float]) -> float | None:
-    if len(xs) != len(ys) or len(xs) < 2:
+    if len(xs) != len(ys):
+        raise ValueError("xs and ys length must match")
+    _validate_finite_floats(xs, "xs")
+    _validate_finite_floats(ys, "ys")
+    if len(xs) < 2:
         return None
     mx = sum(xs) / len(xs)
     my = sum(ys) / len(ys)
@@ -3140,8 +3219,19 @@ def diagnose_projection_axis_confound(
     origin_collapse_fraction: float = 0.8,
 ) -> dict[str, Any]:
     """Diagnose whether a projection axis or classifier score tracks source, batch, or coverage (#3095)."""
-    if secondary_axis is not None and len(secondary_axis) != len(axis_values):
-        raise ValueError("secondary_axis length must match axis_values length")
+    _validate_finite_floats(axis_values, "axis_values")
+    if secondary_axis is not None:
+        if len(secondary_axis) != len(axis_values):
+            raise ValueError("secondary_axis length must match axis_values length")
+        _validate_finite_floats(secondary_axis, "secondary_axis")
+    if source is not None and len(source) != len(axis_values):
+        raise ValueError("source length must match axis_values length")
+    if batch is not None and len(batch) != len(axis_values):
+        raise ValueError("batch length must match axis_values length")
+    if coverage is not None:
+        if len(coverage) != len(axis_values):
+            raise ValueError("coverage length must match axis_values length")
+        _validate_finite_floats(coverage, "coverage")
 
     reasons: list[str] = []
     source_r2 = _categorical_eta_squared(axis_values, source) if source is not None else None

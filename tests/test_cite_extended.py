@@ -198,3 +198,76 @@ def test_figure_read_numeric_grounding_guard(tmp_path: Path) -> None:
     )
     res_grounded = verify_citations(grounded_fig_doc, sources_dir, strict_coords=True)
     assert res_grounded.ok is True, res_grounded.errors
+
+
+def test_number_sign_boundaries_punctuation_unicode_minus_and_units(tmp_path: Path) -> None:
+    sources_dir, _ = _make_sources(
+        tmp_path,
+        {
+            "metrics.txt": (
+                "delta = -0.5 and value is 4.\n"
+                "threshold = 1.2e-4 at 4% overhead and 4ms latency.\n"
+                "unicode minus \u22120.75 with 12ms delay and 1.5E-3 drift.\n"
+            )
+        },
+    )
+
+    # Positive 0.5 must NOT match -0.5
+    sign_flip_doc = tmp_path / "sign_flip.md"
+    sign_flip_doc.write_text("Delta reached 0.5 (metrics.txt:1).\n", encoding="utf-8")
+    assert verify_citations(sign_flip_doc, sources_dir, strict_coords=True).ok is False
+
+    # Bare 4 must NOT match 1.2e-4, 4%, or 4ms on line 2
+    context_doc = tmp_path / "context.md"
+    context_doc.write_text("Count was 4 (metrics.txt:2).\n", encoding="utf-8")
+    assert verify_citations(context_doc, sources_dir, strict_coords=True).ok is False
+
+    # Trailing period in source ("value is 4."), Unicode minus, unit spacing, and E-notation case
+    ok_doc = tmp_path / "ok.md"
+    ok_doc.write_text(
+        "Delta was -0.5 and count was 4 (metrics.txt:1).\n"
+        "Unicode -0.75 with 12 ms delay and 1.5e-3 drift (metrics.txt:3).\n",
+        encoding="utf-8",
+    )
+    res = verify_citations(ok_doc, sources_dir, strict_coords=True)
+    assert res.ok is True, res.errors
+
+
+def test_two_column_aligned_tables_inline_abs_and_multiline_caption(tmp_path: Path) -> None:
+    # Aligned whitespace table row & header must not false-positive; inline |x| with wide gutter MUST flag
+    clean_table_lines = [
+        "Method Name    Dataset Name    Accuracy",
+        "Method Name    Dataset Name    0.91",
+    ]
+    assert detect_two_column_interleaving(clean_table_lines) == []
+
+    interleaved_with_abs = [
+        "The norm |x| is bounded above     Right column continues unrelated proof"
+    ]
+    assert len(detect_two_column_interleaving(interleaved_with_abs)) == 1
+
+    # Generic prose "We plot the 3 datasets" must not false-positive; wrapped caption line 2 MUST be caught
+    sources_dir, _ = _make_sources(
+        tmp_path,
+        {
+            "wrapped.txt": (
+                "Figure 2: Training accuracy across learning rates.\n"
+                "Accuracy reaches 73.4% at epoch 10.\n"
+                "\n"
+                "We evaluate 3 datasets in Section 4.\n"
+            )
+        },
+    )
+    prose_plot_doc = tmp_path / "prose_plot.md"
+    prose_plot_doc.write_text("We plot the 3 datasets (wrapped.txt:4).\n", encoding="utf-8")
+    res_prose = verify_citations(prose_plot_doc, sources_dir, strict_coords=True)
+    assert res_prose.ok is True, res_prose.errors
+
+    wrapped_cap_doc = tmp_path / "wrapped_cap.md"
+    wrapped_cap_doc.write_text(
+        "Visually read from Figure 2, accuracy reaches 73.4% (wrapped.txt:2).\n",
+        encoding="utf-8",
+    )
+    res_cap = verify_citations(wrapped_cap_doc, sources_dir, strict_coords=True)
+    assert res_cap.ok is False
+    assert any("figure-read numeric value(s)" in e for e in res_cap.errors)

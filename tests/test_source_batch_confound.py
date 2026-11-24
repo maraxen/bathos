@@ -183,3 +183,73 @@ def test_lint_project_and_stat008_card_wired(tmp_path: Path):
     assert card.applies_when == "has_source_batch_confound_risk"
     assert evaluate_applies_when(card.applies_when, {"has_source_batch_confound_risk": True})
     assert not evaluate_applies_when(card.applies_when, {"has_source_batch_confound_risk": False})
+
+
+def test_open_source_and_single_source_prose_do_not_false_positive(tmp_path: Path):
+    _write_sidecar(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Classifier evaluated on an open-source benchmark and single-source dataset"
+        [outcomes.pass]
+        condition = "auroc > 0.80"
+        decision = "go"
+        [result_schema]
+        auroc = "float"
+        """,
+    )
+    assert check_source_batch_confound(tmp_path) == []
+
+    # Explicit multi-source prose or schema source column still triggers
+    _write_sidecar(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Classifier evaluated across multiple sources"
+        [outcomes.pass]
+        condition = "auroc > 0.80"
+        decision = "go"
+        [result_schema]
+        auroc = "float"
+        """,
+        stem="multi_source_prose",
+    )
+    issues = check_source_batch_confound(tmp_path)
+    assert any(i.issue == "unstratified_projection_or_classifier" for i in issues)
+
+
+def test_generic_breakdown_waive_does_not_silence_stat008(tmp_path: Path):
+    _write_sidecar(
+        tmp_path,
+        """
+        [experiment]
+        hypothesis = "Routing classifier across batches"
+        [breakdown]
+        waive = "single metric"
+        [outcomes.pass]
+        condition = "auroc > 0.70"
+        decision = "go"
+        [result_schema]
+        auroc = "float"
+        batch = "str"
+        """,
+    )
+    issues = check_source_batch_confound(tmp_path)
+    assert any(i.issue == "unstratified_projection_or_classifier" for i in issues)
+
+
+def test_diagnose_projection_axis_confound_rejects_nonfinite_and_mismatched_lengths():
+    with pytest.raises(ValueError, match="finite"):
+        diagnose_projection_axis_confound([1.0, float("nan"), 2.0], source=["a", "a", "b"])
+    with pytest.raises(ValueError, match="finite"):
+        diagnose_projection_axis_confound([1.0, float("inf"), 2.0], coverage=[0.1, 0.2, 0.3])
+    with pytest.raises(ValueError, match="finite"):
+        diagnose_projection_axis_confound([1.0, 2.0], coverage=[0.5, float("nan")])
+    with pytest.raises(ValueError, match="finite"):
+        diagnose_projection_axis_confound([1.0, 2.0], secondary_axis=[0.1, float("-inf")])
+    with pytest.raises(ValueError, match="source length"):
+        diagnose_projection_axis_confound([1.0, 2.0], source=["a"])
+    with pytest.raises(ValueError, match="batch length"):
+        diagnose_projection_axis_confound([1.0, 2.0], batch=["b1"])
+    with pytest.raises(ValueError, match="coverage length"):
+        diagnose_projection_axis_confound([1.0, 2.0], coverage=[0.5])

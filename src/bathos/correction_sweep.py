@@ -194,13 +194,14 @@ def load_corrections(project_root: Path) -> tuple[list[MethodCorrection], list[s
 def _compile_matcher(term: str, *, is_regex: bool) -> re.Pattern[str]:
     if is_regex:
         return re.compile(term, re.IGNORECASE)
-    if _PLAIN_IDENT_RE.match(term):
-        return re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", re.IGNORECASE)
-    # Collapse runs of whitespace so multi-word phrases match across formatting differences.
-    parts = [re.escape(part) for part in term.split()]
-    if len(parts) > 1:
-        return re.compile(r"\s+".join(parts), re.IGNORECASE)
-    return re.compile(re.escape(term), re.IGNORECASE)
+    stripped = term.strip()
+    if not stripped:
+        return re.compile(re.escape(term), re.IGNORECASE)
+    parts = [re.escape(part) for part in stripped.split()]
+    body = r"\s+".join(parts) if len(parts) > 1 else parts[0]
+    prefix = r"(?<![A-Za-z0-9_-])" if re.match(r"^[A-Za-z0-9_]", stripped) else ""
+    suffix = r"(?![A-Za-z0-9_-])" if re.search(r"[A-Za-z0-9_]$", stripped) else ""
+    return re.compile(f"{prefix}{body}{suffix}", re.IGNORECASE)
 
 
 def _iter_spec_dirs(root: Path) -> list[Path]:
@@ -268,9 +269,12 @@ def _extract_toml_fields(data: Any, prefix: str = "") -> list[tuple[str, str]]:
     """Flatten TOML values (plus ``result_schema`` key names) to ``(location, text)`` pairs."""
     out: list[tuple[str, str]] = []
     if isinstance(data, dict):
+        is_schema_scope = prefix == "result_schema" or prefix.startswith(
+            ("result_schema.", "result_schema[")
+        )
         for k, v in data.items():
             loc = f"{prefix}.{k}" if prefix else str(k)
-            if prefix == "result_schema":
+            if is_schema_scope:
                 out.append((f"{loc} (schema key)", str(k)))
             out.extend(_extract_toml_fields(v, loc))
     elif isinstance(data, list):
@@ -283,6 +287,131 @@ def _extract_toml_fields(data: Any, prefix: str = "") -> list[tuple[str, str]]:
     elif isinstance(data, (int, float)):
         out.append((prefix, str(data)))
     return out
+
+
+def _strip_matching_quotes(val: str) -> str:
+    s = val.strip()
+    while len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    return s
+
+
+def _parse_frontmatter_ack_ids(raw: str) -> set[str]:
+    inner = raw.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    acks: set[str] = set()
+    for part in inner.split(","):
+        cleaned = _strip_matching_quotes(part)
+        if cleaned:
+            acks.add(cleaned.lower())
+    return acks
+
+
+def _split_toml_comment(line: str) -> tuple[str, str]:
+    """Split ``line`` into ``(code_part, comment_part)`` respecting TOML quotes."""
+    in_single = False
+    in_double = False
+    escaped = False
+    for idx, ch in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if in_double and ch == "\\":
+            escaped = True
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == "#" and not in_single and not in_double:
+            return line[:idx], line[idx + 1 :]
+    return line, ""
+
+
+def _extract_toml_deliberate_annotations(
+    raw_text: str,
+) -> tuple[set[str], set[str], list[str]]:
+    """Collect dotted keys, section prefixes, and line snippets annotated with deliberate markers."""
+    deliberate_locs: set[str] = set()
+    deliberate_prefixes: set[str] = set()
+    deliberate_snippets: list[str] = []
+    current_section = ""
+    multiline_delim: str | None = None
+    open_key_loc = ""
+
+    for line in raw_text.splitlines():
+        if multiline_delim is not None:
+            has_marker = any(m in line.lower() for m in _INLINE_DELIBERATE_MARKERS)
+            if has_marker and open_key_loc:
+                deliberate_locs.add(open_key_loc)
+            end_pos = line.find(multiline_delim)
+            if end_pos != -1:
+                after = line[end_pos + 3 :]
+                multiline_delim = None
+                if any(m in after.lower() for m in _INLINE_DELIBERATE_MARKERS) and open_key_loc:
+                    deliberate_locs.add(open_key_loc)
+                open_key_loc = ""
+            continue
+
+        code, comment = _split_toml_comment(line)
+        stripped = code.strip()
+        has_marker = bool(comment) and any(
+            m in comment.lower() for m in _INLINE_DELIBERATE_MARKERS
+        )
+
+        # Detect table headers [section] or [[section]]
+        if stripped.startswith("[[") and stripped.endswith("]]"):
+            sec = stripped[2:-2].strip()
+            current_section = sec
+            if has_marker and sec:
+                deliberate_prefixes.add(sec)
+            continue
+        if stripped.startswith("[") and stripped.endswith("]") and "=" not in stripped:
+            sec = stripped[1:-1].strip()
+            current_section = sec
+            if has_marker and sec:
+                deliberate_prefixes.add(sec)
+            continue
+
+        m = re.match(r'^([A-Za-z0-9_-]+|"[^"]+"|\'[^\']+\')\s*=\s*(.*)$', stripped)
+        if m:
+            raw_key = _strip_matching_quotes(m.group(1))
+            rhs = m.group(2).strip()
+            loc = f"{current_section}.{raw_key}" if current_section else raw_key
+            if has_marker:
+                deliberate_locs.add(loc)
+            if rhs.startswith('"""') and rhs.count('"""') == 1:
+                multiline_delim = '"""'
+                open_key_loc = loc
+            elif rhs.startswith("'''") and rhs.count("'''") == 1:
+                multiline_delim = "'''"
+                open_key_loc = loc
+        elif has_marker and stripped:
+            deliberate_snippets.append(stripped)
+
+    return deliberate_locs, deliberate_prefixes, deliberate_snippets
+
+
+def _is_toml_loc_deliberate(
+    loc: str,
+    text_val: str,
+    deliberate_locs: set[str],
+    deliberate_prefixes: set[str],
+    deliberate_snippets: list[str],
+) -> bool:
+    base_loc = loc.removesuffix(" (schema key)")
+    loc_no_idx = re.sub(r"\[\d+\]", "", base_loc)
+    if base_loc in deliberate_locs or loc_no_idx in deliberate_locs:
+        return True
+    for prefix in deliberate_prefixes:
+        if base_loc == prefix or base_loc.startswith(f"{prefix}."):
+            return True
+    if "[" in base_loc and deliberate_snippets:
+        for snippet in deliberate_snippets:
+            if text_val and text_val in snippet:
+                return True
+    return False
 
 
 def _toml_is_acknowledged_or_stale(
@@ -334,7 +463,10 @@ def _parse_text_frontmatter(text: str) -> dict[str, str]:
             break
         m = re.match(r"^([A-Za-z0-9_]+)\s*[:=]\s*(.+)$", stripped)
         if m:
-            meta[m.group(1).lower()] = m.group(2).strip().strip("\"'")
+            raw_val = m.group(2).strip()
+            if not (raw_val.startswith("[") and raw_val.endswith("]")):
+                raw_val = _strip_matching_quotes(raw_val)
+            meta[m.group(1).lower()] = raw_val
     return meta
 
 
@@ -410,16 +542,27 @@ def sweep_corrections(
                 parsed_toml = tomllib.loads(raw_text)
                 if isinstance(parsed_toml, dict):
                     toml_data = parsed_toml
-            except tomllib.TOMLDecodeError:
-                toml_data = None
+            except tomllib.TOMLDecodeError as exc:
+                load_errors.append(f"{rel_posix}: failed to parse TOML: {exc}")
+                continue
+
+        deliberate_locs: set[str] = set()
+        deliberate_prefixes: set[str] = set()
+        deliberate_snippets: list[str] = []
+        if is_toml:
+            deliberate_locs, deliberate_prefixes, deliberate_snippets = (
+                _extract_toml_deliberate_annotations(raw_text)
+            )
 
         frontmatter = {} if is_toml else _parse_text_frontmatter(raw_text)
         spec_inactive = (
             not include_stale
             and frontmatter.get("status", "").lower() in _INACTIVE_SPEC_STATUSES
         )
-        ack_raw = frontmatter.get("correction_ack", "") or frontmatter.get("deliberate", "")
-        text_acks = {s.strip().lower() for s in ack_raw.strip("[]").split(",") if s.strip()}
+        text_acks: set[str] = set()
+        for ack_key in ("correction_ack", "deliberate", "deliberate_assumptions"):
+            if frontmatter.get(ack_key):
+                text_acks.update(_parse_frontmatter_ack_ids(frontmatter[ack_key]))
 
         for corr, matchers in compiled:
             if corr.scope == "sidecars" and artifact_kind != "sidecar":
@@ -435,6 +578,10 @@ def sweep_corrections(
                 seen_hits: set[tuple[str, str]] = set()
                 for loc, text_val in _extract_toml_fields(toml_data):
                     if any(loc.startswith(skip) for skip in _TOML_SKIP_KEY_PREFIXES):
+                        continue
+                    if _is_toml_loc_deliberate(
+                        loc, text_val, deliberate_locs, deliberate_prefixes, deliberate_snippets
+                    ):
                         continue
                     for term, pat, rx in matchers:
                         if rx.search(text_val):

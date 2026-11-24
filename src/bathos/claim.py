@@ -129,6 +129,11 @@ class ClaimFile:
     sha256: str
     decision_scope: dict[str, Any] = field(default_factory=dict)  # debt #2199
     formulation: dict[str, Any] = field(default_factory=dict)  # #3315
+    has_formulation: bool = False
+
+    def __post_init__(self) -> None:
+        if self.formulation:
+            self.has_formulation = True
 
 
 def parse_claim(path: Path) -> ClaimFile:
@@ -187,11 +192,24 @@ def parse_claim(path: Path) -> ClaimFile:
     # Compute SHA256 of file content
     sha256_hex = hashlib.sha256(content).hexdigest()
 
-    raw_formulation = (
-        claim_section["formulation"]
-        if "formulation" in claim_section
-        else data.get("formulation", {})
+    claim_formulation = claim_section.get("formulation")
+    has_nonempty_claim_formulation = "formulation" in claim_section and (
+        bool(claim_formulation)
+        if isinstance(claim_formulation, dict)
+        else claim_formulation is not None
     )
+    if has_nonempty_claim_formulation:
+        raw_formulation = claim_formulation
+        has_explicit_formulation = True
+    elif "formulation" in data:
+        raw_formulation = data["formulation"]
+        has_explicit_formulation = True
+    elif "formulation" in claim_section:
+        raw_formulation = claim_formulation
+        has_explicit_formulation = True
+    else:
+        raw_formulation = {}
+        has_explicit_formulation = False
     formulation: Any = dict(raw_formulation) if isinstance(raw_formulation, dict) else raw_formulation
 
     return ClaimFile(
@@ -208,6 +226,7 @@ def parse_claim(path: Path) -> ClaimFile:
         sha256=sha256_hex,
         decision_scope=decision_scope,
         formulation=formulation,
+        has_formulation=has_explicit_formulation,
     )
 
 
@@ -620,7 +639,7 @@ def validate_claim(
             )
 
     # #3315: validate campaign formulation when attached to claim
-    if claim.formulation:
+    if claim.has_formulation or claim.formulation:
         form_res = validate_claim_formulation(claim, require=True)
         errors.extend(form_res.errors)
         warnings.extend(form_res.warnings)
@@ -636,13 +655,14 @@ def validate_claim_formulation(
 ) -> ValidationResult:
     """Validate campaign formulation requirements attached to a claim (#3315).
 
-    Opt-in by default: when ``formulation`` is None, ``claim.formulation`` is empty,
+    Opt-in by default: when ``formulation`` is None, ``claim.formulation`` is absent/empty,
     and ``require`` is False, returns ``ValidationResult(ok=True)``.
     """
     payload = formulation if formulation is not None else claim.formulation
     has_payload = bool(payload) if isinstance(payload, dict) else payload is not None
+    explicitly_declared = formulation is not None or claim.has_formulation
     if not has_payload:
-        if not require:
+        if not require and not explicitly_declared:
             return ValidationResult(ok=True)
         return ValidationResult(
             ok=False,
@@ -781,25 +801,27 @@ def register_claim(
         raise FileNotFoundError(f"Claim file not found at {abs_path}")
 
     parsed_claim = parse_claim(abs_path)
-    if formulation is not None or parsed_claim.formulation or require_formulation:
-        form_res = validate_claim_formulation(
-            parsed_claim,
-            formulation=formulation,
-            require=True,
-        )
-        if not form_res.ok:
-            from bathos.campaigns import CampaignError
-
-            raise CampaignError(
-                "; ".join(e.message for e in form_res.errors)
-            )
-        event("claim.formulation_validated", campaign_id=campaign_id, claim_path=str(rel_path))
 
     with unit_of_work(catalog_dir):
         try:
             full_id = _resolve_campaign_id(db, campaign_id, catalog_dir=catalog_dir)
         except CampaignError as e:
             raise RuntimeError(f"Campaign not found: {e}") from e
+
+        if (
+            formulation is not None
+            or parsed_claim.has_formulation
+            or parsed_claim.formulation
+            or require_formulation
+        ):
+            form_res = validate_claim_formulation(
+                parsed_claim,
+                formulation=formulation,
+                require=True,
+            )
+            if not form_res.ok:
+                raise CampaignError("; ".join(e.message for e in form_res.errors))
+            event("claim.formulation_validated", campaign_id=full_id, claim_path=str(rel_path))
 
         # Flag on: events only -- the cool->warm ingest is a legacy write (spec "Mode").
         if catalog_dir is not None and not current_mode():

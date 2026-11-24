@@ -358,3 +358,217 @@ label = "Null"
         assert row == ("with_form.claim.toml",)
     finally:
         db.close()
+
+
+def test_empty_claim_formulation_does_not_shadow_and_explicit_empty_table_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # 1. Empty [claim].formulation = {} must NOT shadow top-level [formulation]
+    shadow_claim = tmp_path / "shadow.claim.toml"
+    shadow_claim.write_text(
+        """[claim]
+headline = "Top-level formulation should win"
+kill_condition = "Null holds"
+kill_condition_satisfiable_by_null = false
+formulation = {}
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary effect"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null effect"
+
+[[claim.discriminability]]
+hypothesis_a = "H_primary"
+hypothesis_b = "H_null"
+planned_run_label = "main"
+predicted_outcome = "pass"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_main"
+description = "Main discriminator"
+hypothesis_ids = ["H_primary", "H_null"]
+
+[formulation]
+max_fallbacks = 2
+
+[[formulation.matrix]]
+hypothesis = "H_primary"
+arm = "treatment"
+readout = "accuracy"
+confound_control = "matched_seed"
+
+[[formulation.decision_tree]]
+branch_id = "root"
+condition = "accuracy >= 0.9"
+action = "accept"
+fallback = "halt"
+
+[[formulation.reuse_table]]
+already_done = "baseline_run"
+used_by = "treatment"
+""",
+        encoding="utf-8",
+    )
+    parsed_shadow = parse_claim(shadow_claim)
+    assert parsed_shadow.formulation
+    assert validate_claim(parsed_shadow).ok is True
+
+    # 2. Explicit empty [formulation] block opts into #3315 validation and fails
+    empty_form_claim = tmp_path / "empty_form.claim.toml"
+    empty_form_claim.write_text(
+        """[claim]
+headline = "Explicit empty formulation"
+kill_condition = "Null holds"
+kill_condition_satisfiable_by_null = false
+
+[[hypotheses]]
+id = "H_primary"
+label = "Primary effect"
+
+[[hypotheses]]
+id = "H_null"
+label = "Null effect"
+
+[formulation]
+""",
+        encoding="utf-8",
+    )
+    parsed_empty = parse_claim(empty_form_claim)
+    assert parsed_empty.has_formulation is True
+    val_empty = validate_claim(parsed_empty)
+    assert val_empty.ok is False
+    assert any("formulation" in e.message.lower() for e in val_empty.errors)
+
+    # 3. Nonexistent campaign fails BEFORE validating/emitting formulation telemetry
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "bathos.claim.event",
+        lambda name, **kw: events.append((name, kw)),
+    )
+    db = _setup_claim_db(tmp_path)
+    try:
+        with pytest.raises(RuntimeError, match="Campaign not found"):
+            register_claim(
+                empty_form_claim,
+                "nonexistent-camp",
+                db,
+                tmp_path,
+            )
+        assert not any(name == "claim.formulation_validated" for name, _ in events)
+
+        with pytest.raises(CampaignError, match="formulation"):
+            register_claim(
+                empty_form_claim,
+                "camp-form-001",
+                db,
+                tmp_path,
+            )
+    finally:
+        db.close()
+
+
+def test_formulation_interleaved_fallbacks_depth_terminal_and_placeholders() -> None:
+    # Interleaved next_branch + fallback_to bypassing max_fallbacks=1
+    interleaved = _valid_formulation_dict()
+    interleaved["decision_tree"] = {
+        "max_fallbacks": 1,
+        "branches": [
+            {
+                "branch_id": "b1",
+                "condition": "c1",
+                "action": "a1",
+                "fallback": "fb1",
+                "fallback_to": "b2",
+            },
+            {
+                "branch_id": "b2",
+                "condition": "c2",
+                "action": "a2",
+                "next_branch": "b3",
+                "terminal": True,
+            },
+            {
+                "branch_id": "b3",
+                "condition": "c3",
+                "action": "a3",
+                "fallback": "fb3",
+                "fallback_to": "b4",
+            },
+            {
+                "branch_id": "b4",
+                "condition": "c4",
+                "action": "a4",
+                "fallback": "stop",
+                "terminal": True,
+            },
+        ],
+    }
+    res_interleaved = validate_formulation(interleaved)
+    assert res_interleaved.ok is False
+    assert any("exceeding max_fallbacks=1" in e for e in res_interleaved.errors)
+
+    # Unbounded next_branch chain exceeding max_allowed_depth when max_depth is omitted
+    deep_next = _valid_formulation_dict()
+    deep_next["decision_tree"] = {
+        "max_fallbacks": 1,
+        "branches": [
+            {
+                "branch_id": f"n{i}",
+                "condition": f"c{i}",
+                "action": f"a{i}",
+                "fallback": "stop" if i == 1 else "",
+                "next_branch": f"n{i + 1}" if i < 12 else None,
+                "terminal": i > 1,
+            }
+            for i in range(1, 13)
+        ],
+    }
+    res_deep = validate_formulation(deep_next)
+    assert res_deep.ok is False
+    assert any("max_allowed_depth" in e for e in res_deep.errors)
+
+    # max_depth > max_allowed_depth caught even when max_fallbacks <= max_allowed_depth
+    bad_max_depth = _valid_formulation_dict()
+    bad_max_depth["decision_tree"]["max_depth"] = 50
+    res_bad_depth = validate_formulation(bad_max_depth)
+    assert res_bad_depth.ok is False
+    assert any("max_depth" in e and "exceeds maximum allowed" in e for e in res_bad_depth.errors)
+
+    # max_fallbacks >= 1 with only terminal=True branches and zero fallbacks rejected
+    no_fb = _valid_formulation_dict()
+    no_fb["decision_tree"] = {
+        "max_fallbacks": 1,
+        "branches": [
+            {
+                "branch_id": "only_term",
+                "condition": "c1",
+                "action": "a1",
+                "terminal": True,
+            }
+        ],
+    }
+    res_no_fb = validate_formulation(no_fb)
+    assert res_no_fb.ok is False
+
+    # String "false" for terminal rejected
+    bad_term = _valid_formulation_dict()
+    bad_term["decision_tree"]["branches"][1]["terminal"] = "false"
+    res_term = validate_formulation(bad_term)
+    assert res_term.ok is False
+    assert any("boolean" in e for e in res_term.errors)
+
+    # Placeholder strings (TODO, TBD, ${...}) rejected across matrix, tree, reuse_table
+    placeholder_payload = _valid_formulation_dict()
+    placeholder_payload["matrix"][0]["arm"] = "TODO: pick arm"
+    placeholder_payload["decision_tree"]["branches"][0]["action"] = "TBD"
+    placeholder_payload["reuse_table"][0]["used_by"] = "${TARGET_ARM}"
+    res_ph = validate_formulation(placeholder_payload)
+    assert res_ph.ok is False
+    joined_ph = " | ".join(res_ph.errors)
+    assert "TODO" in joined_ph
+    assert "TBD" in joined_ph
+    assert "${TARGET_ARM}" in joined_ph
