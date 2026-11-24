@@ -2779,5 +2779,104 @@ def parity_lint_store_cmd(source_root: str = "") -> None:
     print(f"OK: no hard-coded parity-store default path in {root}")
 
 
+@parity_app.command(name="validate")
+def parity_validate_cmd(
+    declaration_path: str,
+    *,
+    json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+) -> None:
+    """Validate a ``*.parity.bth.toml`` declaration against WP03a schema/G01/G02 rules."""
+    from bathos.parity.declare import ParityDeclareError, load_parsed_declaration
+    from bathos.parity.schema import validate_declaration
+
+    try:
+        _raw, data = load_parsed_declaration(Path(declaration_path))
+    except ParityDeclareError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    issues = validate_declaration(data)
+    if json_out:
+        print(
+            json.dumps(
+                {
+                    "ok": len(issues) == 0,
+                    "issues": [
+                        {"path": i.path, "code": i.code, "message": i.message} for i in issues
+                    ],
+                },
+                indent=2,
+            )
+        )
+    if issues:
+        if not json_out:
+            for issue in issues:
+                print(f"ERROR: {issue}", file=sys.stderr)
+        raise SystemExit(1)
+    if not json_out:
+        print(f"OK: {declaration_path} valid")
+
+
+@parity_app.command(name="declare")
+def parity_declare_cmd(
+    declaration_path: str,
+    *,
+    parity_store: str = "",
+    json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+) -> None:
+    """Validate a declaration and store its content-addressed blob + HEAD commit."""
+    from bathos.parity.declare import ParityDeclareError, declare_parity_record
+    from bathos.parity.schema import ParityValidationError
+    from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
+
+    try:
+        res = declare_parity_record(
+            declaration_path,
+            parity_store=parity_store or None,
+        )
+    except (
+        ParityDeclareError,
+        ParityValidationError,
+        ParityStoreConfigError,
+        ParityStoreUnavailableError,
+    ) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    payload = {
+        "record_id": res.record_id,
+        "declaration_sha256": res.declaration_sha256,
+        "head_commit": res.head_commit,
+        "blob_path": str(res.blob_path),
+        "is_first_declaration": res.is_first_declaration,
+        "first_declaration_sha256": res.first_declaration_sha256,
+    }
+    if json_out:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"declared {res.record_id}: sha256={res.declaration_sha256[:12]} "
+            f"head={res.head_commit[:12]} blob={res.blob_path}"
+        )
+
+
+@parity_app.command(name="scaffold")
+def parity_scaffold_cmd(
+    record_id: str,
+    *,
+    out: str = "",
+    impl_name: str = "my-tool",
+) -> None:
+    """Generate a starter ``*.parity.bth.toml`` declaration template."""
+    from bathos.parity.schema import render_declaration_scaffold
+
+    text = render_declaration_scaffold(record_id, impl_name=impl_name)
+    if out:
+        Path(out).write_text(text, encoding="utf-8")
+        print(f"wrote {out}")
+    else:
+        print(text, end="")
+
+
 if __name__ == "__main__":
     app()

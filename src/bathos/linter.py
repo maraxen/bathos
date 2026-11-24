@@ -14,7 +14,7 @@ from typing import Any
 import duckdb
 
 from bathos.index import catalog_readable, connect_read
-from bathos.sidecar import columns_referenced, find_sidecar
+from bathos.sidecar import columns_referenced, find_sidecar, is_parity_or_discrepancy_toml
 from bathos.walk import iter_project_files
 
 
@@ -58,8 +58,14 @@ def iter_project_sidecars(root: Path) -> list[Path]:
     `lint.boundary_pruned` event name is preserved rather than taking the shared
     default, so lint's scope reductions stay distinguishable in telemetry from
     compaction's and postmortem lookup's.
+
+    Excludes ``*.parity.bth.toml`` and ``*.discrepancies.bth.toml`` (WP03a).
     """
-    return iter_project_files(root, _SIDECAR_SUFFIX, event_name="lint.boundary_pruned")
+    return [
+        p
+        for p in iter_project_files(root, _SIDECAR_SUFFIX, event_name="lint.boundary_pruned")
+        if not is_parity_or_discrepancy_toml(p)
+    ]
 
 
 _DIR_RULES: dict[str, dict] = {
@@ -462,7 +468,10 @@ def check_novel_or_reproduces_declared(project_root: Path) -> list[LintIssue]:
                 continue
 
             # Skip non-sidecar files
-            if not (script.suffix == ".toml" and script.name.endswith(".bth.toml")):
+            if (
+                not (script.suffix == ".toml" and script.name.endswith(".bth.toml"))
+                or is_parity_or_discrepancy_toml(script)
+            ):
                 continue
 
             # Parse sidecar
@@ -530,7 +539,10 @@ def check_positive_control_missing(project_root: Path) -> list[LintIssue]:
             if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
                 continue
 
-            if not (script.suffix == ".toml" and script.name.endswith(".bth.toml")):
+            if (
+                not (script.suffix == ".toml" and script.name.endswith(".bth.toml"))
+                or is_parity_or_discrepancy_toml(script)
+            ):
                 continue
 
             try:
@@ -594,7 +606,7 @@ def check_aggregate_without_breakdown(project_root: Path) -> list[LintIssue]:
         for script in sorted(dir_path.iterdir()):
             if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
                 continue
-            if not script.name.endswith(".bth.toml"):
+            if not script.name.endswith(".bth.toml") or is_parity_or_discrepancy_toml(script):
                 continue
             try:
                 sidecar = parse_sidecar(script)
@@ -654,7 +666,10 @@ def check_multiple_comparisons(project_root: Path, min_tests: int = 3) -> list[L
         for script in sorted(dir_path.iterdir()):
             if script.name.startswith(".") or script.name.startswith("_") or script.is_dir():
                 continue
-            if not (script.suffix == ".toml" and script.name.endswith(".bth.toml")):
+            if (
+                not (script.suffix == ".toml" and script.name.endswith(".bth.toml"))
+                or is_parity_or_discrepancy_toml(script)
+            ):
                 continue
 
             try:

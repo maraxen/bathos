@@ -3023,9 +3023,24 @@ def near_bound(sidecar: Sidecar, results: dict) -> list[NearBound]:
     return hits
 
 
+PARITY_DECLARATION_SUFFIX = ".parity.bth.toml"
+DISCREPANCY_REGISTER_SUFFIX = ".discrepancies.bth.toml"
+
+
+def is_parity_or_discrepancy_toml(path: Path | str) -> bool:
+    """Return True for parity record declarations or discrepancy registers ending in `.bth.toml`."""
+    name = path.name if isinstance(path, Path) else Path(path).name
+    return name.endswith(PARITY_DECLARATION_SUFFIX) or name.endswith(DISCREPANCY_REGISTER_SUFFIX)
+
+
 def find_sidecar(script_path: Path) -> Path | None:
-    """Return the .bth.toml adjacent to script_path, or None if absent."""
+    """Return the .bth.toml adjacent to script_path, or None if absent.
+
+    Excludes ``*.parity.bth.toml`` and ``*.discrepancies.bth.toml`` (WP03a).
+    """
     candidate = script_path.parent / f"{script_path.stem}.bth.toml"
+    if is_parity_or_discrepancy_toml(candidate):
+        return None
     return candidate if candidate.exists() else None
 
 

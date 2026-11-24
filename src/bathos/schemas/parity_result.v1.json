@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bathos.dev/schemas/parity_result.v1.json",
+  "title": "Bathos Parity Result Schema v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "standard_version",
+    "record_id",
+    "record_sha256",
+    "grader_version",
+    "grade_inputs",
+    "evidence_runs",
+    "cells",
+    "components",
+    "supplementary",
+    "checks_admissibility",
+    "cell_counts",
+    "clauses",
+    "gates",
+    "amendments",
+    "prior_records_on_pair",
+    "bundle_sha256"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "parity_result.v1" },
+    "standard_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "record_id": { "type": "string", "minLength": 1 },
+    "record_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ledger_entry_id": { "type": ["string", "null"] },
+    "grader_version": { "type": "string", "minLength": 1 },
+    "grade_inputs": {
+      "type": "object",
+      "required": ["as_of", "target_revisions", "drift_run_id", "ledger_high_water_mark", "gate_stages", "comparison_backend"]
+    },
+    "evidence_runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["run_id", "outcome", "validity_state", "env_blob_sha256", "declaration_blob_sha256"]
+      }
+    },
+    "cells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "cell_id",
+          "verdict",
+          "overlays",
+          "achieved_kinds",
+          "declared_kind",
+          "metric_values",
+          "n",
+          "tolerance_ref",
+          "evidence_run_ids",
+          "pooling_rule",
+          "cell_evidence_sha256",
+          "input_sha256",
+          "pin_set",
+          "nondegeneracy",
+          "evidence_level",
+          "flags"
+        ],
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": ["pass", "fail", "not_run", "not_covered", "waived", "inconclusive", "contested", "declared_deviation"]
+          }
+        }
+      }
+    },
+    "components": { "type": "array" },
+    "supplementary": { "type": "array" },
+    "checks_admissibility": { "type": "array" },
+    "cell_counts": {
+      "type": "object",
+      "required": [
+        "required",
+        "passing",
+        "by_kind",
+        "not_covered",
+        "waived",
+        "not_run",
+        "declared_deviations",
+        "registry_knobs_non_excluded",
+        "registry_knobs_covered",
+        "unplanned_knobs"
+      ]
+    },
+    "clauses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["clause_id", "kinds", "passing", "required", "axes"],
+        "properties": {
+          "axes": {
+            "type": "object",
+            "required": ["result", "coverage", "assurance", "freshness", "registration"]
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "stage"]
+      }
+    },
+    "amendments": { "type": "array" },
+    "dual_display_result": { "type": ["object", "null"] },
+    "prior_records_on_pair": { "type": "integer", "minimum": 0 },
+    "bundle_sha256": { "type": ["string", "null"] },
+    "badge": {
+      "type": ["object", "null"],
+      "required": ["t0", "t1", "t1_sha256", "t2_sha256"]
+    }
+  }
+}

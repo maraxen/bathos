@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bathos.sidecar import is_parity_or_discrepancy_toml
 from bathos.walk import iter_project_files
 
 _SIDECAR_SUFFIX = ".bth.toml"
@@ -233,7 +234,11 @@ def iter_sweep_artifacts(
         artifacts.append((path, kind))
 
     for sidecar_path in iter_project_files(root, _SIDECAR_SUFFIX, event_name="sweep.boundary_pruned"):
-        if sidecar_path.name == ".bth.toml" or sidecar_path.name.endswith(_LOCK_FILE_SUFFIX):
+        if (
+            sidecar_path.name == ".bth.toml"
+            or sidecar_path.name.endswith(_LOCK_FILE_SUFFIX)
+            or is_parity_or_discrepancy_toml(sidecar_path)
+        ):
             continue
         _add(sidecar_path, "sidecar")
 

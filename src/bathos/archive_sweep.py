@@ -634,7 +634,13 @@ def scan_archive_candidates(
     external_static_refs, script_to_static_refs = _collect_static_script_references(project_root)
 
     # Criterion 1: Stale sidecars ([status] stale = true)
-    sidecar_files = iter_project_files(project_root, ".bth.toml")
+    from bathos.sidecar import is_parity_or_discrepancy_toml
+
+    sidecar_files = [
+        p
+        for p in iter_project_files(project_root, ".bth.toml")
+        if not is_parity_or_discrepancy_toml(p)
+    ]
     for s_path in sidecar_files:
         try:
             sidecar = parse_sidecar(s_path)

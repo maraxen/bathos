@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bathos.dev/schemas/parity_declaration.v1.json",
+  "title": "Bathos Parity Declaration Schema v1",
+  "type": "object",
+  "required": [
+    "parity",
+    "implementation",
+    "reference",
+    "registry",
+    "use",
+    "cell_plan",
+    "environment"
+  ],
+  "properties": {
+    "parity": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "record_id",
+        "prong",
+        "layer_under_test",
+        "instrumentation",
+        "mode",
+        "strictness",
+        "prior_runs",
+        "badge_min_tier"
+      ],
+      "properties": {
+        "schema_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "record_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,80}$" },
+        "prong": { "type": "string", "enum": ["reimplementation", "optimisation", "approximation"] },
+        "layer_under_test": { "type": "string", "enum": ["kernel", "module", "model", "pipeline", "api", "cli"] },
+        "instrumentation": { "type": "string", "enum": ["instrumented", "black_box"] },
+        "mode": { "type": "string", "enum": ["confirmatory", "exploratory"] },
+        "strictness": { "type": "string", "enum": ["inconclusive_blocks", "inconclusive_allowed"] },
+        "prior_runs": { "type": "array", "items": { "type": "string" } },
+        "control": { "type": "boolean" },
+        "badge_min_tier": { "type": "string", "enum": ["smoke", "toy", "production_shape"] },
+        "supersedes": { "type": "string" }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "required": ["name", "repo", "licence"],
+      "not": { "required": ["revision"] },
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "repo": { "type": "string", "minLength": 1 },
+        "licence": { "type": "string", "minLength": 1 },
+        "third_party": { "type": "boolean" }
+      }
+    },
+    "reference": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "kind", "identity", "licence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "enum": ["comparator", "specification"] },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "upstream_live",
+              "sealed_dump",
+              "published_values",
+              "experimental_data",
+              "own_prior_version",
+              "reference_implementation"
+            ]
+          },
+          "identity": { "type": "object" },
+          "licence": { "type": "string", "minLength": 1 },
+          "use_restriction": { "type": "string" },
+          "permitted_use_basis": { "type": "string" }
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "required": ["registry_id", "drift_status_max_age_days"],
+      "properties": {
+        "registry_id": { "type": "string", "minLength": 1 },
+        "drift_status_max_age_days": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "use": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "purpose", "output_type", "quantity", "parity_kind", "metric", "negative_control", "judgement_id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "purpose": { "type": "string", "minLength": 1 },
+          "output_type": { "type": "string", "minLength": 1 },
+          "quantity": { "type": "string", "minLength": 1 },
+          "parity_kind": {
+            "type": "string",
+            "enum": ["bitwise", "within_tolerance", "distributional", "behavioural", "association", "approximate"]
+          },
+          "metric": { "type": "object", "required": ["id", "impl"] },
+          "negative_control": { "type": "object", "required": ["kind", "impl", "expect"] },
+          "judgement_id": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "tolerance": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "dtype", "applies_to", "atol", "rtol", "basis"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "dtype": { "type": "string", "minLength": 1 },
+          "applies_to": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "atol": { "type": "number", "minimum": 0 },
+          "rtol": { "type": "number", "minimum": 0 },
+          "basis": {
+            "type": "string",
+            "enum": ["decomposition_floor", "published_precision", "analytic_bound", "owner_stated", "static_error_bound"]
+          },
+          "floor_multiple": { "type": "number", "exclusiveMinimum": 0 },
+          "basis_evidence": { "type": "object" },
+          "judgement_id": { "type": "string" }
+        }
+      }
+    },
+    "cell_plan": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["use_id", "component_id", "knob_setting", "axis_value", "data_tier", "pairing", "pooling_rule"],
+        "properties": {
+          "use_id": { "type": "string", "minLength": 1 },
+          "component_id": { "type": "string", "minLength": 1 },
+          "knob_setting": {},
+          "axis_value": {},
+          "data_tier": { "type": "string", "enum": ["smoke", "toy", "production_shape"] },
+          "pairing": { "type": "string", "enum": ["fixture", "live"] },
+          "pooling_rule": { "type": "string", "enum": ["all_runs", "per_input"] },
+          "assumptions": { "type": "array", "items": { "type": "string" } },
+          "exploratory": { "type": "boolean" },
+          "incompatibility": { "type": "object" }
+        }
+      }
+    },
+    "waiver": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cell_selector", "reason_code", "reason_text", "judgement_id"]
+      }
+    },
+    "assumption": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "text", "load_bearing", "status"]
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": ["pool_critical", "frameworks"],
+      "properties": {
+        "pool_critical": { "type": "array", "items": { "type": "string" } },
+        "frameworks": {
+          "type": "object",
+          "required": ["ours", "reference"],
+          "properties": {
+            "ours": { "type": "array", "items": { "type": "string" } },
+            "reference": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "amendment": {
+      "type": "object",
+      "required": ["reason", "judgement_id"],
+      "not": { "required": ["results_seen"] }
+    },
+    "holdout": {
+      "type": "object",
+      "required": ["pool", "permutation", "floor"]
+    }
+  }
+}
