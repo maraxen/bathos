@@ -57,6 +57,7 @@ dependencies = [
     # payload models do not rest on an undeclared transitive dependency.
     "pydantic>=2.7",
     "zstandard>=0.25.0",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
@@ -148,6 +149,7 @@ include = [
   "src/bathos/viz/static/VERSIONS.md",
   # `bth plugin install` reads this on wheel installs (no .praxia/ on disk).
   "src/bathos/agent_plugin.json",
+  "src/bathos/schemas/*.json",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
