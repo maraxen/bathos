@@ -1075,7 +1075,7 @@ def link_cool_runs_to_campaigns(
                         )
                     )
                     sidecar_stopping_threshold = sidecar.popper_stopping_threshold
-            except SidecarError:
+            except (SidecarError, ValueError):
                 evalue = None
             is_neutral_outcome = run.outcome in (
                 "error",

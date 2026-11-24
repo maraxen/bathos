@@ -19,7 +19,7 @@
   </thead>
   <tbody>
     {% for campaign in campaigns %}
-    <tr class="run-row" @click="toggleCampaign('{{ campaign.id }}')">
+    <tr class="run-row" data-campaign-id="{{ campaign.id }}" @click="toggleCampaign($el.dataset.campaignId)">
       <td class="font-mono">{{ campaign.id_short }}</td>
       <td><strong>{{ campaign.name }}</strong></td>
       <td>
@@ -40,7 +40,7 @@
       <td>{{ campaign.run_count }}</td>
     </tr>
 
-    <tr x-show="expandedCampaigns['{{ campaign.id }}']" x-cloak>
+    <tr data-campaign-id="{{ campaign.id }}" x-show="expandedCampaigns[$el.dataset.campaignId]" x-cloak>
       <td colspan="6" style="background: #f9fafb;">
         <div class="detail-panel">
           <div class="detail-grid">
@@ -144,7 +144,7 @@
               </div>
               {% if campaign.en_chart_svg %}
               <div style="margin-bottom: 0.75rem;">
-                {{ campaign.en_chart_svg | safe }}
+                {{ campaign.en_chart_svg }}
               </div>
               {% endif %}
               <table style="width: auto; font-size: 0.8rem;">

@@ -2398,6 +2398,24 @@ def _resolve_continuous_stds(spec: ContinuousPopperSpec) -> tuple[float, float]:
     return float(sigma0), float(sigma1)
 
 
+def _equal_std_log_e(x: float, mu0: float, mu1: float, sigma0: float) -> float:
+    """Compute log(e-value) when null and alt standard deviations are equal."""
+    d = (mu1 - mu0) / sigma0
+    z0 = (x - mu0) / sigma0
+    z1 = (x - mu1) / sigma0
+    if d == 0.0:
+        return 0.0
+    if math.isfinite(d) and math.isfinite(z0) and math.isfinite(z1):
+        z_sum = z0 + z1
+        if z_sum == 0.0:
+            return 0.0
+        return 0.5 * d * z_sum
+    mid = mu0 + 0.5 * (mu1 - mu0)
+    if x == mid:
+        return 0.0
+    return 700.0 if (x > mid) == (mu1 > mu0) else -700.0
+
+
 def compute_continuous_evalue(
     spec: ContinuousPopperSpec,
     value: float,
@@ -2425,16 +2443,35 @@ def compute_continuous_evalue(
 
     method = (spec.method or "gaussian").strip().lower()
     if method == "gaussian":
-        log_e = (
-            math.log(sigma0 / sigma1)
-            + ((x - mu0) ** 2) / (2.0 * (sigma0**2))
-            - ((x - mu1) ** 2) / (2.0 * (sigma1**2))
-        )
+        if sigma0 == sigma1:
+            log_e = _equal_std_log_e(x, mu0, mu1, sigma0)
+        else:
+            z0 = (x - mu0) / sigma0
+            z1 = (x - mu1) / sigma1
+            log_scale = math.log(sigma0 / sigma1)
+            if math.isfinite(z0) and math.isfinite(z1):
+                scale = max(abs(z0), abs(z1))
+                if scale <= 1e150:
+                    log_e = log_scale + 0.5 * (z0 * z0 - z1 * z1)
+                else:
+                    u0 = z0 / scale
+                    u1 = z1 / scale
+                    diff = u0 * u0 - u1 * u1
+                    log_e = (
+                        log_scale
+                        if diff == 0.0
+                        else log_scale + 0.5 * scale * (scale * diff)
+                    )
+            elif not math.isfinite(z0) and math.isfinite(z1):
+                log_e = 700.0
+            elif math.isfinite(z0) and not math.isfinite(z1):
+                log_e = -700.0
+            else:
+                log_e = 700.0 if sigma0 < sigma1 else -700.0
     elif method == "subgaussian":
         if sigma0 != sigma1:
             raise ValueError("subgaussian method requires equal null and alt std")
-        lam = (mu1 - mu0) / (sigma0**2)
-        log_e = lam * (x - mu0) - 0.5 * (lam**2) * (sigma0**2)
+        log_e = _equal_std_log_e(x, mu0, mu1, sigma0)
     else:
         raise ValueError(f"Unsupported continuous popper method {method!r}")
 

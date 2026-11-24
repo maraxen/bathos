@@ -124,13 +124,15 @@ def test_estimate_html_size():
     assert size_mb < 10
 
 
-def test_export_html_default_output():
+def test_export_html_default_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Test export_html with default output path."""
+    monkeypatch.chdir(tmp_path)
     run = _make_test_run()
     output_path, warned = export_html([run])
 
     assert output_path == "report.html"
     assert warned is False
+    assert (tmp_path / "report.html").is_file()
 
 
 def test_export_html_custom_output(tmp_path: Path):
@@ -191,3 +193,58 @@ def test_render_html_report_total_run_count():
 
     # Should not error; value is passed to template
     assert "<!DOCTYPE html>" in html
+
+
+def test_render_html_report_escapes_xss_in_fields_and_script_blob():
+    """All campaign/run fields are HTML-escaped and JSON script blob escapes </script> and </head>."""
+    xss_tag = "<script>alert(1)</script>"
+    head_break = "</head><script>alert(2)</script>"
+    attr_break = "x');alert(3);//"
+
+    run = _make_test_run(
+        id=attr_break,
+        command=f"python {head_break}",
+    )
+    run.outcome = xss_tag
+    run.git_branch = xss_tag
+
+    campaign = Campaign(
+        id=attr_break,
+        project_slug="test-project",
+        name=xss_tag,
+        mode="sequential",
+        question=head_break,
+        hypothesis=xss_tag,
+        status="active",
+        started_at="2026-05-21",
+        conclusion=xss_tag,
+        outcome_label=xss_tag,
+    )
+
+    html = render_html_report([run], campaigns=[campaign])
+
+    # Unescaped payload must never appear anywhere in rendered HTML
+    assert "<script>alert(" not in html
+    assert "</head><script>" not in html
+    assert "toggleCampaign('x')" not in html
+    assert "toggleRun('x')" not in html
+    assert "expandedCampaigns['x" not in html
+    assert "expandedRuns['x" not in html
+
+    # Escaped HTML text is present in the body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&lt;/head&gt;&lt;script&gt;alert(2)&lt;/script&gt;" in html
+
+    # JSON blob inside <head> uses \u003c / \u003e escaping and parses cleanly back to originals
+    marker = "window.__BATHOS_DATA__ = "
+    start = html.find(marker)
+    assert start != -1
+    end = html.find("};\n", start)
+    assert end != -1
+    raw_json = html[start + len(marker) : end + 1]
+    assert "<" not in raw_json and ">" not in raw_json and "&" not in raw_json
+    parsed = json.loads(raw_json)
+    assert parsed["runs"][0]["id"] == attr_break
+    assert parsed["runs"][0]["command"] == f"python {head_break}"
+    assert parsed["campaigns"][0]["name"] == xss_tag
+    assert parsed["campaigns"][0]["question"] == head_break

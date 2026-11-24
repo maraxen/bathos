@@ -7,7 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-from jinja2 import Environment, PackageLoader
+from jinja2 import Environment, PackageLoader, select_autoescape
+from markupsafe import Markup
 
 from bathos.campaigns import Campaign
 from bathos.index import catalog_readable
@@ -198,24 +199,36 @@ def render_html_report(
         "catalog_state": catalog_state,
     }
 
-    # Render template
-    env = Environment(loader=PackageLoader("bathos.viz", "templates"))
+    # Serialize data blob safely for inline <script> embedding
+    data_json = (
+        json.dumps(data_blob)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+    # Mark pre-validated inline SVG charts as safe Markup for Jinja2 autoescape
+    for campaign_display in campaign_displays:
+        if campaign_display["en_chart_svg"]:
+            campaign_display["en_chart_svg"] = Markup(campaign_display["en_chart_svg"])
+
+    # Render template with autoescaping enabled
+    env = Environment(
+        loader=PackageLoader("bathos.viz", "templates"),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
     template = env.get_template("index.html")
     html = template.render(
-        alpine_js=alpine_js,
-        pico_css=pico_css,
+        alpine_js=Markup(alpine_js),
+        pico_css=Markup(pico_css),
+        data_json=Markup(data_json),
         catalog_state=catalog_state,
         runs=run_displays,
         campaigns=campaign_displays,
         total_run_count=total_run_count if total_run_count is not None else len(run_displays),
     )
-
-    # Inject data blob into head before </head> tag
-    data_json = json.dumps(data_blob)
-    script_block = (
-        f"\n    <script>\n        window.__BATHOS_DATA__ = {data_json};\n    </script>\n</head>"
-    )
-    html = html.replace("</head>", script_block)
 
     return html
 

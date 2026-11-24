@@ -156,6 +156,30 @@ def project_run(run: Run, campaign_name: str = "") -> RunDisplay:
 
 
 _NEUTRAL_OUTCOMES = frozenset({"error", "unknown", "observed", "invalid_measurement", "invariant_fail"})
+_EN_LOG_MIN = 1e-300
+_EN_LOG_MAX = 1e300
+
+
+def _coerce_positive_finite(raw: Any) -> float | None:
+    """Coerce a raw numeric value to a finite positive float, or return None."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or val <= 0:
+        return None
+    return val
+
+
+def _clamp_en_value(val: float) -> float:
+    """Clamp a positive E_n value symmetrically to [_EN_LOG_MIN, _EN_LOG_MAX]."""
+    if math.isnan(val) or val <= _EN_LOG_MIN:
+        return _EN_LOG_MIN
+    if val >= _EN_LOG_MAX:
+        return _EN_LOG_MAX
+    return val
 
 
 def compute_en_trajectory(points: list[dict[str, Any]]) -> list[EValuePoint]:
@@ -167,15 +191,12 @@ def compute_en_trajectory(points: list[dict[str, Any]]) -> list[EValuePoint]:
     trajectory: list[EValuePoint] = []
     cumulative = 1.0
     for idx, pt in enumerate(points, start=1):
-        raw_e = pt.get("evalue")
-        if raw_e is None or isinstance(raw_e, bool):
-            continue
-        e_val = float(raw_e)
-        if not math.isfinite(e_val) or e_val <= 0:
+        e_val = _coerce_positive_finite(pt.get("evalue"))
+        if e_val is None:
             continue
         outcome = str(pt.get("outcome") or "")
         effective_e = 1.0 if outcome in _NEUTRAL_OUTCOMES else e_val
-        cumulative *= effective_e
+        cumulative = _clamp_en_value(cumulative * effective_e)
         run_id = str(pt.get("run_id") or "")
         seq_pos = pt.get("seq_position")
         seq_num = int(seq_pos) if isinstance(seq_pos, int) and not isinstance(seq_pos, bool) else idx
@@ -193,6 +214,8 @@ def compute_en_trajectory(points: list[dict[str, Any]]) -> list[EValuePoint]:
 
 
 def _fmt_en(val: float) -> str:
+    if not math.isfinite(val):
+        return "inf" if val > 0 else ("-inf" if val < 0 else "nan")
     if val >= 1000 or (0 < val < 0.01):
         return f"{val:.2e}"
     if val >= 10:
@@ -212,25 +235,43 @@ def render_en_chart_svg(
     Includes horizontal reference lines for the null baseline (E = 1.0) and, when set,
     the campaign's stopping threshold. Returns ``""`` when ``trajectory`` is empty.
     """
-    if not trajectory:
+    valid_points: list[tuple[EValuePoint, float]] = []
+    for pt in trajectory:
+        raw_cum = pt.get("cumulative_en")
+        if raw_cum is None or isinstance(raw_cum, bool):
+            continue
+        try:
+            cum_val = float(raw_cum)
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(cum_val) or cum_val <= 0:
+            continue
+        valid_points.append((pt, _clamp_en_value(cum_val)))
+
+    if not valid_points:
         return ""
 
+    svg_width = int(width)
+    svg_height = int(height)
     pad_left = 56
     pad_right = 24
     pad_top = 20
     pad_bottom = 32
-    plot_w = max(width - pad_left - pad_right, 40)
-    plot_h = max(height - pad_top - pad_bottom, 40)
+    plot_w = max(svg_width - pad_left - pad_right, 40)
+    plot_h = max(svg_height - pad_top - pad_bottom, 40)
 
-    vals = [max(pt["cumulative_en"], 1e-12) for pt in trajectory]
-    vals.append(1.0)
+    vals = [cum for _, cum in valid_points]
+    vals.append(_clamp_en_value(1.0))
     has_threshold = (
         stopping_threshold is not None
+        and not isinstance(stopping_threshold, bool)
         and math.isfinite(stopping_threshold)
         and stopping_threshold > 0
     )
+    clamped_threshold: float | None = None
     if has_threshold and stopping_threshold is not None:
-        vals.append(stopping_threshold)
+        clamped_threshold = _clamp_en_value(float(stopping_threshold))
+        vals.append(clamped_threshold)
 
     log_vals = [math.log10(v) for v in vals]
     min_log = min(log_vals)
@@ -244,11 +285,11 @@ def render_en_chart_svg(
         max_log += span * 0.12
 
     def _y_for(val: float) -> float:
-        lv = math.log10(max(val, 1e-12))
+        lv = math.log10(_clamp_en_value(val))
         frac = (lv - min_log) / (max_log - min_log)
         return pad_top + plot_h * (1.0 - frac)
 
-    n_pts = len(trajectory)
+    n_pts = len(valid_points)
 
     def _x_for(idx: int) -> float:
         if n_pts == 1:
@@ -256,7 +297,7 @@ def render_en_chart_svg(
         return pad_left + (idx / (n_pts - 1)) * plot_w
 
     parts: list[str] = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_width} {svg_height}" '
         'role="img" aria-label="E_n sequential trajectory chart" '
         'style="max-width: 100%; height: auto; display: block; background: #ffffff; '
         'border: 1px solid #e5e7eb; border-radius: 0.375rem;">',
@@ -282,8 +323,8 @@ def render_en_chart_svg(
     )
 
     # Stopping threshold reference line
-    if has_threshold and stopping_threshold is not None:
-        y_thr = _y_for(stopping_threshold)
+    if has_threshold and stopping_threshold is not None and clamped_threshold is not None:
+        y_thr = _y_for(clamped_threshold)
         thr_label = _fmt_en(stopping_threshold)
         parts.append(
             f'<line x1="{pad_left}" y1="{y_thr:.2f}" x2="{pad_left + plot_w}" y2="{y_thr:.2f}" '
@@ -301,7 +342,7 @@ def render_en_chart_svg(
             )
 
     # Trajectory polyline
-    coords = [(_x_for(i), _y_for(pt["cumulative_en"])) for i, pt in enumerate(trajectory)]
+    coords = [(_x_for(i), _y_for(cum_val)) for i, (_, cum_val) in enumerate(valid_points)]
     if len(coords) >= 2:
         pts_attr = " ".join(f"{x:.2f},{y:.2f}" for x, y in coords)
         parts.append(
@@ -310,16 +351,17 @@ def render_en_chart_svg(
 
     # Data points with hover tooltips and x-axis step labels
     label_step = max(1, math.ceil(n_pts / 10))
-    for i, (pt, (cx, cy)) in enumerate(zip(trajectory, coords, strict=True)):
+    for i, ((pt, cum_val), (cx, cy)) in enumerate(zip(valid_points, coords, strict=True)):
         met = (
             has_threshold
             and stopping_threshold is not None
-            and pt["cumulative_en"] >= stopping_threshold
+            and cum_val >= stopping_threshold
         )
         fill = "#059669" if met else "#2563eb"
+        e_str = _fmt_en(float(pt["evalue"])) if isinstance(pt.get("evalue"), (int, float)) and not isinstance(pt.get("evalue"), bool) else "—"
         tooltip = (
             f"n={pt['seq_position']} {pt['run_id_short']} ({pt['outcome'] or '—'}): "
-            f"e={_fmt_en(pt['evalue'])}, E_n={_fmt_en(pt['cumulative_en'])}"
+            f"e={e_str}, E_n={_fmt_en(cum_val)}"
         )
         parts.append(
             f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="3.5" fill="{fill}" stroke="#ffffff" stroke-width="1">'
@@ -328,11 +370,12 @@ def render_en_chart_svg(
         if i == 0 or i == n_pts - 1 or (i % label_step == 0):
             parts.append(
                 f'<text x="{cx:.2f}" y="{pad_top + plot_h + 15}" text-anchor="middle" '
-                f'font-size="10" fill="#6b7280" font-family="monospace">{pt["seq_position"]}</text>'
+                f'font-size="10" fill="#6b7280" font-family="monospace">'
+                f"{html.escape(str(pt['seq_position']))}</text>"
             )
 
     parts.append(
-        f'<text x="{pad_left + plot_w / 2:.1f}" y="{height - 4}" text-anchor="middle" '
+        f'<text x="{pad_left + plot_w / 2:.1f}" y="{svg_height - 4}" text-anchor="middle" '
         'font-size="10" fill="#6b7280">Sequential step (n)</text>'
     )
     parts.append("</svg>")
@@ -354,17 +397,31 @@ def project_campaign(campaign: Campaign, aggregates: dict) -> CampaignDisplay:
     stopping_threshold = aggregates.get("stopping_threshold", campaign.stopping_threshold)
     raw_trajectory = aggregates.get("evalue_trajectory") or []
     if raw_trajectory and all("cumulative_en" in pt for pt in raw_trajectory):
-        trajectory: list[EValuePoint] = [
-            EValuePoint(
-                seq_position=int(pt["seq_position"]),
-                run_id=str(pt.get("run_id") or ""),
-                run_id_short=str(pt.get("run_id_short") or str(pt.get("run_id") or "")[:8]),
-                outcome=str(pt.get("outcome") or ""),
-                evalue=float(pt["evalue"]),
-                cumulative_en=float(pt["cumulative_en"]),
+        trajectory: list[EValuePoint] = []
+        for idx, pt in enumerate(raw_trajectory, start=1):
+            e_val = _coerce_positive_finite(pt.get("evalue"))
+            raw_cum = pt.get("cumulative_en")
+            if e_val is None or raw_cum is None or isinstance(raw_cum, bool):
+                continue
+            try:
+                cum_val = float(raw_cum)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(cum_val) or cum_val <= 0:
+                continue
+            seq_pos = pt.get("seq_position")
+            seq_num = int(seq_pos) if isinstance(seq_pos, int) and not isinstance(seq_pos, bool) else idx
+            run_id = str(pt.get("run_id") or "")
+            trajectory.append(
+                EValuePoint(
+                    seq_position=seq_num,
+                    run_id=run_id,
+                    run_id_short=str(pt.get("run_id_short") or run_id[:8]),
+                    outcome=str(pt.get("outcome") or ""),
+                    evalue=e_val,
+                    cumulative_en=_clamp_en_value(cum_val),
+                )
             )
-            for pt in raw_trajectory
-        ]
     else:
         trajectory = compute_en_trajectory(raw_trajectory)
 

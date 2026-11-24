@@ -324,3 +324,144 @@ remediations = ["r1"]
     assert captured
     assert all(name == "sidecar.validate_error" for name, _ in captured)
     assert any(fields["field"] == "hypothesis.rivals" for _, fields in captured)
+
+
+@pytest.mark.parametrize(
+    ("block", "expected_field"),
+    [
+        (
+            """
+            [hypothesis]
+            rivals = ["TODO: add rival"]
+            discriminating_pilot = "pilot"
+            which_source_may_lose = "src"
+            pitfalls = ["p1"]
+            remediations = ["r1"]
+            """,
+            "hypothesis.rivals",
+        ),
+        (
+            """
+            [hypothesis]
+            rivals = ["Rival A"]
+            discriminating_pilot = "TBD"
+            which_source_may_lose = "src"
+            pitfalls = ["p1"]
+            remediations = ["r1"]
+            """,
+            "hypothesis.discriminating_pilot",
+        ),
+        (
+            """
+            [hypothesis]
+            rivals = ["Rival A"]
+            discriminating_pilot = "pilot"
+            which_source_may_lose = "N/A"
+            pitfalls = ["p1"]
+            remediations = ["r1"]
+            """,
+            "hypothesis.which_source_may_lose",
+        ),
+        (
+            """
+            [hypothesis]
+            rivals = ["Rival A"]
+            discriminating_pilot = "pilot"
+            which_source_may_lose = "src"
+            pitfalls = ["FIXME: check drift"]
+            remediations = ["r1"]
+            """,
+            "hypothesis.pitfalls",
+        ),
+        (
+            """
+            [hypothesis]
+            rivals = ["Rival A"]
+            discriminating_pilot = "pilot"
+            which_source_may_lose = "src"
+            pitfalls = ["p1"]
+            remediations = ["<fill remediation>"]
+            """,
+            "hypothesis.remediations",
+        ),
+        (
+            """
+            [hypothesis]
+            rivals = ["Rival A.", "rival a!"]
+            discriminating_pilot = "pilot"
+            which_source_may_lose = "src"
+            pitfalls = ["p1"]
+            remediations = ["r1"]
+            """,
+            "hypothesis.rivals",
+        ),
+        (
+            """
+            [hypothesis]
+            rivals = ["Rival-A", "Rival A"]
+            discriminating_pilot = "pilot"
+            which_source_may_lose = "src"
+            pitfalls = ["p1"]
+            remediations = ["r1"]
+            """,
+            "hypothesis.rivals",
+        ),
+        (
+            """
+            [hypothesis]
+            rivals = ["Active learning cuts sample complexity by 2x vs random sampling."]
+            discriminating_pilot = "pilot"
+            which_source_may_lose = "src"
+            pitfalls = ["p1"]
+            remediations = ["r1"]
+            """,
+            "hypothesis.rivals",
+        ),
+    ],
+)
+def test_hypothesis_rejects_placeholders_and_punct_duplicates(
+    tmp_path: Path, block: str, expected_field: str
+):
+    p = _write_toml(tmp_path, _BASE_EXPERIMENT + "\n" + textwrap.dedent(block))
+    res = validate_sidecar(parse_sidecar(p), sidecar_path=p)
+    assert res.ok is False
+    assert any(e.field == expected_field for e in res.errors), [
+        (e.field, e.message) for e in res.errors
+    ]
+
+
+def test_hypothesis_rejects_placeholder_in_experiment_hypothesis_and_allows_inequalities(tmp_path: Path):
+    p_bad = _write_toml(
+        tmp_path,
+        _BASE_EXPERIMENT.replace(
+            "Active learning cuts sample complexity by 2x vs random sampling",
+            "${HYPOTHESIS}",
+        )
+        + """
+[hypothesis]
+rivals = ["Rival A"]
+discriminating_pilot = "pilot"
+which_source_may_lose = "src"
+pitfalls = ["p1"]
+remediations = ["r1"]
+""",
+    )
+    res_bad = validate_sidecar(parse_sidecar(p_bad), sidecar_path=p_bad)
+    assert res_bad.ok is False
+    assert any(e.field == "hypothesis" for e in res_bad.errors)
+
+    p_ok = _write_toml(
+        tmp_path,
+        _BASE_EXPERIMENT
+        + """
+[hypothesis]
+rivals = ["Baseline reaches loss < 0.5 and accuracy > 0.9 without active sampling"]
+discriminating_pilot = "Check when loss < 0.5 and acc > 0.9 across 10 seeds"
+which_source_may_lose = "random_baseline"
+pitfalls = ["Variance when n < 20 and p > 0.05"]
+remediations = ["Increase n >= 50"]
+""",
+        name="ok_ineq.bth.toml",
+    )
+    res_ok = validate_sidecar(parse_sidecar(p_ok), sidecar_path=p_ok)
+    assert res_ok.ok is True, [e.message for e in res_ok.errors]

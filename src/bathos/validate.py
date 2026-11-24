@@ -1015,6 +1015,27 @@ def _record_validation_error(
         )
 
 
+_HYPOTHESIS_PLACEHOLDER_RE = re.compile(
+    r"\$\{|"
+    r"\b(?:TODO|TBD|FIXME)\b|"
+    r"\bN/A\b|"
+    r"<(?:\.\.\.|[A-Za-z_](?:[A-Za-z0-9_.: -]*[A-Za-z0-9_.])?)>",
+    re.IGNORECASE,
+)
+
+
+def _find_hypothesis_placeholder(text: str) -> str | None:
+    """Return the matched placeholder token if ``text`` contains an unfilled placeholder."""
+    match = _HYPOTHESIS_PLACEHOLDER_RE.search(text)
+    return match.group(0) if match else None
+
+
+def _normalize_hypothesis_text(text: str) -> str:
+    """Normalize whitespace, case, and punctuation for hypothesis/rival deduplication."""
+    stripped_punct = re.sub(r"[^\w\s]", " ", text)
+    return " ".join(stripped_punct.split()).lower()
+
+
 def validate_hypothesis_block(
     sidecar: Sidecar,
     sidecar_path: Path | None = None,
@@ -1064,6 +1085,16 @@ def validate_hypothesis_block(
             "hypothesis",
             "[experiment].hypothesis (or question) must be non-empty when [hypothesis] is declared",
         )
+    else:
+        primary_source = sidecar.hypothesis.strip() or (sidecar.question or "").strip()
+        if _find_hypothesis_placeholder(primary_source) is not None:
+            _record_validation_error(
+                errors,
+                sidecar_path,
+                "hypothesis",
+                f"unfilled template placeholder in [experiment].hypothesis {primary_source!r}: "
+                "placeholder must be filled in before the sidecar is valid",
+            )
 
     if "rivals" not in spec.malformed_fields:
         if not spec.rivals:
@@ -1075,7 +1106,7 @@ def validate_hypothesis_block(
             )
         else:
             seen_rivals: set[str] = set()
-            primary_norm = " ".join(sidecar.hypothesis.split()).lower()
+            primary_norm = _normalize_hypothesis_text(sidecar.hypothesis)
             for idx, rival in enumerate(spec.rivals):
                 if not isinstance(rival, str) or not rival.strip():
                     _record_validation_error(
@@ -1085,15 +1116,23 @@ def validate_hypothesis_block(
                         f"[hypothesis].rivals[{idx}] must be a non-empty string",
                     )
                     break
-                if "${" in rival:
+                if _find_hypothesis_placeholder(rival) is not None:
                     _record_validation_error(
                         errors,
                         sidecar_path,
                         "hypothesis.rivals",
                         f"unfilled template placeholder in hypothesis.rivals[{idx}] {rival!r}: "
-                        "template '${...}' must be filled in before the sidecar is valid",
+                        "placeholder must be filled in before the sidecar is valid",
                     )
-                norm = " ".join(rival.split()).lower()
+                norm = _normalize_hypothesis_text(rival)
+                if not norm:
+                    _record_validation_error(
+                        errors,
+                        sidecar_path,
+                        "hypothesis.rivals",
+                        f"[hypothesis].rivals[{idx}] must contain non-punctuation text",
+                    )
+                    continue
                 if primary_norm and norm == primary_norm:
                     _record_validation_error(
                         errors,
@@ -1123,13 +1162,13 @@ def validate_hypothesis_block(
                 f"hypothesis.{field_key}",
                 f"[hypothesis].{field_key} must be a non-empty string",
             )
-        elif "${" in val:
+        elif _find_hypothesis_placeholder(val) is not None:
             _record_validation_error(
                 errors,
                 sidecar_path,
                 f"hypothesis.{field_key}",
                 f"unfilled template placeholder in hypothesis.{field_key} {val!r}: "
-                "template '${...}' must be filled in before the sidecar is valid",
+                "placeholder must be filled in before the sidecar is valid",
             )
 
     for list_key, items in (("pitfalls", spec.pitfalls), ("remediations", spec.remediations)):
@@ -1152,13 +1191,13 @@ def validate_hypothesis_block(
                     f"[hypothesis].{list_key}[{idx}] must be a non-empty string",
                 )
                 break
-            if "${" in item:
+            if _find_hypothesis_placeholder(item) is not None:
                 _record_validation_error(
                     errors,
                     sidecar_path,
                     f"hypothesis.{list_key}",
                     f"unfilled template placeholder in hypothesis.{list_key}[{idx}] {item!r}: "
-                    "template '${...}' must be filled in before the sidecar is valid",
+                    "placeholder must be filled in before the sidecar is valid",
                 )
 
     if (

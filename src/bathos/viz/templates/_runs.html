@@ -58,7 +58,7 @@
   </thead>
   <tbody>
     {% for run in runs %}
-    <tr class="run-row" @click="toggleRun('{{ run.id }}')">
+    <tr class="run-row" data-run-id="{{ run.id }}" @click="toggleRun($el.dataset.runId)">
       <td class="font-mono">{{ run.id_short }}</td>
       <td>{{ run.project_slug or '—' }}</td>
       <td>{{ status_badge(run.status) }}</td>
@@ -68,7 +68,7 @@
       <td class="font-mono">{{ run.git_branch or '—' }}</td>
       <td class="font-mono">{{ run.timestamp }}</td>
     </tr>
-    <tr x-show="expandedRuns['{{ run.id }}']" x-cloak class="detail-row">
+    <tr data-run-id="{{ run.id }}" x-show="expandedRuns[$el.dataset.runId]" x-cloak class="detail-row">
       <td colspan="8">
         {% include '_run_detail.html' %}
       </td>

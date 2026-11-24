@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>bathos — experiment catalog</title>
   <style>[x-cloak] { display: none !important; }</style>
-  <style>{{ pico_css | safe }}</style>
+  <style>{{ pico_css }}</style>
   <style>
     :root {
       --bathos-nav-bg: #1a1a2e;
@@ -106,6 +106,9 @@
       .detail-grid { grid-template-columns: 1fr; }
     }
   </style>
+  <script>
+      window.__BATHOS_DATA__ = {{ data_json }};
+  </script>
 </head>
 <body x-data="bathosApp()" x-init="init()">
 
@@ -136,7 +139,7 @@
     </div>
   </main>
 
-  <script>{{ alpine_js | safe }}</script>
+  <script>{{ alpine_js }}</script>
   <script>
     function bathosApp() {
       return {

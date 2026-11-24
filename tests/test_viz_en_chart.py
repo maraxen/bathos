@@ -201,3 +201,94 @@ stopping_threshold = 20.0
     # render_html_report also works cleanly directly
     rendered = render_html_report(runs, campaigns=[seq_campaign], catalog_dir=cat_dir)
     assert "Null (E=1.0)" in rendered
+
+
+def test_en_trajectory_clamps_overflow_underflow_and_non_finite_svg():
+    """Overflow/underflow/NaN/<=0 E_n values never emit nan/inf SVG coordinates and escape XSS."""
+    # Overflow and underflow in compute_en_trajectory
+    overflow_traj = compute_en_trajectory(
+        [
+            {"seq_position": 1, "run_id": "a1", "outcome": "pass", "evalue": 1e200},
+            {"seq_position": 2, "run_id": "a2", "outcome": "pass", "evalue": 1e200},
+        ]
+    )
+    assert len(overflow_traj) == 2
+    assert overflow_traj[1]["cumulative_en"] > 0
+    assert overflow_traj[1]["cumulative_en"] < float("inf")
+
+    underflow_traj = compute_en_trajectory(
+        [
+            {"seq_position": 1, "run_id": "b1", "outcome": "fail", "evalue": 1e-200},
+            {"seq_position": 2, "run_id": "b2", "outcome": "fail", "evalue": 1e-200},
+        ]
+    )
+    assert len(underflow_traj) == 2
+    assert underflow_traj[1]["cumulative_en"] > 0
+
+    # render_en_chart_svg rejects NaN/<=0, clamps inf, clamps extreme thresholds symmetrically, escapes text
+    xss_traj: list[dict] = [
+        {
+            "seq_position": 1,
+            "run_id": "id<script>",
+            "run_id_short": "id<scr",
+            "outcome": "<img onerror=alert(1)>",
+            "evalue": 2.0,
+            "cumulative_en": float("inf"),
+        },
+        {
+            "seq_position": 2,
+            "run_id": "bad_nan",
+            "run_id_short": "bad_nan",
+            "outcome": "pass",
+            "evalue": 1.0,
+            "cumulative_en": float("nan"),
+        },
+        {
+            "seq_position": 3,
+            "run_id": "bad_zero",
+            "run_id_short": "bad_zero",
+            "outcome": "pass",
+            "evalue": 1.0,
+            "cumulative_en": 0.0,
+        },
+    ]
+    svg = render_en_chart_svg(xss_traj, stopping_threshold=1e-20)  # type: ignore[arg-type]
+    assert "<svg " in svg
+    assert 'y="nan"' not in svg and 'cy="nan"' not in svg
+    assert 'y="inf"' not in svg and 'cy="inf"' not in svg
+    assert "nan," not in svg and ",nan" not in svg
+    assert "<script>" not in svg and "<img " not in svg
+    assert "&lt;img onerror=alert(1)&gt;" in svg
+
+    # All-invalid points return empty string
+    assert render_en_chart_svg([{"seq_position": 1, "run_id": "x", "run_id_short": "x", "outcome": "pass", "evalue": 1.0, "cumulative_en": float("nan")}]) == ""  # type: ignore[arg-type]
+
+    # project_campaign filters invalid pre-computed trajectory points and clamps +inf
+    campaign = Campaign(
+        id="c1",
+        project_slug="proj",
+        name="Precomputed Edge",
+        mode="sequential",
+        stopping_threshold=20.0,
+    )
+    display = project_campaign(
+        campaign,
+        {
+            "run_count": 3,
+            "outcome_distribution": {"pass": 3},
+            "residual_rate": 0.0,
+            "bypass_rate": 0.0,
+            "unknown_rate": 0.0,
+            "anomalies": [],
+            "evalue_trajectory": [
+                {"seq_position": 1, "run_id": "r1", "outcome": "pass", "evalue": 2.0, "cumulative_en": float("nan")},
+                {"seq_position": 2, "run_id": "r2", "outcome": "pass", "evalue": 2.0, "cumulative_en": -5.0},
+                {"seq_position": 3, "run_id": "r3", "outcome": "pass", "evalue": 1e200, "cumulative_en": float("inf")},
+            ],
+        },
+    )
+    assert len(display["evalue_trajectory"]) == 1
+    assert display["final_en"] is not None
+    assert display["final_en"] > 0 and display["final_en"] < float("inf")
+    assert 'cy="nan"' not in display["en_chart_svg"]
+    assert 'cy="inf"' not in display["en_chart_svg"]

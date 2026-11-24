@@ -299,3 +299,99 @@ def test_campaigns_sequential_continuous_evalues_warm_and_compact(tmp_path: Path
         assert linked[0] == pytest.approx(math.exp(2.0), rel=1e-6)
     finally:
         db2.close()
+
+
+def test_compute_continuous_evalue_numerical_extremes_and_fallbacks(tmp_path: Path, tmp_catalog: Path):
+    """Boundary tests: std=1e-200, x=1e200, heteroscedastic, subgaussian mismatch, discrete fallback, and compact."""
+    # Tiny std (1e-200) must not underflow sigma0**2 to 0.0 -> ZeroDivisionError
+    for method in ("gaussian", "subgaussian"):
+        tiny_spec = ContinuousPopperSpec(
+            metric="x", null_mean=0.0, alt_mean=1e-200, std=1e-200, method=method
+        )
+        val = compute_continuous_evalue(tiny_spec, 1e-200)
+        assert val == pytest.approx(math.exp(0.5))
+
+    # Huge x (1e200) must not raise OverflowError or produce NaN
+    for spec in (
+        ContinuousPopperSpec(metric="x", null_mean=0.0, alt_mean=1.0, std=1.0, method="gaussian"),
+        ContinuousPopperSpec(metric="x", null_mean=0.0, alt_mean=1.0, std=1.0, method="subgaussian"),
+        ContinuousPopperSpec(
+            metric="x", null_mean=0.0, alt_mean=1.0, null_std=1.0, alt_std=2.0, method="gaussian"
+        ),
+        ContinuousPopperSpec(
+            metric="x", null_mean=0.0, alt_mean=1.0, null_std=2.0, alt_std=1.0, method="gaussian"
+        ),
+    ):
+        hi = compute_continuous_evalue(spec, 1e200)
+        lo = compute_continuous_evalue(spec, -1e200)
+        assert math.isfinite(hi) and hi > 0
+        assert math.isfinite(lo) and lo > 0
+
+    # Subgaussian rejects unequal null_std != alt_std
+    bad_sg = ContinuousPopperSpec(
+        metric="x", null_mean=0.0, alt_mean=1.0, null_std=0.1, alt_std=0.2, method="subgaussian"
+    )
+    with pytest.raises(ValueError, match="equal null and alt std"):
+        compute_continuous_evalue(bad_sg, 0.5)
+
+    # compute_evalue falls back to discrete when metric is missing or None/NaN/bool
+    sc = Sidecar(
+        kind=SidecarKind.EXPERIMENT,
+        result_schema={"score": "float"},
+        outcomes={
+            "pass": OutcomeSpec(condition="score >= 0.6", decision="ship", reasoning="ok"),
+            "fail": OutcomeSpec(
+                condition="score < 0.6", decision="stop", reasoning="bad", is_residual=True
+            ),
+        },
+        hypothesis="h",
+        popper_null_pass_rate=0.25,
+        popper_alt_pass_rate=0.75,
+        popper_continuous=ContinuousPopperSpec(
+            metric="score", null_mean=0.5, alt_mean=0.7, std=0.1, method="gaussian"
+        ),
+    )
+    for bad_rv in ({}, {"score": None}, {"score": float("nan")}, {"score": True}, {"score": False}):
+        assert compute_evalue(sc, "pass", result_values=bad_rv) == pytest.approx(3.0)
+
+    # link_cool_runs_to_campaigns catches ValueError from malformed [popper.continuous] without aborting
+    bad_sidecar = _write_toml(
+        tmp_path,
+        _CONT_SIDECAR.replace("std = 0.1", "std = -0.5"),
+        name="bad_cont.bth.toml",
+    )
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    db = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        c = create_campaign(db, name="Bad Cont Cool", project_slug="test", mode="sequential")
+    finally:
+        db.close()
+
+    bad_run = Run(
+        project_slug="test",
+        command="python x.py",
+        argv=["python", "x.py"],
+        git_hash="abc",
+        git_branch="main",
+        git_dirty=False,
+        status="completed",
+        exit_code=0,
+        outcome="pass",
+        sidecar_path=str(bad_sidecar),
+        campaign_id=c.id,
+        metadata=json.dumps({"score": 0.7}),
+    )
+    write_run(bad_run, tmp_catalog)
+    compact(tmp_catalog)
+    db2 = duckdb.connect(str(tmp_catalog / "bathos.db"))
+    try:
+        link_cool_runs_to_campaigns(db2, [bad_run], catalog_dir=tmp_catalog, campaign_id=c.id)
+        row = db2.execute(
+            "SELECT evalue FROM campaign_runs WHERE campaign_id = ? AND run_id = ?",
+            [c.id, bad_run.id],
+        ).fetchone()
+        assert row is not None
+        assert row[0] is None
+    finally:
+        db2.close()
