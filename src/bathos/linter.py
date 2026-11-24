@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import fnmatch
+import math
 import re
 import tomllib
+from collections.abc import Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
@@ -413,8 +415,15 @@ def lint_project(project_root: Path) -> list[LintIssue]:
         issues.extend(check_unmeasured_data_quality_claims(project_root))
         issues.extend(check_factor_coverage_lint(project_root))
 
+        # Unit of independence (#3094) and source/batch confound (#3095) checks
+        issues.extend(check_unit_of_independence(project_root))
+        issues.extend(check_source_batch_confound(project_root))
+
         # Step-back review records lint
         issues.extend(check_stepback_reviews(project_root))
+
+    # Landed method-correction sweep (#3099)
+    issues.extend(check_correction_sweep(project_root))
 
     # AC-06 (#2199): wire check_single_cell_gate into lint_project when a project catalog exists
     issues.extend(_lint_single_cell_campaigns(project_root))
@@ -2610,4 +2619,619 @@ def check_stepback_reviews(project_root: Path) -> list[LintIssue]:
                     )
                 )
 
+    return issues
+
+
+def _iter_parsed_toml_sidecars(project_root: Path) -> Iterator[tuple[Path, dict[str, Any]]]:
+    """Yield ``(sidecar_path, data)`` for every parseable ``*.bth.toml`` under ``project_root``."""
+    for sidecar_path in iter_project_sidecars(project_root):
+        if sidecar_path.name == ".bth.toml":
+            continue
+        try:
+            data = tomllib.loads(sidecar_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            yield sidecar_path, data
+
+
+def _collect_schema_keys(schema: Any, prefix: str = "") -> set[str]:
+    """Collect top-level and dotted leaf names from a raw ``[result_schema]`` dict."""
+    if not isinstance(schema, dict):
+        return set()
+    keys: set[str] = set()
+    for key, val in schema.items():
+        dotted = f"{prefix}.{key}" if prefix else str(key)
+        keys.add(dotted)
+        if isinstance(val, dict):
+            keys.update(_collect_schema_keys(val, dotted))
+    return keys
+
+
+def _collect_sidecar_expressions(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """Collect ``(location, sql_condition)`` pairs from outcomes, invariants, and sanity."""
+    exprs: list[tuple[str, str]] = []
+    outcomes = data.get("outcomes")
+    if isinstance(outcomes, dict):
+        for label, spec in outcomes.items():
+            if not isinstance(spec, dict):
+                continue
+            cond = spec.get("condition")
+            if isinstance(cond, str) and cond.strip():
+                exprs.append((f"outcomes.{label}.condition", cond))
+            adv = spec.get("adversarial_check")
+            if isinstance(adv, str) and adv.strip():
+                exprs.append((f"outcomes.{label}.adversarial_check", adv))
+
+    invariants = data.get("invariants")
+    if isinstance(invariants, dict):
+        for name, spec in invariants.items():
+            if isinstance(spec, dict) and isinstance(spec.get("condition"), str):
+                exprs.append((f"invariants.{name}.condition", spec["condition"]))
+
+    sanity = data.get("sanity")
+    if isinstance(sanity, dict):
+        assertions = sanity.get("assertions")
+        if isinstance(assertions, dict):
+            for name, spec in assertions.items():
+                if isinstance(spec, dict) and isinstance(spec.get("condition"), str):
+                    exprs.append((f"sanity.assertions.{name}.condition", spec["condition"]))
+        for name, spec in sanity.items():
+            if name in ("argv_suffix", "assertions"):
+                continue
+            if isinstance(spec, dict) and isinstance(spec.get("condition"), str):
+                exprs.append((f"sanity.{name}.condition", spec["condition"]))
+
+    observe = data.get("observe")
+    if isinstance(observe, dict):
+        obs_sanity = observe.get("sanity")
+        if isinstance(obs_sanity, list):
+            for idx, item in enumerate(obs_sanity):
+                if isinstance(item, str) and item.strip():
+                    exprs.append((f"observe.sanity[{idx}]", item))
+    return exprs
+
+
+def _collect_sidecar_prose(data: dict[str, Any]) -> str:
+    """Concatenate prose fields (excluding ``outcomes.*.source`` citation metadata)."""
+    parts: list[str] = []
+    for section_name in ("experiment", "benchmark", "validation", "debug"):
+        sec = data.get(section_name)
+        if isinstance(sec, dict):
+            for field_name in (
+                "hypothesis",
+                "question",
+                "property",
+                "reference",
+                "symptom",
+                "suspected_cause",
+                "verification",
+            ):
+                val = sec.get(field_name)
+                if isinstance(val, str) and val.strip():
+                    parts.append(val)
+    outcomes = data.get("outcomes")
+    if isinstance(outcomes, dict):
+        for spec in outcomes.values():
+            if isinstance(spec, dict):
+                for field_name in ("decision", "reasoning"):
+                    val = spec.get(field_name)
+                    if isinstance(val, str) and val.strip():
+                        parts.append(val)
+    return " \n ".join(parts)
+
+
+# ── #3094: Unit of independence ──────────────────────────────────────────────
+
+_REPLICA_UNIT_RE = re.compile(
+    r"\b(?:n_?replicas?|replicas?|n_?seeds?|seeds?|pooled_\w+)\b",
+    re.IGNORECASE,
+)
+_REPLICA_PROSE_RE = re.compile(
+    r"\b(?:replicas?|replicates?|n_replicas|n_seeds|seed\s+replicates?|"
+    r"pool(?:ed|ing)\s+(?:across|replicas?|trajectories|seeds?))\b",
+    re.IGNORECASE,
+)
+_PER_REPLICA_CONVERGENCE_RE = re.compile(
+    r"\b(?:per_replica_converg\w*|within_replica_converg\w*|replica_converg\w*|"
+    r"all_replicas_converg\w*|every_replica_converg\w*|min_replica_converg\w*|"
+    r"per_seed_converg\w*|within_seed_converg\w*|seed_converg\w*|all_seeds_converg\w*)\b",
+    re.IGNORECASE,
+)
+_PER_REPLICA_CONVERGENCE_PROSE_RE = re.compile(
+    r"\b(?:per[- ]replica\s+convergence|within[- ]replica\s+convergence|"
+    r"each\s+replica\s+(?:must\s+)?converge)\b",
+    re.IGNORECASE,
+)
+_GENERIC_CONVERGED_RE = re.compile(r"\b(?:is_)?converged\b", re.IGNORECASE)
+_REPLICA_SPLIT_NULL_RE = re.compile(
+    r"\b(?:replica_split_null\w*|split_replica_null\w*|per_replica_null\w*|within_replica_null\w*|"
+    r"replica_shuffle_null\w*|within_replica_shuffle\w*|slip_shift_null\w*)\b",
+    re.IGNORECASE,
+)
+_REPLICA_SPLIT_NULL_PROSE_RE = re.compile(
+    r"\b(?:replica[- ]split\s+null|per[- ]replica\s+null|within[- ]replica\s+(?:null|shuffle))\b",
+    re.IGNORECASE,
+)
+_REPLICA_SPREAD_RE = re.compile(
+    r"\b(?:replica_spread|between_replica_spread|between_replica_std|between_replica_sem|"
+    r"replica_std|replica_sem|replica_se|replica_err|replica_ci|"
+    r"seed_spread|between_seed_std|seed_std|seed_sem|seed_se)\b",
+    re.IGNORECASE,
+)
+_SEEDS_AS_N_RE = re.compile(
+    r"(?:sqrt\s*\(\s*n_(?:seeds|replicas)\s*\)|"
+    r"\bn_(?:seeds|replicas)\s*(?:>=|>|<=|<|==|=)\s*\d+|"
+    r"\bn_eff\s*=\s*n_(?:seeds|replicas)\b)",
+    re.IGNORECASE,
+)
+_NEGATED_ANTI_PATTERN_RE = re.compile(
+    r"(?:avoid|no|not|without|drop|dropped|never|instead\s+of)\s+[^.;\n]{0,40}$",
+    re.IGNORECASE,
+)
+
+
+def _has_unnegated_prose_match(prose: str, pattern: re.Pattern[str]) -> bool:
+    for m in pattern.finditer(prose):
+        prefix = prose[max(0, m.start() - 48) : m.start()]
+        if not _NEGATED_ANTI_PATTERN_RE.search(prefix):
+            return True
+    return False
+
+
+def _extract_unit_of_independence(data: dict[str, Any], schema_keys: set[str], prose: str) -> tuple[str, bool]:
+    """Return ``(declared_unit, explicitly_waived)`` from sidecar tables."""
+    for tbl_name in ("breakdown", "independence", "pooling", "units"):
+        tbl = data.get(tbl_name)
+        if isinstance(tbl, dict):
+            waive = tbl.get("waive")
+            if isinstance(waive, str) and waive.strip():
+                return "", True
+
+    for tbl_name in ("independence", "pooling", "units", "breakdown", "holdout"):
+        tbl = data.get(tbl_name)
+        if isinstance(tbl, dict):
+            for key in ("unit", "unit_of_independence", "pooling_unit", "bootstrap_unit"):
+                val = tbl.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip(), False
+
+    exp = data.get("experiment")
+    if isinstance(exp, dict):
+        for key in ("unit_of_independence", "pooling_unit", "bootstrap_unit"):
+            val = exp.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip(), False
+
+    schema_lower = {k.lower() for k in schema_keys}
+    if any("block_bootstrap" in k or "bootstrap_unit" in k or "pooling_unit" in k for k in schema_lower):
+        return "block_bootstrap", False
+    if re.search(r"\bblock[- ]bootstrap\b", prose, re.IGNORECASE):
+        return "block_bootstrap", False
+    return "", False
+
+
+def _non_exchangeable_justified(data: dict[str, Any], prose: str) -> bool:
+    for tbl_name in ("independence", "pooling", "units", "experiment"):
+        tbl = data.get(tbl_name)
+        if isinstance(tbl, dict) and tbl.get("exchangeable") is False:
+            return True
+    return bool(
+        re.search(
+            r"\b(?:non[- ]exchangeable|distinct\s+starting|different\s+starting)\b",
+            prose,
+            re.IGNORECASE,
+        )
+    )
+
+
+def assess_unit_of_independence_sidecar(data: dict[str, Any], sidecar_path: Path) -> list[LintIssue]:
+    """Evaluate one parsed sidecar dict for STAT-007 unit-of-independence risks (#3094)."""
+    schema_keys = _collect_schema_keys(data.get("result_schema"))
+    exprs = _collect_sidecar_expressions(data)
+    prose = _collect_sidecar_prose(data)
+    declared_unit, waived = _extract_unit_of_independence(data, schema_keys, prose)
+    if waived:
+        return []
+
+    directory = sidecar_path.parent.name or "sidecar"
+    schema_joined = " ".join(sorted(schema_keys))
+    expr_joined = " ".join(expr for _, expr in exprs)
+    has_replica_context = bool(
+        _REPLICA_UNIT_RE.search(schema_joined)
+        or _REPLICA_UNIT_RE.search(expr_joined)
+        or _REPLICA_PROSE_RE.search(prose)
+    )
+
+    issues: list[LintIssue] = []
+
+    # 1. Per-replica convergence gates
+    conv_hit = _PER_REPLICA_CONVERGENCE_RE.search(schema_joined) or _PER_REPLICA_CONVERGENCE_RE.search(
+        expr_joined
+    )
+    generic_conv_hit = bool(
+        has_replica_context
+        and (
+            _GENERIC_CONVERGED_RE.search(expr_joined)
+            or any(_GENERIC_CONVERGED_RE.search(k) and "pooled" not in k.lower() for k in schema_keys)
+        )
+    )
+    if conv_hit or generic_conv_hit or _has_unnegated_prose_match(prose, _PER_REPLICA_CONVERGENCE_PROSE_RE):
+        issues.append(
+            LintIssue(
+                path=sidecar_path,
+                directory=directory,
+                issue="per_replica_convergence_gate",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    "sidecar gates on per-replica convergence; simulation replicates are partial "
+                    "samples of one ensemble and should be pooled rather than gated individually "
+                    "(rule STAT-007)"
+                ),
+            )
+        )
+
+    # 2. Replica-split nulls
+    if (
+        _REPLICA_SPLIT_NULL_RE.search(schema_joined)
+        or _REPLICA_SPLIT_NULL_RE.search(expr_joined)
+        or _has_unnegated_prose_match(prose, _REPLICA_SPLIT_NULL_PROSE_RE)
+    ):
+        issues.append(
+            LintIssue(
+                path=sidecar_path,
+                directory=directory,
+                issue="replica_split_null",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    "sidecar uses a replica-split / within-replica shuffle null; pool exchangeable "
+                    "replicas at the true unit of independence or waive with non-exchangeability "
+                    "reason (rule STAT-007)"
+                ),
+            )
+        )
+
+    # 3. Replica-spread error bars / seeds treated as n
+    has_pooled_se_and_unit = bool(
+        declared_unit
+        and any("pooled_se" in k.lower() or "block_bootstrap" in k.lower() for k in schema_keys)
+        and not _REPLICA_SPREAD_RE.search(expr_joined)
+    )
+    spread_hit = _REPLICA_SPREAD_RE.search(expr_joined) or (
+        _REPLICA_SPREAD_RE.search(schema_joined) and not has_pooled_se_and_unit
+    )
+    seeds_as_n = bool(
+        _SEEDS_AS_N_RE.search(expr_joined)
+        and declared_unit.lower() in {"", "seed", "seeds", "replica", "replicas"}
+    )
+    if spread_hit or seeds_as_n:
+        issues.append(
+            LintIssue(
+                path=sidecar_path,
+                directory=directory,
+                issue="replica_spread_error_bar",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    "sidecar uses between-replica/seed spread or seed count as uncertainty/n; "
+                    "estimate uncertainty via pooled estimator / block bootstrap at the true "
+                    "unit of independence (rule STAT-007)"
+                ),
+            )
+        )
+
+    # 4. Undeclared or non-independent unit when replica/seed units are present
+    if has_replica_context and not declared_unit:
+        issues.append(
+            LintIssue(
+                path=sidecar_path,
+                directory=directory,
+                issue="missing_unit_of_independence",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    "replica/seed units are present without a declared unit of independence; "
+                    "declare [breakdown] unit = '<unit>' (e.g. 'build', 'system') or "
+                    "[independence] unit / waive (rule STAT-007)"
+                ),
+            )
+        )
+    elif (
+        has_replica_context
+        and declared_unit.lower() in {"replica", "replicas", "seed", "seeds"}
+        and not _non_exchangeable_justified(data, prose)
+    ):
+        issues.append(
+            LintIssue(
+                path=sidecar_path,
+                directory=directory,
+                issue="non_independent_unit",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    f"declared unit {declared_unit!r} treats replicas/seeds as independent units "
+                    "without stating non-exchangeable starting structures (rule STAT-007)"
+                ),
+            )
+        )
+
+    return issues
+
+
+def check_unit_of_independence(project_root: Path) -> list[LintIssue]:
+    """Tier-2 lint for per-replica convergence gates, replica-split nulls, and replica-spread error bars (#3094)."""
+    issues: list[LintIssue] = []
+    for sidecar_path, data in _iter_parsed_toml_sidecars(project_root):
+        issues.extend(assess_unit_of_independence_sidecar(data, sidecar_path))
+    return issues
+
+
+# ── #3095: Source/batch confound check ───────────────────────────────────────
+
+_PROJECTION_OR_CLF_RE = re.compile(
+    r"\b(?:pc1|pc2|pca|umap|t_?sne|t-sne|projection|embedding|reduced_space|"
+    r"latent_axis|leading_axis|main_axis|origin_collapse|"
+    r"auroc|roc_auc|pr_auc|auprc|routing_auroc|classifier|classification)\b",
+    re.IGNORECASE,
+)
+_COVARIATE_RE = re.compile(
+    r"\b(?:data_source|source_id|dataset_id|dataset_identity|source_batch|"
+    r"batch_id|batch|coverage|missing_residues|pdb_vs_md|sim_vs_pdb|origin_collapse|"
+    r"within_source\w*|within_batch\w*|per_source\w*|per_batch\w*|"
+    r"pc1_source\w*|pc1_batch\w*|pc1_coverage\w*|axis_source\w*|axis_batch\w*|axis_coverage\w*|"
+    r"source_r2|batch_r2|coverage_r2|source_auroc|batch_auroc|sources?)\b",
+    re.IGNORECASE,
+)
+_CONFOUND_DIAGNOSTIC_COL_RE = re.compile(
+    r"^(?:pc\d+_(?:source|batch|coverage)\w*|axis_(?:source|batch|coverage)\w*|"
+    r"(?:source|batch|coverage)_(?:r2|corr|auroc|variance)|"
+    r"within_(?:source|batch)_\w+|stratified_\w+|origin_collapse\w*)$",
+    re.IGNORECASE,
+)
+_STRATIFIED_OR_CONFOUND_MITIGATION_RE = re.compile(
+    r"\b(?:within_source\w*|within_batch\w*|stratified\w*|per_source\w*|per_batch\w*|"
+    r"batch_corrected\w*|harmonized\w*|pc\d+_(?:source|batch|coverage)\w*|"
+    r"axis_(?:source|batch|coverage)\w*|origin_collapse\w*|source_auroc|batch_auroc)\b",
+    re.IGNORECASE,
+)
+
+
+def assess_source_batch_confound_sidecar(
+    data: dict[str, Any], sidecar_path: Path
+) -> list[LintIssue]:
+    """Evaluate one parsed sidecar dict for STAT-008 source/batch/coverage confounds (#3095)."""
+    for tbl_name in ("confounds", "breakdown"):
+        tbl = data.get(tbl_name)
+        if isinstance(tbl, dict):
+            waive = tbl.get("waive")
+            if isinstance(waive, str) and waive.strip():
+                return []
+
+    schema_keys = _collect_schema_keys(data.get("result_schema"))
+    exprs = _collect_sidecar_expressions(data)
+    prose = _collect_sidecar_prose(data)
+    factors = data.get("factors")
+    factor_keys = (
+        set(factors["declared_levels"].keys())
+        if isinstance(factors, dict) and isinstance(factors.get("declared_levels"), dict)
+        else set()
+    )
+
+    schema_joined = " ".join(sorted(schema_keys))
+    expr_joined = " ".join(expr for _, expr in exprs)
+    factor_joined = " ".join(sorted(str(k) for k in factor_keys))
+
+    has_proj_or_clf = bool(
+        _PROJECTION_OR_CLF_RE.search(schema_joined)
+        or _PROJECTION_OR_CLF_RE.search(expr_joined)
+        or _PROJECTION_OR_CLF_RE.search(prose)
+    )
+    if not has_proj_or_clf:
+        return []
+
+    confounds_tbl = data.get("confounds")
+    has_confounds_tbl = isinstance(confounds_tbl, dict) and bool(confounds_tbl)
+    has_covariates = bool(
+        has_confounds_tbl
+        or _COVARIATE_RE.search(schema_joined)
+        or _COVARIATE_RE.search(expr_joined)
+        or _COVARIATE_RE.search(factor_joined)
+        or _COVARIATE_RE.search(prose)
+    )
+    if not has_covariates:
+        return []
+
+    directory = sidecar_path.parent.name or "sidecar"
+    issues: list[LintIssue] = []
+
+    # 1. Any confound diagnostic declared in result_schema must be gated in outcomes/invariants/sanity
+    diag_cols = sorted(k for k in schema_keys if _CONFOUND_DIAGNOSTIC_COL_RE.match(k))
+    if diag_cols:
+        referenced_in_gates: set[str] = set()
+        for _, expr in exprs:
+            referenced_in_gates.update(columns_referenced(expr, diag_cols))
+        ungated = [c for c in diag_cols if c not in referenced_in_gates]
+        if ungated:
+            issues.append(
+                LintIssue(
+                    path=sidecar_path,
+                    directory=directory,
+                    issue="confound_diagnostic_ungated",
+                    severity=IssueSeverity.WARNING,
+                    detail=(
+                        f"[result_schema] declares confound/stratification metric(s) {ungated} "
+                        "that are never gated in [outcomes], [invariants], or [sanity] "
+                        "(rule STAT-008)"
+                    ),
+                )
+            )
+
+    # 2. Projection or classifier with source/batch/coverage covariates must stratify or bound axis confounds
+    confound_adjusted = isinstance(confounds_tbl, dict) and bool(
+        confounds_tbl.get("stratified_by") or confounds_tbl.get("covariate_adjusted")
+    )
+    has_mitigation = bool(
+        confound_adjusted
+        or _STRATIFIED_OR_CONFOUND_MITIGATION_RE.search(expr_joined)
+        or _STRATIFIED_OR_CONFOUND_MITIGATION_RE.search(schema_joined)
+    )
+    if not has_mitigation:
+        issues.append(
+            LintIssue(
+                path=sidecar_path,
+                directory=directory,
+                issue="unstratified_projection_or_classifier",
+                severity=IssueSeverity.WARNING,
+                detail=(
+                    "projection/classifier sidecar declares source, batch, or coverage context "
+                    "without within-stratum metrics (e.g. within_source_auroc) or axis-confound "
+                    "gates (e.g. pc1_source_r2, origin_collapse_fraction) (rule STAT-008)"
+                ),
+            )
+        )
+
+    return issues
+
+
+def check_source_batch_confound(project_root: Path) -> list[LintIssue]:
+    """Tier-2 lint for projections or classifiers tracking data source, batch, or coverage (#3095)."""
+    issues: list[LintIssue] = []
+    for sidecar_path, data in _iter_parsed_toml_sidecars(project_root):
+        issues.extend(assess_source_batch_confound_sidecar(data, sidecar_path))
+    return issues
+
+
+def _categorical_eta_squared(values: Sequence[float], labels: Sequence[str]) -> float | None:
+    if len(values) != len(labels) or len(values) < 2:
+        return None
+    mean_all = sum(values) / len(values)
+    ss_total = sum((v - mean_all) ** 2 for v in values)
+    if ss_total <= 0.0:
+        return 0.0
+    groups: dict[str, list[float]] = {}
+    for v, lbl in zip(values, labels):
+        groups.setdefault(lbl, []).append(v)
+    if len(groups) < 2:
+        return 0.0
+    ss_between = sum(len(g) * ((sum(g) / len(g)) - mean_all) ** 2 for g in groups.values())
+    return min(1.0, max(0.0, ss_between / ss_total))
+
+
+def _pearson_r2(xs: Sequence[float], ys: Sequence[float]) -> float | None:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return None
+    mx = sum(xs) / len(xs)
+    my = sum(ys) / len(ys)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0.0 or syy <= 0.0:
+        return 0.0
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    r = sxy / math.sqrt(sxx * syy)
+    return min(1.0, max(0.0, r * r))
+
+
+def diagnose_projection_axis_confound(
+    axis_values: Sequence[float],
+    *,
+    source: Sequence[str] | None = None,
+    batch: Sequence[str] | None = None,
+    coverage: Sequence[float] | None = None,
+    secondary_axis: Sequence[float] | None = None,
+    r2_threshold: float = 0.25,
+    origin_eps: float = 1e-3,
+    origin_collapse_fraction: float = 0.8,
+) -> dict[str, Any]:
+    """Diagnose whether a projection axis or classifier score tracks source, batch, or coverage (#3095)."""
+    if secondary_axis is not None and len(secondary_axis) != len(axis_values):
+        raise ValueError("secondary_axis length must match axis_values length")
+
+    reasons: list[str] = []
+    source_r2 = _categorical_eta_squared(axis_values, source) if source is not None else None
+    batch_r2 = _categorical_eta_squared(axis_values, batch) if batch is not None else None
+    coverage_r2 = _pearson_r2(axis_values, coverage) if coverage is not None else None
+
+    if source_r2 is not None and source_r2 >= r2_threshold:
+        reasons.append(f"main axis tracks data source (R^2={source_r2:.3f} >= {r2_threshold:.3f})")
+    if batch_r2 is not None and batch_r2 >= r2_threshold:
+        reasons.append(f"main axis tracks batch (R^2={batch_r2:.3f} >= {r2_threshold:.3f})")
+    if coverage_r2 is not None and coverage_r2 >= r2_threshold:
+        reasons.append(f"main axis tracks coverage (R^2={coverage_r2:.3f} >= {r2_threshold:.3f})")
+
+    collapsed_groups: list[str] = []
+    if axis_values:
+        mean_all = sum(axis_values) / len(axis_values)
+        spread_all = math.sqrt(sum((v - mean_all) ** 2 for v in axis_values) / len(axis_values))
+        if spread_all > origin_eps:
+            for cov_name, labels in (("source", source), ("batch", batch)):
+                if labels is None or len(labels) != len(axis_values):
+                    continue
+                grouped_idx: dict[str, list[int]] = {}
+                for idx, lbl in enumerate(labels):
+                    grouped_idx.setdefault(lbl, []).append(idx)
+                for lbl, idxs in sorted(grouped_idx.items()):
+                    if not idxs:
+                        continue
+                    near_zero = 0
+                    for idx in idxs:
+                        dist = (
+                            math.hypot(axis_values[idx], secondary_axis[idx])
+                            if secondary_axis is not None
+                            else abs(axis_values[idx])
+                        )
+                        if dist <= origin_eps:
+                            near_zero += 1
+                    frac = near_zero / len(idxs)
+                    if frac >= origin_collapse_fraction:
+                        tag = f"{cov_name}:{lbl}"
+                        collapsed_groups.append(tag)
+                        reasons.append(
+                            f"subset {tag!r} collapsed to origin ({near_zero}/{len(idxs)} <= {origin_eps})"
+                        )
+
+    return {
+        "confounded": bool(reasons),
+        "reasons": reasons,
+        "source_r2": source_r2,
+        "batch_r2": batch_r2,
+        "coverage_r2": coverage_r2,
+        "collapsed_groups": collapsed_groups,
+    }
+
+
+# ── #3099: Correction sweep ──────────────────────────────────────────────────
+
+
+def check_correction_sweep(project_root: Path) -> list[LintIssue]:
+    """Sweep active sidecars, claims, and specs for stale assumptions from landed corrections (#3099)."""
+    from bathos.correction_sweep import sweep_corrections
+
+    report = sweep_corrections(project_root)
+    severity_map = {
+        "error": IssueSeverity.ERROR,
+        "warning": IssueSeverity.WARNING,
+        "info": IssueSeverity.INFO,
+    }
+    issues: list[LintIssue] = []
+    for err in report.errors:
+        issues.append(
+            LintIssue(
+                path=project_root / ".bth",
+                directory="corrections",
+                issue="invalid_correction_registry",
+                severity=IssueSeverity.WARNING,
+                detail=err,
+            )
+        )
+    for hit in report.hits:
+        hint = f" — replace with: {hit.replacement}" if hit.replacement else ""
+        issues.append(
+            LintIssue(
+                path=hit.artifact_path,
+                directory=hit.artifact_kind,
+                issue="stale_correction_assumption",
+                severity=severity_map.get(hit.severity, IssueSeverity.WARNING),
+                detail=(
+                    f"[{hit.correction_id}] stale assumption {hit.matched_term!r} at "
+                    f"{hit.location} ({hit.correction_summary}){hint}"
+                ),
+            )
+        )
     return issues

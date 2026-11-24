@@ -68,6 +68,8 @@ CONTEXT_COLUMNS: dict[str, str] = {
     "n_adversarial_checks": "int  — outcome branches carrying an adversarial_check",
     "n_threshold_sources": "int  — outcome branches carrying a source justification",
     "has_uncovered_aggregate": "bool — a worst-case aggregate gates a verdict with no [breakdown]/waive",
+    "has_unit_of_independence_risk": "bool — sidecar mixes replica/seed pooling anti-patterns or omits independence unit",
+    "has_source_batch_confound_risk": "bool — projection/classifier sidecar has unstratified or ungated source/batch/coverage confounds",
     "run_count": "int  — runs of this script in the catalog (0 when unavailable)",
     "campaign_run_count": "int  — runs in the script's campaign (0 when unavailable)",
 }
@@ -300,6 +302,8 @@ def build_context(script: Path, catalog_dir: Path | None = None) -> dict:
         "n_adversarial_checks": 0,
         "n_threshold_sources": 0,
         "has_uncovered_aggregate": False,
+        "has_unit_of_independence_risk": False,
+        "has_source_batch_confound_risk": False,
         "run_count": 0,
         "campaign_run_count": 0,
     }
@@ -360,6 +364,25 @@ def build_context(script: Path, catalog_dir: Path | None = None) -> dict:
         )
         # check_adversarial_checks only inspects the `pass` branch.
         ctx["has_pass_branch"] = "pass" in outcomes
+
+        # Pure TOML reads for STAT-007 (#3094) and STAT-008 (#3095)
+        try:
+            from bathos.linter import (
+                assess_source_batch_confound_sidecar,
+                assess_unit_of_independence_sidecar,
+            )
+
+            raw_toml = tomllib.loads(Path(sidecar_path).read_text(encoding="utf-8"))
+            if isinstance(raw_toml, dict):
+                sp = Path(sidecar_path)
+                ctx["has_unit_of_independence_risk"] = bool(
+                    assess_unit_of_independence_sidecar(raw_toml, sp)
+                )
+                ctx["has_source_batch_confound_risk"] = bool(
+                    assess_source_batch_confound_sidecar(raw_toml, sp)
+                )
+        except Exception:
+            pass
 
     if catalog_dir is not None:
         ctx.update(_catalog_counts(script, Path(catalog_dir)))
