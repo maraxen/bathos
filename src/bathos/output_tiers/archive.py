@@ -46,6 +46,7 @@ from bathos.output_tiers.reference import (
     check_root_syntax,
     hash_file,
 )
+from bathos.output_tiers.unit_pack_reader import DEFAULT_UNIT_PACK_READER, UnitPackReader
 
 MANIFEST_VERSION = 1
 CODEC = "zstd-19-st"
@@ -183,6 +184,85 @@ def _single_worktree_root(reference: Mapping[str, ReferenceEntry]) -> str:
     return next(iter(roots))
 
 
+@dataclass(frozen=True)
+class _ArchiveMemberSpec:
+    relpath: str
+    expected_sha256: str | None
+    expected_size: int | None
+    phase: str
+    origin_eid: str
+
+
+def _expand_reference_members(
+    root_path: Path,
+    reference: Mapping[str, ReferenceEntry],
+    unit_reader: UnitPackReader,
+) -> tuple[list[_ArchiveMemberSpec], list[dict[str, Any]]]:
+    """Expand ``reference`` into verified tar member specs (loose files and packed units)."""
+    specs: list[_ArchiveMemberSpec] = []
+    units: list[dict[str, Any]] = []
+    seen_members: set[str] = set()
+
+    for rel in sorted(reference):
+        entry = reference[rel]
+        path = root_path / rel
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            raise OutputTierError(OUTPUTS_DRIFTED, f"{rel} (missing)") from None
+        if stat.S_ISLNK(st.st_mode):
+            raise OutputTierError(SYMLINK_IN_OUTPUTS, rel)
+        _check_plain_path(root_path, path, rel)
+        if stat.S_ISDIR(st.st_mode):
+            if not unit_reader.is_unit_dir(root_path, rel):
+                raise OutputTierError(SPECIAL_FILE_IN_OUTPUTS, rel)
+            unit_info = unit_reader.read_unit(root_path, rel, entry.sha256)
+            units.append(
+                {
+                    "relpath": unit_info.relpath,
+                    "content_digest": unit_info.content_digest,
+                    "record_digest": unit_info.record_digest,
+                    "storage_schema": unit_info.storage_schema,
+                    "n_members": unit_info.n_members,
+                    "phase": entry.phase,
+                    "origin_eid": entry.origin_eid,
+                }
+            )
+            candidates = [
+                _ArchiveMemberSpec(
+                    relpath=m.relpath,
+                    expected_sha256=m.expected_sha256,
+                    expected_size=m.expected_size,
+                    phase=entry.phase,
+                    origin_eid=entry.origin_eid,
+                )
+                for m in unit_info.members
+            ]
+        elif stat.S_ISREG(st.st_mode):
+            candidates = [
+                _ArchiveMemberSpec(
+                    relpath=rel,
+                    expected_sha256=entry.sha256,
+                    expected_size=entry.size_bytes,
+                    phase=entry.phase,
+                    origin_eid=entry.origin_eid,
+                )
+            ]
+        else:
+            raise OutputTierError(SPECIAL_FILE_IN_OUTPUTS, rel)
+
+        for spec in candidates:
+            if spec.relpath in seen_members:
+                raise OutputTierError(
+                    "invalid_param", f"duplicate archive member path {spec.relpath!r}"
+                )
+            seen_members.add(spec.relpath)
+            specs.append(spec)
+
+    specs.sort(key=lambda s: s.relpath)
+    return specs, units
+
+
 def build_archive(
     run_id: str,
     project_slug: str,
@@ -191,8 +271,14 @@ def build_archive(
     staging: str | os.PathLike[str],
     *,
     worktree_root: str | None = None,
+    unit_reader: UnitPackReader | None = None,
 ) -> BuiltArchive:
     """Pack ``reference`` (``{relpath: ReferenceEntry}``) from files under ``root`` into ``staging``.
+
+    Reference entries may be loose regular files OR packed unit directories handled
+    through ``unit_reader`` (defaulting to :data:`DEFAULT_UNIT_PACK_READER`, the
+    interim ``xtrax`` / ``alynxr.unit_pack/1`` reader), which verifies the unit's
+    record and member index and streams its packed files as-is without unpacking.
 
     ``staging`` must be an existing directory; ``run-<run_id>.tar.zst`` and ``.manifest.json`` are written there
     under temporary names and linked into place (manifest first, archive last), so a final name is never
@@ -224,6 +310,9 @@ def build_archive(
         if os.path.lexists(final):
             raise OutputTierError(ARCHIVE_CONFLICT, f"{final.name} already exists in staging")
 
+    reader_impl = unit_reader if unit_reader is not None else DEFAULT_UNIT_PACK_READER
+    member_specs, unit_metas = _expand_reference_members(root_path, reference, reader_impl)
+
     attempt = secrets.token_hex(4)
     tmp_archive = staging_dir / f".{final_archive.name}.partial-{attempt}"
     tmp_manifest = staging_dir / f".{final_manifest.name}.partial-{attempt}"
@@ -241,38 +330,37 @@ def build_archive(
                 cctx.stream_writer(out, closefd=False) as zw,
                 tarfile.open(fileobj=zw, mode="w|", format=tarfile.PAX_FORMAT) as tar,
             ):
-                for rel in sorted(reference):
-                    entry = reference[rel]
-                    f, st = _open_regular(root_path, rel)
+                for spec in member_specs:
+                    f, st = _open_regular(root_path, spec.relpath)
                     with f:
-                        if entry.size_bytes is not None and entry.size_bytes != st.st_size:
-                            raise OutputTierError(OUTPUTS_DRIFTED, f"{rel} (size differs)")
-                        info = tarfile.TarInfo(rel)
+                        if spec.expected_size is not None and spec.expected_size != st.st_size:
+                            raise OutputTierError(OUTPUTS_DRIFTED, f"{spec.relpath} (size differs)")
+                        info = tarfile.TarInfo(spec.relpath)
                         info.size = st.st_size
                         info.mtime = 0
                         info.mode = TAR_MODE
                         info.uid = info.gid = 0
                         info.uname = info.gname = ""
                         info.type = tarfile.REGTYPE
-                        reader = _HashingReader(f, st.st_size, rel)
+                        reader = _HashingReader(f, st.st_size, spec.relpath)
                         tar.addfile(info, reader)
                         sha = reader.finish()
-                    if sha != entry.sha256:
-                        raise OutputTierError(OUTPUTS_DRIFTED, f"{rel} (sha256 differs)")
+                    if spec.expected_sha256 is not None and sha != spec.expected_sha256:
+                        raise OutputTierError(OUTPUTS_DRIFTED, f"{spec.relpath} (sha256 differs)")
                     files.append(
                         {
-                            "relpath": rel,
+                            "relpath": spec.relpath,
                             "size_bytes": st.st_size,
                             "sha256": sha,
-                            "phase": entry.phase,
-                            "origin_eid": entry.origin_eid,
+                            "phase": spec.phase,
+                            "origin_eid": spec.origin_eid,
                         }
                     )
             out.flush()
             os.fsync(out.fileno())
         archive_sha = hash_file(tmp_archive)
         archive_size = tmp_archive.stat().st_size
-        manifest = {
+        manifest: dict[str, Any] = {
             "manifest_version": MANIFEST_VERSION,
             "run_id": run_id,
             "project_slug": project_slug,
@@ -285,6 +373,8 @@ def build_archive(
             },
             "files": files,
         }
+        if unit_metas:
+            manifest["units"] = unit_metas
         manifest_bytes = _json_bytes(manifest)
         with open(tmp_manifest, "wb") as mf:
             mf.write(manifest_bytes)

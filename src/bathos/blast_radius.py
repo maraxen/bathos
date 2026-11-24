@@ -20,23 +20,25 @@ vs. trust_ledger's PASS-attestation-gated ratchet.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import re
 import subprocess
-import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from bathos.catalog import read_runs
 from bathos.checker import check_dependency_lock_drift, check_runs, hash_dependency_lock
 from bathos.index import _LOCK_ERROR_MARKER as _DUCKDB_LOCK_MARKER
 from bathos.index import catalog_readable, connect_read
+from bathos.ledger import AppendOnlyLedger, now_iso
 from bathos.lock_ref import read_lock_bytes
 from bathos.query import get_run, list_runs
 from bathos.schema import Run
@@ -82,7 +84,7 @@ _LEDGER_FRAGMENT_SCHEMA = pa.schema(
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return now_iso()
 
 
 @dataclass(frozen=True)
@@ -90,11 +92,12 @@ class BlastRadiusRecord:
     """One append-only ledger entry: a `from_state -> to_state` transition for an
     entity identified by `(entity_type, entity_id)`."""
 
-    entity_type: str  # "run" | "campaign" | "claim"
+    entity_type: str  # "run" | "campaign" | "claim" | "shadow_trigger"
     entity_id: str
-    to_state: str  # "affected" | "unverifiable" | "cleared"
+    to_state: str  # "affected" | "unverifiable" | "cleared" | "shadow_only"
     from_state: str | None = None
-    anchor_kind: str | None = None  # "commit" | "commit_range" | "file" | "dependency_range"
+    # "commit" | "commit_range" | "file" | "dependency" | "sidecar" | "input_artifact" | "instrument"
+    anchor_kind: str | None = None
     anchor_value: str | None = None
     matched_files: str | None = None  # JSON-encoded list[str]
     matched_clauses: str | None = None  # JSON-encoded list[str], claim entity_type only (AC-8)
@@ -105,115 +108,38 @@ class BlastRadiusRecord:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
-def _ledger_fragments_dir(catalog_dir: Path | str) -> Path:
-    return Path(catalog_dir) / _LEDGER_FRAGMENTS_DIRNAME
-
-
-def write_ledger_fragment(record: BlastRadiusRecord, catalog_dir: Path | str) -> None:
-    """Write an immutable cool-tier Parquet fragment for one ledger record.
-
-    Mirrors `bathos.trust_ledger.write_ledger_fragment` exactly: one fragment per
-    record, atomic tmp-write + POSIX rename, never superseded on read-back.
-    """
-    frag_dir = _ledger_fragments_dir(catalog_dir)
-    frag_dir.mkdir(parents=True, exist_ok=True)
-    target = frag_dir / f"blast_radius_{record.id}.parquet"
-    tmp = frag_dir / f"blast_radius_{record.id}.tmp.parquet"
-
-    t_start = time.monotonic()
-    table = pa.table(
-        {
-            "id": [record.id],
-            "entity_type": [record.entity_type],
-            "entity_id": [record.entity_id],
-            "from_state": [record.from_state],
-            "to_state": [record.to_state],
-            "anchor_kind": [record.anchor_kind],
-            "anchor_value": [record.anchor_value],
-            "matched_files": [record.matched_files],
-            "matched_clauses": [record.matched_clauses],
-            "shadow_verdict": [record.shadow_verdict],
-            "match_reason": [record.match_reason],
-            "reason": [record.reason],
-            "amended_at": [record.amended_at],
-        },
-        schema=_LEDGER_FRAGMENT_SCHEMA,
-    )
-    pq.write_table(table, tmp)
-    tmp.rename(target)  # atomic on POSIX
-    duration_ms = (time.monotonic() - t_start) * 1000
-
-    event(
-        "blast_radius.write_fragment", path=str(target), rows=1, duration_ms=int(duration_ms)
-    )
-
-
-def read_ledger_fragments(catalog_dir: Path | str) -> list[BlastRadiusRecord]:
-    """Read every cool-tier ledger fragment, unfolded (full history).
-
-    Two robustness guards (code-review finding, PR #54): the glob excludes
-    `*.tmp.parquet` (write_ledger_fragment's own tmp-write-then-rename target),
-    which would otherwise match `blast_radius_*.parquet` and be read as a
-    fragment if a write was interrupted between the tmp-write and the atomic
-    rename. And a fragment that still fails to parse (e.g. corruption from a
-    non-atomic-rename edge case, or disk-level corruption) is skipped with a
-    telemetry event rather than raising -- one bad fragment must not crash
-    bathos.compact.compact() for the entire catalog (every project's data),
-    which is what an uncaught pq.read_table() exception here would do, since
-    this function is called from compact()'s unconditional ingest step.
-    """
-    frag_dir = _ledger_fragments_dir(catalog_dir)
-    if not frag_dir.exists():
-        return []
-    parquet_files = [
-        f for f in frag_dir.glob("blast_radius_*.parquet") if not f.name.endswith(".tmp.parquet")
-    ]
-    if not parquet_files:
-        return []
-
-    tables = []
-    for f in parquet_files:
-        try:
-            tables.append(pq.read_table(f))
-        except Exception as exc:  # noqa: BLE001 — deliberately broad, see docstring
-            event("blast_radius.corrupt_fragment", path=str(f), error=str(exc))
-    if not tables:
-        return []
-    combined = pa.concat_tables(tables, promote_options="permissive")
-    pydict = combined.to_pydict()
-
-    records = []
-    for i in range(combined.num_rows):
-        records.append(
-            BlastRadiusRecord(
-                id=pydict["id"][i],
-                entity_type=pydict["entity_type"][i],
-                entity_id=pydict["entity_id"][i],
-                from_state=pydict["from_state"][i],
-                to_state=pydict["to_state"][i],
-                anchor_kind=pydict["anchor_kind"][i],
-                anchor_value=pydict["anchor_value"][i],
-                matched_files=pydict["matched_files"][i],
-                matched_clauses=pydict["matched_clauses"][i],
-                shadow_verdict=pydict["shadow_verdict"][i],
-                match_reason=pydict["match_reason"][i],
-                reason=pydict["reason"][i],
-                amended_at=pydict["amended_at"][i],
-            )
-        )
-    return records
+_LEDGER_RECORD_COLUMNS = (
+    "id",
+    "entity_type",
+    "entity_id",
+    "from_state",
+    "to_state",
+    "anchor_kind",
+    "anchor_value",
+    "matched_files",
+    "matched_clauses",
+    "shadow_verdict",
+    "match_reason",
+    "reason",
+    "amended_at",
+)
+# Phase-1-era blast_radius_ledger tables predate matched_clauses/shadow_verdict
+# (added Phase 2a, AC-8/AC-10). _connect() self-heals this via `ALTER TABLE ADD
+# COLUMN IF NOT EXISTS` on every read-write connection -- but a caller-supplied
+# READ-ONLY connection (see *_using_conn below) can never run that ALTER, so
+# selecting the full column list against an un-migrated table raises
+# duckdb.BinderException. Falling back to this legacy column set (rather than
+# treating the BinderException as "no record" -> "clean") is load-bearing.
+_LEDGER_RECORD_COLUMNS_LEGACY = tuple(
+    c for c in _LEDGER_RECORD_COLUMNS if c not in ("matched_clauses", "shadow_verdict")
+)
 
 
 def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
     con.execute(_LEDGER_TABLE_SCHEMA)
     # Phase 2a (#4552): CREATE TABLE IF NOT EXISTS above is a no-op against a table a
-    # Phase-1-era catalog already created without matched_clauses/shadow_verdict -- this
-    # ALTER must run on every direct connection (not just compact.py's ingest path, which
-    # only fires when there are cool-tier fragments to re-derive: an old table with zero
-    # fragments yet would otherwise never get migrated before the first Phase-2a INSERT).
-    import contextlib
-
+    # Phase-1-era catalog already created without matched_clauses/shadow_verdict.
     for _alter_sql in (
         "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS matched_clauses TEXT",
         "ALTER TABLE blast_radius_ledger ADD COLUMN IF NOT EXISTS shadow_verdict TEXT",
@@ -223,122 +149,11 @@ def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def _insert_warm_row_using_conn(con: duckdb.DuckDBPyConnection, record: BlastRadiusRecord) -> None:
-    """Like `_insert_warm_row`, but against an already-open connection instead of
-    opening/closing a fresh one -- see `flag_blast_radius`, which reuses one
-    connection across an entire batch of records instead of opening a new one
-    per record (debt #1475)."""
-    existing = con.execute(
-        "SELECT id FROM blast_radius_ledger WHERE id = ?", [record.id]
-    ).fetchone()
-    if existing:
-        return  # append-only: never update an existing ledger row
-    con.execute(
-        "INSERT INTO blast_radius_ledger "
-        "(id, entity_type, entity_id, from_state, to_state, anchor_kind, anchor_value, "
-        "matched_files, matched_clauses, shadow_verdict, match_reason, reason, amended_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            record.id,
-            record.entity_type,
-            record.entity_id,
-            record.from_state,
-            record.to_state,
-            record.anchor_kind,
-            record.anchor_value,
-            record.matched_files,
-            record.matched_clauses,
-            record.shadow_verdict,
-            record.match_reason,
-            record.reason,
-            record.amended_at,
-        ],
-    )
-
-
-def _insert_warm_row(record: BlastRadiusRecord, catalog_dir: Path | str) -> None:
-    con = _connect(catalog_dir)
-    try:
-        _insert_warm_row_using_conn(con, record)
-    finally:
-        con.close()
-
-
-def append_ledger_record(
-    record: BlastRadiusRecord,
-    catalog_dir: Path | str,
-    *,
-    con: duckdb.DuckDBPyConnection | None = None,
-    cwd: Path | None = None,
-) -> BlastRadiusRecord:
-    """Durably append one ledger record: cool-tier fragment + warm-tier row.
-
-    Pass an already-open `con` (from `_connect`) to insert against it directly
-    instead of opening a fresh warm-tier connection for this one record --
-    see `flag_blast_radius`, which reuses a single connection across an entire
-    batch of records (debt #1475). Omit to open/close a connection as before --
-    default behavior is unchanged.
-
-    AC-25: behind the runlog flag, emits `blast_radius.recorded` instead of the
-    fragment + warm-row writes; flag off performs only those legacy writes,
-    unchanged. `cwd` resolves the runlog project/root when the flag is on
-    (defaults to `Path.cwd()` via `resolve_log_root`). The compaction-time
-    write at `compact.py` (re-deriving the warm table from fragments) is a
-    separate, non-authoritative site and is untouched.
-    """
-    from dataclasses import asdict
-
-    from bathos.runlog.emit import emit_or_legacy, unit_of_work
-
-    def _legacy_write() -> None:
-        write_ledger_fragment(record, catalog_dir)
-        if con is not None:
-            _insert_warm_row_using_conn(con, record)
-        else:
-            _insert_warm_row(record, catalog_dir)
-
-    with unit_of_work(Path(catalog_dir)):
-        emit_or_legacy(
-            kind="blast_radius.recorded",
-            entity=[record.id],
-            data=asdict(record),
-            legacy_write=_legacy_write,
-            cwd=cwd,
-        )
-    event(
-        "blast_radius.append",
-        entity_type=record.entity_type,
-        entity_id=record.entity_id,
-        from_state=record.from_state,
-        to_state=record.to_state,
-    )
-    return record
-
-
-_LEDGER_RECORD_COLUMNS = (
-    "id", "entity_type", "entity_id", "from_state", "to_state", "anchor_kind",
-    "anchor_value", "matched_files", "matched_clauses", "shadow_verdict",
-    "match_reason", "reason", "amended_at",
-)
-# Phase-1-era blast_radius_ledger tables predate matched_clauses/shadow_verdict
-# (added Phase 2a, AC-8/AC-10). _connect() self-heals this via `ALTER TABLE ADD
-# COLUMN IF NOT EXISTS` on every read-write connection -- but a caller-supplied
-# READ-ONLY connection (see *_using_conn below) can never run that ALTER, so
-# selecting the full column list against an un-migrated table raises
-# duckdb.BinderException. Falling back to this legacy column set (rather than
-# treating the BinderException as "no record" -> "clean") is load-bearing: a
-# genuinely affected/unverifiable record in an un-migrated table must never be
-# silently reported as clean, which would defeat the entire point of this
-# ledger. Confirmed via direct reproduction: without this fallback,
-# fold_blast_radius_state_using_conn() on such a table returned "clean" for a
-# campaign with a real to_state="affected" record.
-_LEDGER_RECORD_COLUMNS_LEGACY = tuple(
-    c for c in _LEDGER_RECORD_COLUMNS if c not in ("matched_clauses", "shadow_verdict")
-)
-
-
 def _row_to_record(columns: tuple[str, ...], row: tuple) -> BlastRadiusRecord:
-    values = dict(zip(columns, row))
+    return _record_from_values(dict(zip(columns, row)))
+
+
+def _record_from_values(values: Mapping[str, Any]) -> BlastRadiusRecord:
     return BlastRadiusRecord(
         id=values["id"],
         entity_type=values["entity_type"],
@@ -356,52 +171,80 @@ def _row_to_record(columns: tuple[str, ...], row: tuple) -> BlastRadiusRecord:
     )
 
 
-def _fetch_latest_record(con, entity_type: str, entity_id: str) -> BlastRadiusRecord | None:
-    def _query(columns: tuple[str, ...]):
-        return con.execute(
-            f"SELECT {', '.join(columns)} FROM blast_radius_ledger "
-            "WHERE entity_type = ? AND entity_id = ? ORDER BY amended_at DESC LIMIT 1",
-            [entity_type, entity_id],
-        ).fetchone()
+_LEDGER: AppendOnlyLedger[BlastRadiusRecord] = AppendOnlyLedger(
+    table_name="blast_radius_ledger",
+    fragments_dirname=_LEDGER_FRAGMENTS_DIRNAME,
+    fragment_prefix="blast_radius",
+    pk_col="id",
+    order_col="amended_at",
+    columns=_LEDGER_RECORD_COLUMNS,
+    legacy_columns=_LEDGER_RECORD_COLUMNS_LEGACY,
+    fragment_schema=_LEDGER_FRAGMENT_SCHEMA,
+    runlog_kind="blast_radius.recorded",
+    telemetry_prefix="blast_radius",
+    connect_fn=_connect,
+    record_from_values=_record_from_values,
+    append_event_fields=lambda r: {
+        "entity_type": r.entity_type,
+        "entity_id": r.entity_id,
+        "from_state": r.from_state,
+        "to_state": r.to_state,
+    },
+)
 
-    try:
-        row = _query(_LEDGER_RECORD_COLUMNS)
-        columns = _LEDGER_RECORD_COLUMNS
-    except duckdb.BinderException:
-        row = _query(_LEDGER_RECORD_COLUMNS_LEGACY)
-        columns = _LEDGER_RECORD_COLUMNS_LEGACY
-    if row is None:
-        return None
-    return _row_to_record(columns, row)
+
+def _ledger_fragments_dir(catalog_dir: Path | str) -> Path:
+    return _LEDGER.fragments_dir(catalog_dir)
+
+
+def write_ledger_fragment(record: BlastRadiusRecord, catalog_dir: Path | str) -> None:
+    """Write an immutable cool-tier Parquet fragment for one ledger record."""
+    _LEDGER.write_fragment(record, catalog_dir)
+
+
+def read_ledger_fragments(catalog_dir: Path | str) -> list[BlastRadiusRecord]:
+    """Read every cool-tier ledger fragment, unfolded (full history)."""
+    return _LEDGER.read_fragments(catalog_dir)
+
+
+def _insert_warm_row_using_conn(con: duckdb.DuckDBPyConnection, record: BlastRadiusRecord) -> None:
+    """Like `_insert_warm_row`, but against an already-open connection."""
+    _LEDGER.insert_warm_row_using_conn(con, record)
+
+
+def _insert_warm_row(record: BlastRadiusRecord, catalog_dir: Path | str) -> None:
+    _LEDGER.insert_warm_row(record, catalog_dir)
+
+
+def append_ledger_record(
+    record: BlastRadiusRecord,
+    catalog_dir: Path | str,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    cwd: Path | None = None,
+) -> BlastRadiusRecord:
+    """Durably append one ledger record: cool-tier fragment + warm-tier row."""
+    return _LEDGER.append_record(record, catalog_dir, con=con, cwd=cwd)
+
+
+def _fetch_latest_record(con, entity_type: str, entity_id: str) -> BlastRadiusRecord | None:
+    return _LEDGER.fetch_latest_record(
+        con, [("entity_type", entity_type), ("entity_id", entity_id)]
+    )
 
 
 def _is_missing_ledger_table(exc: BaseException) -> bool:
-    """True only when DuckDB reports that `blast_radius_ledger` does not exist.
-
-    Mirrors `bathos.query._is_missing_runs_table` (debt #2812): other
-    `duckdb.Error`s (corrupt DB, closed connection, IO/lock failure, bad schema)
-    must surface rather than silently returning "no record" -> "clean" (#3563).
-    """
-    msg = str(exc)
-    return (
-        isinstance(exc, duckdb.CatalogException)
-        and bool(re.search(r"\bblast_radius_ledger\b", msg, re.IGNORECASE))
-        and "does not exist" in msg.lower()
-    )
+    """True only when DuckDB reports that `blast_radius_ledger` does not exist."""
+    return _LEDGER.is_missing_table_error(exc)
 
 
 def _latest_record_from_fragments(
     catalog_dir: Path | str, entity_type: str, entity_id: str
 ) -> BlastRadiusRecord | None:
     """Latest-by-`amended_at` ledger record from cool-tier Parquet fragments."""
-    matching = [
-        r
-        for r in read_ledger_fragments(catalog_dir)
-        if r.entity_type == entity_type and r.entity_id == entity_id
-    ]
-    if not matching:
-        return None
-    return max(matching, key=lambda r: (r.amended_at, r.id))
+    return _LEDGER.latest_record_from_fragments(
+        catalog_dir, [("entity_type", entity_type), ("entity_id", entity_id)]
+    )
 
 
 def latest_ledger_record(
@@ -409,62 +252,19 @@ def latest_ledger_record(
 ) -> BlastRadiusRecord | None:
     """Return the latest-by-`amended_at` ledger record for `(entity_type, entity_id)`,
     or `None` if no record exists."""
-    from bathos.runlog.mode import is_log_mode
-
-    cat = Path(catalog_dir)
-    if is_log_mode(cat):
-        con = connect_read(cat, read_only=True)
-        try:
-            return _fetch_latest_record(con, entity_type, entity_id)
-        except duckdb.Error as exc:
-            if _is_missing_ledger_table(exc):
-                return None
-            raise
-        finally:
-            con.close()
-
-    db_path = cat / "bathos.db"
-    if not db_path.exists():
-        return _latest_record_from_fragments(cat, entity_type, entity_id)
-
-    try:
-        con = connect_read(cat, read_only=True)
-    except duckdb.ConnectionException as exc:
-        # Same-process caller already holds bathos.db open read-write;
-        # DuckDB forbids mixing read_only configs on the same file.
-        if "different configuration" not in str(exc).lower():
-            raise
-        con = connect_read(cat, read_only=False, wire_validity=False)
-    try:
-        return _fetch_latest_record(con, entity_type, entity_id)
-    except duckdb.Error as exc:
-        if _is_missing_ledger_table(exc):
-            return _latest_record_from_fragments(cat, entity_type, entity_id)
-        raise
-    finally:
-        con.close()
+    return _LEDGER.latest_record_log_aware(
+        catalog_dir, [("entity_type", entity_type), ("entity_id", entity_id)]
+    )
 
 
 def latest_ledger_record_using_conn(
     con, entity_type: str, entity_id: str
 ) -> BlastRadiusRecord | None:
     """Like `latest_ledger_record`, but queries an EXISTING connection instead of
-    opening a new one. DuckDB refuses a second connection to the same database
-    file with a different config (e.g. read-only vs read-write) than one
-    already open -- callers that already hold an open connection to the same
-    `bathos.db` (e.g. `campaigns.review_campaign`, opened read-only by the CLI/
-    MCP `campaign review` path) MUST use this instead of `latest_ledger_record`,
-    which would crash with `duckdb.ConnectionException` in that situation
-    (confirmed via direct reproduction). Best-effort only for a missing
-    `blast_radius_ledger` table; any other `duckdb.Error` propagates instead of
-    silently folding to `"clean"` (#3563).
-    """
-    try:
-        return _fetch_latest_record(con, entity_type, entity_id)
-    except duckdb.Error as exc:
-        if _is_missing_ledger_table(exc):
-            return None
-        raise
+    opening a new one."""
+    return _LEDGER.latest_record_using_conn(
+        con, [("entity_type", entity_type), ("entity_id", entity_id)]
+    )
 
 
 def fold_blast_radius_state(catalog_dir: Path | str, entity_type: str, entity_id: str) -> str:
@@ -526,7 +326,7 @@ class BlastRadiusReport:
     pass this to flag_blast_radius() to durably record it (AC-11: report-then-flag,
     this dataclass IS the "report" shown to the user before that write happens)."""
 
-    anchor_kind: str  # "commit" | "commit_range" | "file" | "dependency"
+    anchor_kind: str  # "commit" | "commit_range" | "file" | "dependency" | "sidecar" | "input_artifact" | "instrument"
     anchor_value: str
     changed_files: list[str]
     affected: list[BlastRadiusMatch]
@@ -820,6 +620,347 @@ def _campaign_read_warning(exc: duckdb.Error) -> str:
 _UNBOUNDED_SCAN_LIMIT = 1_000_000
 
 
+_HEX_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def _sidecar_clause_matches(text: str, clause: str) -> bool:
+    """True when *clause* (e.g. 'outcomes.pass', 'outcomes.pass.condition', or key) appears in *text*."""
+    if clause in text or f"[{clause}]" in text:
+        return True
+    if "." in clause:
+        parent, _, leaf = clause.rpartition(".")
+        if f"[{parent}]" in text and leaf in text:
+            return True
+    return False
+
+
+def _resolve_sidecar_text(
+    run: Run, base: str, is_sha: bool, ctx: _MatchContext, catalog_dir: Path
+) -> str | None:
+    """Best-effort sidecar text lookup across run.sidecar_path, frozen snapshot, and anchor path."""
+    text = ctx.text_of(run.sidecar_path, run.id, run.sidecar_path or "")
+    if text is not None:
+        return text
+    if run.sidecar_sha256:
+        with contextlib.suppress(Exception):
+            from bathos.sidecar import sidecar_snapshot_path
+
+            snap = sidecar_snapshot_path(catalog_dir, run.sidecar_sha256)
+            if snap.is_file():
+                payload = json.loads(snap.read_text(encoding="utf-8"))
+                raw_text = payload.get("raw_text") or payload.get("content")
+                if isinstance(raw_text, str):
+                    return raw_text
+    if not is_sha:
+        text = ctx.text_of(base, run.id, run.sidecar_path or "")
+        if text is not None:
+            return text
+    return None
+
+
+def _assess_sidecar_run(
+    run: Run,
+    *,
+    base: str,
+    clause: str,
+    is_sha: bool,
+    disk_sha: str | None,
+    ctx: _MatchContext,
+    catalog_dir: Path,
+    campaign_id: str,
+) -> tuple[str, BlastRadiusMatch | None]:
+    """Classify *run* against a sidecar anchor ('affected', 'unverifiable', or 'unaffected')."""
+    base_norm = base.replace("\\", "/")
+    matched_via: list[str] = []
+    matched_files: list[str] = []
+
+    if is_sha:
+        needle = base.lower()
+        for label, val in (
+            ("sidecar_sha256", (run.sidecar_sha256 or "").lower()),
+            ("component_sidecar_sha256", (run.component_sidecar_sha256 or "").lower()),
+        ):
+            if val and (val == needle or val.startswith(needle)):
+                matched_via.append(label)
+        if matched_via and run.sidecar_path:
+            matched_files.append(run.sidecar_path)
+    else:
+        sp = (run.sidecar_path or "").replace("\\", "/")
+        if sp and (base_norm in sp or sp in base_norm):
+            matched_via.append("sidecar path")
+            matched_files.append(base)
+        if disk_sha and run.sidecar_sha256 and run.sidecar_sha256.lower() == disk_sha.lower():
+            matched_via.append("sidecar_sha256")
+            if base not in matched_files:
+                matched_files.append(base)
+
+    if not matched_via:
+        return "unaffected", None
+
+    via = ", ".join(matched_via)
+    if not clause:
+        return "affected", BlastRadiusMatch(
+            run_id=run.id,
+            git_hash=run.git_hash,
+            command=run.command,
+            campaign_id=campaign_id,
+            matched_files=matched_files,
+            reason=f"matches sidecar {base} via {via}",
+        )
+
+    text = _resolve_sidecar_text(run, base, is_sha, ctx, catalog_dir)
+    if text is None:
+        return "unverifiable", BlastRadiusMatch(
+            run_id=run.id,
+            git_hash=run.git_hash,
+            command=run.command,
+            campaign_id=campaign_id,
+            matched_files=matched_files,
+            reason=f"matches sidecar {base} via {via}, but sidecar text is unreadable to verify clause {clause!r}",
+        )
+    if _sidecar_clause_matches(text, clause):
+        return "affected", BlastRadiusMatch(
+            run_id=run.id,
+            git_hash=run.git_hash,
+            command=run.command,
+            campaign_id=campaign_id,
+            matched_files=matched_files,
+            reason=f"matches sidecar {base} via {via} and contains clause {clause!r}",
+        )
+    return "unaffected", None
+
+
+def _assess_input_artifact_run(
+    run: Run,
+    *,
+    art_path: str,
+    art_digest: str | None,
+    ctx: _MatchContext,
+    campaign_id: str,
+) -> tuple[str, BlastRadiusMatch | None]:
+    """Classify *run* against an input-artifact anchor (path, digest, or path@digest)."""
+    needles: list[str] = [art_path]
+    digest_needles: list[str] = []
+    if art_digest:
+        digest_needles.append(art_digest)
+        if art_digest.startswith("sha256:"):
+            digest_needles.append(art_digest.removeprefix("sha256:"))
+
+    path_sources = _run_match_sources(run, needles, ctx) if art_path else {}
+    # Also check output_metadata JSON if any reference is recorded there.
+    if art_path and run.output_metadata and art_path.replace("\\", "/") in run.output_metadata:
+        path_sources.setdefault(art_path, []).append("output_metadata")
+
+    digest_sources: dict[str, list[str]] = {}
+    if digest_needles:
+        digest_sources = _run_match_sources(run, digest_needles, ctx)
+        for dn in digest_needles:
+            if run.output_metadata and dn in run.output_metadata:
+                digest_sources.setdefault(dn, []).append("output_metadata")
+
+    if digest_needles:
+        if digest_sources:
+            matched_d = list(digest_sources)
+            matched = [art_path] if art_path else matched_d
+            return "affected", BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=matched,
+                reason=f"matches input artifact digest {art_digest} via {_via(digest_sources, matched_d)}",
+            )
+        if path_sources:
+            return "unverifiable", BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=[art_path],
+                reason=(
+                    f"touches input artifact path '{art_path}' via {_via(path_sources, [art_path])}, "
+                    f"but digest {art_digest} was not recorded on the run"
+                ),
+            )
+        return "unaffected", None
+
+    if not path_sources:
+        return "unaffected", None
+    return "affected", BlastRadiusMatch(
+        run_id=run.id,
+        git_hash=run.git_hash,
+        command=run.command,
+        campaign_id=campaign_id,
+        matched_files=[art_path],
+        reason=f"references input artifact '{art_path}' via {_via(path_sources, [art_path])}",
+    )
+
+
+def _resolve_instrument_spec(
+    instrument: str, project_root: Path
+) -> tuple[str, str | None, Any | None]:
+    """Parse *instrument* into ``(package, target_version, defect_entry)``."""
+    from bathos.version_resolver import load_instrument_registries
+
+    val = instrument.strip()
+    registries = load_instrument_registries(project_root)
+
+    if ":" in val and "://" not in val:
+        pkg, _, defect_id = val.partition(":")
+        pkg, defect_id = pkg.strip(), defect_id.strip()
+        if not pkg or not defect_id:
+            raise ValueError(f"malformed instrument anchor {instrument!r}")
+        reg = registries.get(pkg)
+        if reg is None:
+            raise ValueError(f"instrument registry for package {pkg!r} not found")
+        entry = next((e for e in reg.entries if e.id == defect_id), None)
+        if entry is None:
+            raise ValueError(f"instrument defect {defect_id!r} not found in {pkg!r} registry")
+        return pkg, None, entry
+
+    if "==" in val:
+        pkg, _, ver = val.partition("==")
+        if not pkg.strip() or not ver.strip():
+            raise ValueError(f"malformed instrument anchor {instrument!r}")
+        return pkg.strip(), ver.strip(), None
+
+    if "@" in val:
+        pkg, _, ver = val.partition("@")
+        if not pkg.strip() or not ver.strip():
+            raise ValueError(f"malformed instrument anchor {instrument!r}")
+        return pkg.strip(), ver.strip(), None
+
+    for pkg, reg in registries.items():
+        for entry in reg.entries:
+            if entry.id == val:
+                return pkg, None, entry
+
+    return val, None, None
+
+
+def _assess_instrument_run(
+    run: Run,
+    *,
+    pkg: str,
+    target_version: str | None,
+    defect_entry: Any | None,
+    campaign_id: str,
+    ver_key: str,
+) -> tuple[str, BlastRadiusMatch | None, bool]:
+    """Classify *run* against an instrument anchor.
+
+    Returns ``(bucket, match_or_none, recorded_pkg_flag)``.
+    """
+    from bathos.version_resolver import version_in_range
+
+    if not run.dependency_provenance:
+        return (
+            "unverifiable",
+            BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=[],
+                reason="no recorded dependency_provenance -- cannot verify instrument version",
+            ),
+            False,
+        )
+    try:
+        prov = json.loads(run.dependency_provenance)
+    except (json.JSONDecodeError, TypeError):
+        return (
+            "unverifiable",
+            BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=[],
+                reason="malformed dependency_provenance JSON -- cannot verify instrument version",
+            ),
+            False,
+        )
+    if not isinstance(prov, dict):
+        return (
+            "unverifiable",
+            BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=[],
+                reason="non-dict dependency_provenance -- cannot verify instrument version",
+            ),
+            False,
+        )
+
+    if ver_key not in prov:
+        return "unaffected", None, False
+
+    raw_ver = prov.get(ver_key)
+    ver = str(raw_ver).strip() if raw_ver is not None else ""
+    if not ver or ver.lower() == "unknown":
+        return (
+            "unverifiable",
+            BlastRadiusMatch(
+                run_id=run.id,
+                git_hash=run.git_hash,
+                command=run.command,
+                campaign_id=campaign_id,
+                matched_files=[],
+                reason=f"recorded {ver_key} is {ver or 'empty'!r} -- cannot verify instrument version",
+            ),
+            True,
+        )
+
+    if defect_entry is not None:
+        eco_ranges = [r for r in defect_entry.ranges if r.type == "ECOSYSTEM"]
+        if not eco_ranges or any(version_in_range(ver, r.introduced, r.fixed) for r in eco_ranges):
+            return (
+                "affected",
+                BlastRadiusMatch(
+                    run_id=run.id,
+                    git_hash=run.git_hash,
+                    command=run.command,
+                    campaign_id=campaign_id,
+                    matched_files=[],
+                    reason=f"instrument {pkg}=={ver} matches defect {defect_entry.id}",
+                ),
+                True,
+            )
+        return "unaffected", None, True
+
+    if target_version is not None:
+        if ver == target_version:
+            return (
+                "affected",
+                BlastRadiusMatch(
+                    run_id=run.id,
+                    git_hash=run.git_hash,
+                    command=run.command,
+                    campaign_id=campaign_id,
+                    matched_files=[],
+                    reason=f"instrument {pkg}=={ver} matches defective version {target_version}",
+                ),
+                True,
+            )
+        return "unaffected", None, True
+
+    return (
+        "affected",
+        BlastRadiusMatch(
+            run_id=run.id,
+            git_hash=run.git_hash,
+            command=run.command,
+            campaign_id=campaign_id,
+            matched_files=[],
+            reason=f"instrument {pkg}=={ver} recorded in dependency_provenance",
+        ),
+        True,
+    )
+
+
 def assess_blast_radius(
     catalog_dir: Path | str,
     project_root: Path | str,
@@ -828,12 +969,15 @@ def assess_blast_radius(
     commit_range: str | None = None,
     files: list[str] | None = None,
     dependency: bool = False,
+    sidecar: str | None = None,
+    input_artifact: str | None = None,
+    instrument: str | None = None,
     project: str | None = None,
 ) -> BlastRadiusReport:
-    """Assess which catalogued runs a bug/fix implicates (AC-1, AC-2, AC-3, AC-4, AC-5).
+    """Assess which catalogued runs a bug/fix implicates (AC-1..AC-5, #2686).
 
-    Exactly one of `commit`, `commit_range`, `files`, or `dependency=True` must be
-    given -- these are the four anchor types (spec Decision Log #1). This function
+    Exactly one of `commit`, `commit_range`, `files`, `dependency=True`,
+    `sidecar`, `input_artifact`, or `instrument` must be given. This function
     is a pure read: it does not write to the ledger. Callers pass the returned
     report to flag_blast_radius() to durably record it (AC-11: report-then-flag
     ordering).
@@ -841,59 +985,54 @@ def assess_blast_radius(
     Args:
         catalog_dir: Path to the bathos catalog root.
         project_root: Path to the git repository to diff/query ancestry against.
-        commit: A single fix commit SHA. Changed-file set = that commit's diff
-            against its own parent. Ancestry boundary = the commit's parent (a run
-            at or before the parent predates the fix -> "affected" if it touches a
-            changed file; a run AT the fix commit itself already has the fix).
-        commit_range: A `"<base>..<tip>"` range. Changed-file set = the whole
-            range's diff. Ancestry boundary = `<base>` (a run at or before base
-            predates the fix).
-        files: Explicit file/symbol path(s) (AC-2). No ancestry check is applied --
-            there is no commit boundary to compare against, so any run touching
-            these files is "affected" regardless of when it ran.
-        dependency: If True (AC-3), assess for dependency-lock drift instead of a
-            file/commit anchor. Not file-based -- reuses
-            bathos.checker.check_dependency_lock_drift/hash_dependency_lock as-is
-            (backlog #4552 constraint: whole-lockfile hash comparison only, no
-            per-package diffing). A run with no recorded dependency_lock_sha256
-            (predates that field) goes to "unverifiable", NOT "unaffected" --
-            deliberately not reusing check_dependency_lock_drift's own
-            fail-open-on-missing-hash default, which is right for its own
-            freshness-scan purpose but would be a silent false negative here.
-        project: Optional project_slug filter. bathos's catalog is shared across
-            multiple projects (a run in project B whose command happens to
-            substring-match a changed filename in project A would otherwise be
-            pulled into the match set); pass this to scope the scan to one
-            project. Default None scans the whole catalog, matching the tool's
-            other defaults -- cross-project matches remain possible but are of a
-            piece with the already-accepted heuristic-noise tradeoff (auditable
-            via AC-13's match_reason, not silently wrong the way truncation was).
+        commit: A single fix commit SHA.
+        commit_range: A `"<base>..<tip>"` range.
+        files: Explicit file/symbol path(s) (AC-2, no commit ancestry check).
+        dependency: If True (AC-3), assess for dependency-lock drift.
+        sidecar: Non-code defect anchor (#2686): sidecar path, `<path>#<clause>`,
+            or sidecar sha256 (prefix or full) implicating runs referencing that
+            sidecar/clause.
+        input_artifact: Non-code defect anchor (#2686): input artifact path,
+            digest, or `<path>@<digest>` implicating runs referencing that input.
+        instrument: Non-code defect anchor (#2686): instrument package (`"aminx"`),
+            pinned version (`"aminx@0.12.1"` or `"aminx==0.12.1"`), or defect ID
+            (`"AMINX-2026-001"` / `"aminx:AMINX-2026-001"`).
+        project: Optional project_slug filter.
 
     Returns:
-        A BlastRadiusReport. Does not raise for "no runs matched" (empty buckets is
-        a valid, non-error result) -- only raises ValueError for a malformed anchor
-        argument combination.
+        A BlastRadiusReport.
     """
-    n_anchors = sum(x is not None for x in (commit, commit_range, files)) + int(dependency)
+    n_anchors = sum(
+        x is not None
+        for x in (commit, commit_range, files, sidecar, input_artifact, instrument)
+    ) + int(dependency)
     if n_anchors != 1:
         raise ValueError(
             "assess_blast_radius requires exactly one of commit, commit_range, files, "
-            f"or dependency=True (got {n_anchors})"
+            f"dependency=True, sidecar, input_artifact, or instrument (got {n_anchors})"
         )
 
     project_root = Path(project_root)
-    #: None only for the file and dependency anchors (no commit boundary to check
-    #: ancestry against); set for both commit and commit_range. This one variable is
-    #: the sole ancestry switch -- a separate `use_ancestry` bool used to shadow it,
-    #: redundant since it was always exactly `boundary is not None` (code-review
-    #: finding, PR #54).
     boundary: str | None = None
+    changed_files: list[str] = []
+
+    sidecar_base = ""
+    sidecar_clause = ""
+    sidecar_is_sha = False
+    sidecar_disk_sha: str | None = None
+
+    art_path = ""
+    art_digest: str | None = None
+
+    inst_pkg = ""
+    inst_ver: str | None = None
+    inst_defect: Any | None = None
+    inst_ver_key = ""
 
     if dependency:
         anchor_kind = "dependency"
         current_lock_hash = hash_dependency_lock(project_root)
         anchor_value = current_lock_hash or "no-uv.lock-present"
-        changed_files: list[str] = []  # not file-based; per-run loop special-cases this anchor
     elif commit is not None:
         anchor_kind, anchor_value = "commit", commit
         changed_files = _git_diff_name_only(f"{commit}^", commit, project_root)
@@ -902,14 +1041,6 @@ def assess_blast_radius(
         if ".." not in commit_range:
             raise ValueError(f"commit_range must contain '..', got {commit_range!r}")
         if "..." in commit_range:
-            # git's three-dot "A...B" is symmetric-difference and does NOT guarantee
-            # A is an ancestor of B -- but `commit_range.split("..")[0]` below treats
-            # the base as exactly that ancestry boundary. Silently accepting a
-            # three-dot range would compute changed_files correctly (git handles it
-            # natively) while quietly using a boundary the range doesn't actually
-            # promise, producing a wrong affected/unaffected split with no warning
-            # (code-review finding, PR #54). This function only ever documented
-            # two-dot "<base>..<tip>" syntax; reject the ambiguous case explicitly.
             raise ValueError(
                 f"commit_range must use two-dot '<base>..<tip>' syntax, not "
                 f"three-dot (symmetric-difference) syntax: got {commit_range!r}"
@@ -917,18 +1048,56 @@ def assess_blast_radius(
         anchor_kind, anchor_value = "commit_range", commit_range
         changed_files = _git_diff_name_only_range(commit_range, project_root)
         boundary = commit_range.split("..")[0]
-    else:
-        assert files is not None  # guaranteed by the n_anchors == 1 check above
+    elif files is not None:
         anchor_kind, anchor_value = "file", ",".join(files)
         changed_files = list(files)
+    elif sidecar is not None:
+        anchor_value = sidecar.strip()
+        if not anchor_value:
+            raise ValueError("sidecar anchor must be non-empty")
+        anchor_kind = "sidecar"
+        raw_base, has_clause, raw_clause = anchor_value.partition("#")
+        sidecar_base = raw_base.strip()
+        sidecar_clause = raw_clause.strip()
+        if not sidecar_base:
+            raise ValueError("sidecar anchor must name a sidecar path or sha256")
+        if has_clause and not sidecar_clause:
+            raise ValueError("sidecar anchor '#' clause must be non-empty")
+        sidecar_is_sha = bool(_HEX_DIGEST_RE.fullmatch(sidecar_base))
+        if not sidecar_is_sha:
+            changed_files = [sidecar_base]
+            cand = Path(sidecar_base) if Path(sidecar_base).is_absolute() else project_root / sidecar_base
+            if cand.is_file():
+                with contextlib.suppress(OSError):
+                    sidecar_disk_sha = hashlib.sha256(cand.read_bytes()).hexdigest()
+    elif input_artifact is not None:
+        anchor_value = input_artifact.strip()
+        if not anchor_value:
+            raise ValueError("input_artifact anchor must be non-empty")
+        anchor_kind = "input_artifact"
+        if "@" in anchor_value:
+            raw_p, _, raw_d = anchor_value.partition("@")
+            art_path = raw_p.strip()
+            art_digest = raw_d.strip()
+            if not art_path or not art_digest:
+                raise ValueError(f"malformed input_artifact anchor {input_artifact!r}")
+        else:
+            art_path = anchor_value
+        if art_path:
+            changed_files = [art_path]
+    else:
+        assert instrument is not None
+        anchor_value = instrument.strip()
+        if not anchor_value:
+            raise ValueError("instrument anchor must be non-empty")
+        anchor_kind = "instrument"
+        from bathos.version_resolver import key_prefix
+
+        inst_pkg, inst_ver, inst_defect = _resolve_instrument_spec(anchor_value, project_root)
+        inst_ver_key = f"{key_prefix(inst_pkg)}_version"
 
     warnings: list[str] = []
 
-    # Single catalog scan, reused for both the check-results lookup and the per-run
-    # loop below (debt #1486: check_runs() used to call list_runs() again internally
-    # with the same catalog_dir/project/limit, scanning the same rows twice).
-    # debt #2684: if another process holds the warm DuckDB lock, answer from the cool
-    # tier instead of failing the whole assessment, and say which tier answered.
     try:
         all_runs = list_runs(Path(catalog_dir), project=project, limit=_UNBOUNDED_SCAN_LIMIT)
     except duckdb.Error as exc:
@@ -940,28 +1109,23 @@ def assess_blast_radius(
             "DuckDB catalog, because the catalog database is locked by another process. "
             "The cool tier can differ from the warm tier until the next compact."
         )
-    check_results = {
-        r.run_id: r
-        for r in check_runs(
-            Path(catalog_dir),
-            project_root,
-            project=project,
-            limit=_UNBOUNDED_SCAN_LIMIT,
-            runs=all_runs,
-        )
-    }
+    check_results = (
+        {
+            r.run_id: r
+            for r in check_runs(
+                Path(catalog_dir),
+                project_root,
+                project=project,
+                limit=_UNBOUNDED_SCAN_LIMIT,
+                runs=all_runs,
+            )
+        }
+        if anchor_kind in ("commit", "commit_range", "file")
+        else {}
+    )
 
-    # Campaign membership has two independent, NOT-mutually-synced sources: Run.campaign_id
-    # (set at write time by some flows, and what readback.list_candidates reads) and the
-    # campaign_runs junction table (populated by bathos.campaigns.add_run_to_campaign,
-    # which does NOT also update the run's own campaign_id field -- confirmed live: a run
-    # added via add_run_to_campaign alone has campaign_id == ""). AC-7/AC-8 propagation
-    # needs the real membership, so both are checked, run.campaign_id preferred when set.
-    # Built once here, not per-run, mirroring check_results above.
     campaign_by_run: dict[str, str] = {}
     if catalog_readable(Path(catalog_dir)):
-        # The connect itself can raise on a held lock (log-mode reads ATTACH index.db
-        # inside connect_read), so the try covers connect as well as the query.
         try:
             con = connect_read(Path(catalog_dir), read_only=True)
             try:
@@ -973,13 +1137,14 @@ def assess_blast_radius(
             warnings.append(_campaign_read_warning(exc))
 
     ctx = _MatchContext(project_root)
-    #: changed files that matched at least one run on any source (file-anchor coverage)
     matched_anywhere: set[str] = set()
     affected: list[BlastRadiusMatch] = []
     unverifiable: list[BlastRadiusMatch] = []
     unaffected_run_ids: list[str] = []
+    instrument_pkg_recorded_count = 0
 
     for run in all_runs:
+        camp_id = run.campaign_id or campaign_by_run.get(run.id, "")
         if anchor_kind == "dependency":
             if not run.dependency_lock_sha256:
                 unverifiable.append(
@@ -987,7 +1152,7 @@ def assess_blast_radius(
                         run_id=run.id,
                         git_hash=run.git_hash,
                         command=run.command,
-                        campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
+                        campaign_id=camp_id,
                         matched_files=[],
                         reason=(
                             "no recorded dependency_lock_sha256 -- predates that "
@@ -996,9 +1161,6 @@ def assess_blast_radius(
                     )
                 )
                 continue
-            # current_lock_hash was already computed once above (anchor_value) --
-            # pass it through instead of letting check_dependency_lock_drift re-hash
-            # uv.lock on every iteration of this per-run loop (debt #1487).
             if check_dependency_lock_drift(
                 run.dependency_lock_sha256, project_root, current_sha256=current_lock_hash
             ):
@@ -1007,7 +1169,7 @@ def assess_blast_radius(
                         run_id=run.id,
                         git_hash=run.git_hash,
                         command=run.command,
-                        campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
+                        campaign_id=camp_id,
                         matched_files=[],
                         reason=(
                             f"dependency_lock_sha256 {run.dependency_lock_sha256[:9]} "
@@ -1015,6 +1177,64 @@ def assess_blast_radius(
                         ),
                     )
                 )
+            else:
+                unaffected_run_ids.append(run.id)
+            continue
+
+        if anchor_kind == "sidecar":
+            bucket, match = _assess_sidecar_run(
+                run,
+                base=sidecar_base,
+                clause=sidecar_clause,
+                is_sha=sidecar_is_sha,
+                disk_sha=sidecar_disk_sha,
+                ctx=ctx,
+                catalog_dir=Path(catalog_dir),
+                campaign_id=camp_id,
+            )
+            if bucket == "affected" and match is not None:
+                affected.append(match)
+                matched_anywhere.update(match.matched_files)
+            elif bucket == "unverifiable" and match is not None:
+                unverifiable.append(match)
+                matched_anywhere.update(match.matched_files)
+            else:
+                unaffected_run_ids.append(run.id)
+            continue
+
+        if anchor_kind == "input_artifact":
+            bucket, match = _assess_input_artifact_run(
+                run,
+                art_path=art_path,
+                art_digest=art_digest,
+                ctx=ctx,
+                campaign_id=camp_id,
+            )
+            if bucket == "affected" and match is not None:
+                affected.append(match)
+                matched_anywhere.update(match.matched_files)
+            elif bucket == "unverifiable" and match is not None:
+                unverifiable.append(match)
+                matched_anywhere.update(match.matched_files)
+            else:
+                unaffected_run_ids.append(run.id)
+            continue
+
+        if anchor_kind == "instrument":
+            bucket, match, recorded_pkg = _assess_instrument_run(
+                run,
+                pkg=inst_pkg,
+                target_version=inst_ver,
+                defect_entry=inst_defect,
+                campaign_id=camp_id,
+                ver_key=inst_ver_key,
+            )
+            if recorded_pkg:
+                instrument_pkg_recorded_count += 1
+            if bucket == "affected" and match is not None:
+                affected.append(match)
+            elif bucket == "unverifiable" and match is not None:
+                unverifiable.append(match)
             else:
                 unaffected_run_ids.append(run.id)
             continue
@@ -1035,7 +1255,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
-                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
+                    campaign_id=camp_id,
                     matched_files=matched_files,
                     reason=(
                         f"{touch} but git status is {status} -- "
@@ -1051,7 +1271,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
-                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
+                    campaign_id=camp_id,
                     matched_files=matched_files,
                     reason=f"{touch} (file anchor -- no commit ancestry check applied)",
                 )
@@ -1065,7 +1285,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
-                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
+                    campaign_id=camp_id,
                     matched_files=matched_files,
                     reason=(
                         f"{touch}; ancestry of git_hash "
@@ -1080,7 +1300,7 @@ def assess_blast_radius(
                     run_id=run.id,
                     git_hash=run.git_hash,
                     command=run.command,
-                    campaign_id=run.campaign_id or campaign_by_run.get(run.id, ""),
+                    campaign_id=camp_id,
                     matched_files=matched_files,
                     reason=(
                         f"{touch}; git_hash {run.git_hash[:9]} "
@@ -1101,6 +1321,24 @@ def assess_blast_radius(
                     "or a runtime-read input is invisible here. Zero matches is "
                     "unverified, not clean."
                 )
+    elif anchor_kind == "input_artifact" and art_path and not matched_anywhere and not affected and not unverifiable:
+        warnings.append(
+            f"input_artifact anchor '{anchor_value}' matched no run's command/argv/sidecar/"
+            "manifest/metadata. bathos records no runtime file reads unless declared or "
+            "logged, so zero matches is unverified, not clean."
+        )
+    elif anchor_kind == "sidecar" and not sidecar_is_sha and not affected and not unverifiable:
+        warnings.append(
+            f"sidecar anchor '{anchor_value}' matched no run's sidecar_path or sidecar_sha256. "
+            "Zero matches is unverified if runs predated sidecar recording."
+        )
+    elif anchor_kind == "instrument" and all_runs and instrument_pkg_recorded_count == 0 and not affected:
+        warnings.append(
+            f"no run recorded dependency_provenance for '{inst_pkg}' ({inst_ver_key}); "
+            "if '{inst_pkg}' was not listed in [provenance] track_packages, zero matches "
+            "is unverified, not clean."
+        )
+
     for key in ctx.truncated:
         warnings.append(
             f"only the first 1 MiB of '{key}' was searched for file references; a "

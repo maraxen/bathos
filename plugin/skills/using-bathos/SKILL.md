@@ -651,6 +651,14 @@ The loop: profile one unit at production shapes with `xtrax profile --fn <module
 
 Enforcement follows the same rule as the rest of the gate: unmet blocks at `validation`, `ablation` or `production` once `[gate] requires_enforce_after` is reached, and warns everywhere else. Until that date is set, the gate warns.
 
+#### Non-JAX workloads: production-shape profiling & vectorized-vs-loop check (`#2789`)
+
+Before committing a sidecar or submitting a multi-minute run (PyTorch, NumPy, SciPy, Rust/Cython, or Python pipelines), apply the same staging discipline:
+
+1. **Profile a tracked probe at production shapes** — Run a short probe using real batch/sequence/grid dimensions on the target device and record a JSON probe artifact (e.g. `outputs/profiling/<stem>/probe.json`) containing `git_sha`, `per_unit_s` (seconds per unit/sample/step), estimated total wall time (`est_wall_s`), the setup/compile/device/host-Python time split, and the recompile or graph-break count (`torch.compile` / kernel cache misses).
+2. **Pin `[requires]` and `[budget]` in the sidecar** — Point `[requires].artifact` at the probe JSON (`json_key = "git_sha"`, `must_equal = "HEAD"`) and `[budget].probe_record` + `[budget].per_unit_s` at the measured per-unit cost (`bth preflight <script>` validates that `[budget].per_unit_s` does not underestimate the recorded probe).
+3. **Verify vectorized-vs-loop equivalence before scaling** — Whenever code iterates over single inputs (samples, molecules, chains, grid points), implement a batched/vectorized form and assert numerical equivalence against the scalar/loop reference on synthetic inputs (`np.allclose` / `torch.allclose` with explicit `rtol`/`atol`) before benchmarking or queueing. Record the loop-vs-batched speedup in the probe artifact and never submit an unvectorized per-item Python loop where a batched form exists.
+
 ### Lint Checks
 
 #### Tier-1 (Error)

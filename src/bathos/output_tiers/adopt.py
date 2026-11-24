@@ -138,6 +138,8 @@ def hash_outputs(
     Refuses ``no_reference_hashes`` when the run has none, and ``legacy_path_unresolved`` when a pre-standard
     entry cannot be placed under the worktree root (``reference_hashes`` would otherwise drop it silently).
     """
+    from bathos.output_tiers.retention import check_citation_retention
+
     ctx = open_run(catalog_dir, run_prefix, worktree_root=worktree_root)
     assert ctx.worktree_root is not None
     _check_legacy_resolvable(ctx)
@@ -146,7 +148,7 @@ def hash_outputs(
         raise OutputTierError(NO_REFERENCE_HASHES, ctx.run_id)
     files = [_live_state(ctx.worktree_root, ref[rel]) for rel in sorted(ref)]
     counts = {s: sum(1 for f in files if f["status"] == s) for s in ("match", "drift", "missing")}
-    return {
+    out: dict[str, Any] = {
         "ok": True,
         "run_id": ctx.run_id,
         "worktree_root": str(ctx.worktree_root),
@@ -156,6 +158,17 @@ def hash_outputs(
         "all_match": counts["drift"] == 0 and counts["missing"] == 0,
         "files": files,
     }
+    retention = check_citation_retention(
+        catalog_dir,
+        ctx.run_id,
+        worktree_root=str(ctx.worktree_root),
+        decision_relevant=None,
+        emit_telemetry=False,
+    )
+    out["retention"] = retention.to_dict()
+    if retention.warnings:
+        out["warnings"] = list(retention.warnings)
+    return out
 
 
 # --- adopt --------------------------------------------------------------------------------------

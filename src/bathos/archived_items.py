@@ -15,17 +15,17 @@ pattern ``trust_ledger.fold_trust_state`` uses for promotion state.
 
 from __future__ import annotations
 
-import time
+import json
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
-from bathos.telemetry import event
+from bathos.ledger import AppendOnlyLedger, now_iso
 
 _TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS archived_items (
@@ -51,6 +51,26 @@ CREATE TABLE IF NOT EXISTS archived_items (
 
 _FRAGMENTS_DIRNAME = "archived_items"
 
+_ARCHIVED_COLUMNS = (
+    "id",
+    "project_slug",
+    "event",
+    "kind",
+    "paths",
+    "pre_archive_sha",
+    "stub_commit_sha",
+    "verdict",
+    "reason",
+    "superseded_by",
+    "bundle_sha256",
+    "bundle_path",
+    "archived_by",
+    "recorded_at",
+    "record_id",
+    "script_sha256",
+    "run_ids",
+)
+
 _FRAGMENT_SCHEMA = pa.schema(
     [
         pa.field("record_id", pa.string()),
@@ -75,7 +95,7 @@ _FRAGMENT_SCHEMA = pa.schema(
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return now_iso()
 
 
 @dataclass(frozen=True)
@@ -107,103 +127,81 @@ class ArchivedItemRecord:
     run_ids: list[str] = field(default_factory=list)
 
 
-def _fragments_dir(catalog_dir: Path | str) -> Path:
-    return Path(catalog_dir) / _FRAGMENTS_DIRNAME
+def _parse_json_list(raw: Any) -> list[str]:
+    try:
+        return json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
 
 
-def write_archived_item_fragment(record: ArchivedItemRecord, catalog_dir: Path | str) -> None:
-    """Write an immutable cool-tier Parquet fragment for one ledger record.
+def _record_to_fragment_row(record: ArchivedItemRecord) -> dict[str, list[Any]]:
+    return {
+        "record_id": [record.record_id],
+        "id": [record.id],
+        "project_slug": [record.project_slug],
+        "event": [record.event],
+        "kind": [record.kind],
+        "paths": [json.dumps(record.paths)],
+        "pre_archive_sha": [record.pre_archive_sha],
+        "stub_commit_sha": [record.stub_commit_sha],
+        "verdict": [record.verdict],
+        "reason": [record.reason],
+        "superseded_by": [record.superseded_by],
+        "bundle_sha256": [record.bundle_sha256],
+        "bundle_path": [record.bundle_path],
+        "archived_by": [record.archived_by],
+        "recorded_at": [record.recorded_at],
+        "script_sha256": [record.script_sha256],
+        "run_ids": [json.dumps(record.run_ids) if record.run_ids else None],
+    }
 
-    One fragment per record, keyed by the record's own ``record_id`` -- never superseded on
-    read-back, exactly like ``trust_ledger.write_ledger_fragment``.
-    """
-    import json
 
-    frag_dir = _fragments_dir(catalog_dir)
-    frag_dir.mkdir(parents=True, exist_ok=True)
-    target = frag_dir / f"archived_{record.record_id}.parquet"
-    tmp = frag_dir / f"archived_{record.record_id}.tmp.parquet"
+def _record_to_warm_values(record: ArchivedItemRecord) -> list[Any]:
+    return [
+        record.id,
+        record.project_slug,
+        record.event,
+        record.kind,
+        json.dumps(record.paths),
+        record.pre_archive_sha,
+        record.stub_commit_sha,
+        record.verdict,
+        record.reason,
+        record.superseded_by,
+        record.bundle_sha256,
+        record.bundle_path,
+        record.archived_by,
+        record.recorded_at,
+        record.record_id,
+        record.script_sha256,
+        json.dumps(record.run_ids) if record.run_ids else None,
+    ]
 
-    t_start = time.monotonic()
-    table = pa.table(
-        {
-            "record_id": [record.record_id],
-            "id": [record.id],
-            "project_slug": [record.project_slug],
-            "event": [record.event],
-            "kind": [record.kind],
-            "paths": [json.dumps(record.paths)],
-            "pre_archive_sha": [record.pre_archive_sha],
-            "stub_commit_sha": [record.stub_commit_sha],
-            "verdict": [record.verdict],
-            "reason": [record.reason],
-            "superseded_by": [record.superseded_by],
-            "bundle_sha256": [record.bundle_sha256],
-            "bundle_path": [record.bundle_path],
-            "archived_by": [record.archived_by],
-            "recorded_at": [record.recorded_at],
-            "script_sha256": [record.script_sha256],
-            "run_ids": [json.dumps(record.run_ids) if record.run_ids else None],
-        },
-        schema=_FRAGMENT_SCHEMA,
+
+def _record_from_values(values: Mapping[str, Any]) -> ArchivedItemRecord:
+    return ArchivedItemRecord(
+        record_id=values["record_id"],
+        id=values["id"],
+        project_slug=values["project_slug"],
+        event=values["event"],
+        kind=values.get("kind") or "",
+        paths=_parse_json_list(values.get("paths")),
+        pre_archive_sha=values.get("pre_archive_sha") or "",
+        stub_commit_sha=values.get("stub_commit_sha") or "",
+        verdict=values.get("verdict") or "",
+        reason=values.get("reason") or "",
+        superseded_by=values.get("superseded_by") or "",
+        bundle_sha256=values.get("bundle_sha256") or "",
+        bundle_path=values.get("bundle_path") or "",
+        archived_by=values.get("archived_by") or "",
+        recorded_at=values["recorded_at"],
+        script_sha256=values.get("script_sha256") or None,
+        run_ids=_parse_json_list(values.get("run_ids")),
     )
-    pq.write_table(table, tmp)
-    tmp.rename(target)  # atomic on POSIX
-    duration_ms = (time.monotonic() - t_start) * 1000
-
-    event("archived_items.write_fragment", path=str(target), rows=1, duration_ms=int(duration_ms))
 
 
-def read_archived_item_fragments(catalog_dir: Path | str) -> list[ArchivedItemRecord]:
-    """Read every cool-tier fragment, unfolded (full history, no latest-wins collapse) --
-    the append-only read path used by compact-time re-ingestion."""
-    import json
-
-    frag_dir = _fragments_dir(catalog_dir)
-    if not frag_dir.exists():
-        return []
-    parquet_files = list(frag_dir.glob("archived_*.parquet"))
-    if not parquet_files:
-        return []
-
-    tables = [pq.read_table(f) for f in parquet_files]
-    combined = pa.concat_tables(tables, promote_options="permissive")
-    pydict = combined.to_pydict()
-
-    records = []
-    for i in range(combined.num_rows):
-        raw_paths = pydict["paths"][i]
-        try:
-            paths = json.loads(raw_paths) if raw_paths else []
-        except (TypeError, ValueError):
-            paths = []
-        raw_run_ids = pydict.get("run_ids", [None])[i] if "run_ids" in pydict else None
-        try:
-            run_ids = json.loads(raw_run_ids) if raw_run_ids else []
-        except (TypeError, ValueError):
-            run_ids = []
-        records.append(
-            ArchivedItemRecord(
-                record_id=pydict["record_id"][i],
-                id=pydict["id"][i],
-                project_slug=pydict["project_slug"][i],
-                event=pydict["event"][i],
-                kind=pydict["kind"][i] or "",
-                paths=paths,
-                pre_archive_sha=pydict["pre_archive_sha"][i] or "",
-                stub_commit_sha=pydict["stub_commit_sha"][i] or "",
-                verdict=pydict["verdict"][i] or "",
-                reason=pydict["reason"][i] or "",
-                superseded_by=pydict["superseded_by"][i] or "",
-                bundle_sha256=pydict["bundle_sha256"][i] or "",
-                bundle_path=pydict["bundle_path"][i] or "",
-                archived_by=pydict["archived_by"][i] or "",
-                recorded_at=pydict["recorded_at"][i],
-                script_sha256=pydict.get("script_sha256", [None])[i] if "script_sha256" in pydict else None,
-                run_ids=run_ids,
-            )
-        )
-    return records
+def _fragments_dir(catalog_dir: Path | str) -> Path:
+    return _LEDGER.fragments_dir(catalog_dir)
 
 
 def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
@@ -212,48 +210,49 @@ def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
     return con
 
 
+_LEDGER: AppendOnlyLedger[ArchivedItemRecord] = AppendOnlyLedger(
+    table_name="archived_items",
+    fragments_dirname=_FRAGMENTS_DIRNAME,
+    fragment_prefix="archived",
+    pk_col="record_id",
+    order_col="recorded_at",
+    columns=_ARCHIVED_COLUMNS,
+    fragment_schema=_FRAGMENT_SCHEMA,
+    runlog_kind="archived_item.recorded",
+    telemetry_prefix="archived_items",
+    connect_fn=_connect,
+    record_from_values=_record_from_values,
+    record_to_fragment_row=_record_to_fragment_row,
+    record_to_warm_values=_record_to_warm_values,
+    append_event_fields=lambda r: {
+        "id": r.id,
+        "event_type": r.event,
+        "project_slug": r.project_slug,
+    },
+)
+
+
+def write_archived_item_fragment(record: ArchivedItemRecord, catalog_dir: Path | str) -> None:
+    """Write an immutable cool-tier Parquet fragment for one ledger record.
+
+    One fragment per record, keyed by the record's own ``record_id`` -- never superseded on
+    read-back, exactly like ``trust_ledger.write_ledger_fragment``.
+    """
+    _LEDGER.write_fragment(record, catalog_dir)
+
+
+def read_archived_item_fragments(catalog_dir: Path | str) -> list[ArchivedItemRecord]:
+    """Read every cool-tier fragment, unfolded (full history, no latest-wins collapse) --
+    the append-only read path used by compact-time re-ingestion."""
+    return _LEDGER.read_fragments(catalog_dir)
+
+
 def _insert_warm_row(record: ArchivedItemRecord, catalog_dir: Path | str) -> None:
-    con = _connect(catalog_dir)
-    try:
-        existing = con.execute(
-            "SELECT record_id FROM archived_items WHERE record_id = ?", [record.record_id]
-        ).fetchone()
-        if existing:
-            return  # append-only: never update an existing ledger row
-        _insert_row(con, record)
-    finally:
-        con.close()
+    _LEDGER.insert_warm_row(record, catalog_dir)
 
 
 def _insert_row(con: duckdb.DuckDBPyConnection, record: ArchivedItemRecord) -> None:
-    import json
-
-    con.execute(
-        "INSERT INTO archived_items "
-        "(id, project_slug, event, kind, paths, pre_archive_sha, stub_commit_sha, verdict, "
-        "reason, superseded_by, bundle_sha256, bundle_path, archived_by, recorded_at, record_id, "
-        "script_sha256, run_ids) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            record.id,
-            record.project_slug,
-            record.event,
-            record.kind,
-            json.dumps(record.paths),
-            record.pre_archive_sha,
-            record.stub_commit_sha,
-            record.verdict,
-            record.reason,
-            record.superseded_by,
-            record.bundle_sha256,
-            record.bundle_path,
-            record.archived_by,
-            record.recorded_at,
-            record.record_id,
-            record.script_sha256,
-            json.dumps(record.run_ids) if record.run_ids else None,
-        ],
-    )
+    _LEDGER.insert_warm_row_using_conn(con, record)
 
 
 def append_archived_item_record(
@@ -270,74 +269,11 @@ def append_archived_item_record(
     legacy writes, unchanged. `cwd` resolves the runlog project/root when the
     flag is on (defaults to `Path.cwd()` via `resolve_log_root`).
     """
-    from dataclasses import asdict
-
-    from bathos.runlog.emit import emit_or_legacy, unit_of_work
-
-    def _legacy_write() -> None:
-        write_archived_item_fragment(record, catalog_dir)
-        _insert_warm_row(record, catalog_dir)
-
-    with unit_of_work(Path(catalog_dir)):
-        emit_or_legacy(
-            kind="archived_item.recorded",
-            entity=[record.record_id],
-            data=asdict(record),
-            legacy_write=_legacy_write,
-            cwd=cwd,
-        )
-    event(
-        "archived_items.append",
-        id=record.id,
-        event_type=record.event,
-        project_slug=record.project_slug,
-    )
-    return record
+    return _LEDGER.append_record(record, catalog_dir, cwd=cwd)
 
 
 def latest_status(catalog_dir: Path | str, item_id: str) -> ArchivedItemRecord | None:
     """Return the latest-by-``recorded_at`` record for ``item_id``, or ``None`` if the item
     has never been archived. Folds "archived" -> possibly-later "restored", latest-wins,
     mirroring ``trust_ledger.latest_ledger_record``."""
-    con = _connect(catalog_dir)
-    try:
-        row = con.execute(
-            "SELECT id, project_slug, event, kind, paths, pre_archive_sha, stub_commit_sha, "
-            "verdict, reason, superseded_by, bundle_sha256, bundle_path, archived_by, "
-            "recorded_at, record_id, script_sha256, run_ids FROM archived_items WHERE id = ? "
-            "ORDER BY recorded_at DESC LIMIT 1",
-            [item_id],
-        ).fetchone()
-        if row is None:
-            return None
-        import json
-
-        try:
-            paths = json.loads(row[4]) if row[4] else []
-        except (TypeError, ValueError):
-            paths = []
-        try:
-            run_ids = json.loads(row[16]) if row[16] else []
-        except (TypeError, ValueError):
-            run_ids = []
-        return ArchivedItemRecord(
-            id=row[0],
-            project_slug=row[1],
-            event=row[2],
-            kind=row[3] or "",
-            paths=paths,
-            pre_archive_sha=row[5] or "",
-            stub_commit_sha=row[6] or "",
-            verdict=row[7] or "",
-            reason=row[8] or "",
-            superseded_by=row[9] or "",
-            bundle_sha256=row[10] or "",
-            bundle_path=row[11] or "",
-            archived_by=row[12] or "",
-            recorded_at=row[13],
-            record_id=row[14],
-            script_sha256=row[15] or None,
-            run_ids=run_ids,
-        )
-    finally:
-        con.close()
+    return _LEDGER.latest_record_via_connect(catalog_dir, [("id", item_id)])

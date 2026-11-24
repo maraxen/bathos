@@ -1056,6 +1056,7 @@ def where_outputs(catalog_dir: Path, run_prefix: str) -> dict[str, Any]:
     """``bth outputs where``: the ``output_copies`` rows of one run, each with the config layer that chose it.
     Works on an ``index.db`` that predates the table (it reads as empty until the next ingest)."""
     from bathos.index import OUTPUT_COPIES_COLUMNS, connect_read
+    from bathos.output_tiers.retention import check_citation_retention
 
     ctx = open_run(catalog_dir, run_prefix, need_root=False)
     con = connect_read(catalog_dir)
@@ -1070,13 +1071,23 @@ def where_outputs(catalog_dir: Path, run_prefix: str) -> dict[str, Any]:
         con.close()
     copies = [dict(zip(OUTPUT_COPIES_COLUMNS, r, strict=True)) for r in rows]
     live = [c for c in copies if c["superseded_at"] is None]
-    return {
+    out: dict[str, Any] = {
         "ok": True,
         "run_id": ctx.run_id,
         "n_copies": len(copies),
         "n_verified": sum(1 for c in live if c["state"] == "verified"),
         "copies": copies,
     }
+    try:
+        retention = check_citation_retention(
+            catalog_dir, ctx.run_id, decision_relevant=None, emit_telemetry=False
+        )
+        out["retention"] = retention.to_dict()
+        if retention.warnings:
+            out["warnings"] = list(retention.warnings)
+    except OutputTierError:
+        pass
+    return out
 
 
 # Re-exported for the tool layer, which shapes these as error dicts.

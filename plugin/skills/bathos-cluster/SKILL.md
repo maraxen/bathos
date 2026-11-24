@@ -47,6 +47,13 @@ project = "myproject"
 
 Sidecar `[cluster]` section overrides `.bth.toml` defaults. CLI flags override sidecar.
 
+### Pre-Submission Profiling, Budget & Vectorization Gate (`#2789`)
+
+Before `bth submit` pushes or queues a job, it automatically runs `bth preflight` against the script's sidecar (`[requires]` and `[budget]`). For any run expected to take more than a few minutes (both JAX and non-JAX PyTorch/NumPy/Python workloads):
+
+1. **Production-shape probe & wall-time budget** — Run a tracked probe at production shapes (`xtrax profile` for JAX, or a tracked probe JSON under `outputs/profiling/<stem>/probe.json` for non-JAX) reporting seconds per unit (`per_unit_s`), the compile/device/host/Python time split, and recompile/graph-break count, and record `per_unit_s` + `probe_record` in `[budget]` (and `git_sha = "HEAD"` in `[requires]`) before submitting.
+2. **Vectorized-vs-loop check** — Replace single-input Python loops with a batched/vectorized form and verify numerical equivalence (`allclose` within explicit tolerance) against the scalar loop on synthetic inputs before submitting large `--array` sweeps or GPU jobs.
+
 ## Sync Catalog
 
 ### Push to Remote

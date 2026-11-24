@@ -44,17 +44,16 @@ supplying a plausible-looking but unverified ``attestation_ref``.
 
 from __future__ import annotations
 
-import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
-from bathos.telemetry import event
+from bathos.ledger import AppendOnlyLedger, now_iso
 
 _LEDGER_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trust_ledger (
@@ -71,6 +70,18 @@ CREATE TABLE IF NOT EXISTS trust_ledger (
 """
 
 _LEDGER_FRAGMENTS_DIRNAME = "ledger"
+
+_LEDGER_COLUMNS = (
+    "id",
+    "run_id",
+    "output_path",
+    "content_hash",
+    "from_state",
+    "to_state",
+    "attestation_ref",
+    "amended_at",
+    "reason",
+)
 
 _LEDGER_FRAGMENT_SCHEMA = pa.schema(
     [
@@ -94,7 +105,7 @@ class GraduationRefused(RuntimeError):
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return now_iso()
 
 
 @dataclass(frozen=True)
@@ -114,7 +125,48 @@ class TrustLedgerRecord:
 
 
 def _ledger_fragments_dir(catalog_dir: Path | str) -> Path:
-    return Path(catalog_dir) / _LEDGER_FRAGMENTS_DIRNAME
+    return _LEDGER.fragments_dir(catalog_dir)
+
+
+def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
+    con.execute(_LEDGER_TABLE_SCHEMA)
+    return con
+
+
+def _record_from_values(values: Mapping[str, Any]) -> TrustLedgerRecord:
+    return TrustLedgerRecord(
+        id=values["id"],
+        run_id=values["run_id"],
+        output_path=values["output_path"],
+        content_hash=values["content_hash"],
+        from_state=values["from_state"],
+        to_state=values["to_state"],
+        attestation_ref=values["attestation_ref"],
+        amended_at=values["amended_at"],
+        reason=values["reason"],
+    )
+
+
+_LEDGER: AppendOnlyLedger[TrustLedgerRecord] = AppendOnlyLedger(
+    table_name="trust_ledger",
+    fragments_dirname=_LEDGER_FRAGMENTS_DIRNAME,
+    fragment_prefix="ledger",
+    pk_col="id",
+    order_col="amended_at",
+    columns=_LEDGER_COLUMNS,
+    fragment_schema=_LEDGER_FRAGMENT_SCHEMA,
+    runlog_kind="trust_ledger.recorded",
+    telemetry_prefix="trust_ledger",
+    connect_fn=_connect,
+    record_from_values=_record_from_values,
+    append_event_fields=lambda r: {
+        "content_hash": r.content_hash,
+        "from_state": r.from_state,
+        "to_state": r.to_state,
+        "attestation_ref": r.attestation_ref,
+    },
+)
 
 
 def write_ledger_fragment(record: TrustLedgerRecord, catalog_dir: Path | str) -> None:
@@ -127,31 +179,7 @@ def write_ledger_fragment(record: TrustLedgerRecord, catalog_dir: Path | str) ->
     ledger is append-only by design; :func:`fold_trust_state` (not this write path)
     is what resolves "latest" for a given content_hash.
     """
-    frag_dir = _ledger_fragments_dir(catalog_dir)
-    frag_dir.mkdir(parents=True, exist_ok=True)
-    target = frag_dir / f"ledger_{record.id}.parquet"
-    tmp = frag_dir / f"ledger_{record.id}.tmp.parquet"
-
-    t_start = time.monotonic()
-    table = pa.table(
-        {
-            "id": [record.id],
-            "run_id": [record.run_id],
-            "output_path": [record.output_path],
-            "content_hash": [record.content_hash],
-            "from_state": [record.from_state],
-            "to_state": [record.to_state],
-            "attestation_ref": [record.attestation_ref],
-            "amended_at": [record.amended_at],
-            "reason": [record.reason],
-        },
-        schema=_LEDGER_FRAGMENT_SCHEMA,
-    )
-    pq.write_table(table, tmp)
-    tmp.rename(target)  # atomic on POSIX
-    duration_ms = (time.monotonic() - t_start) * 1000
-
-    event("trust_ledger.write_fragment", path=str(target), rows=1, duration_ms=int(duration_ms))
+    _LEDGER.write_fragment(record, catalog_dir)
 
 
 def read_ledger_fragments(catalog_dir: Path | str) -> list[TrustLedgerRecord]:
@@ -159,65 +187,11 @@ def read_ledger_fragments(catalog_dir: Path | str) -> list[TrustLedgerRecord]:
     collapse — this is the append-only read path used by compact-time re-ingestion
     and by tests asserting append-only-ness). See :func:`fold_trust_state` for the
     latest-wins query path."""
-    frag_dir = _ledger_fragments_dir(catalog_dir)
-    if not frag_dir.exists():
-        return []
-    parquet_files = list(frag_dir.glob("ledger_*.parquet"))
-    if not parquet_files:
-        return []
-
-    tables = [pq.read_table(f) for f in parquet_files]
-    combined = pa.concat_tables(tables, promote_options="permissive")
-    pydict = combined.to_pydict()
-
-    records = []
-    for i in range(combined.num_rows):
-        records.append(
-            TrustLedgerRecord(
-                id=pydict["id"][i],
-                run_id=pydict["run_id"][i],
-                output_path=pydict["output_path"][i],
-                content_hash=pydict["content_hash"][i],
-                from_state=pydict["from_state"][i],
-                to_state=pydict["to_state"][i],
-                attestation_ref=pydict["attestation_ref"][i],
-                amended_at=pydict["amended_at"][i],
-                reason=pydict["reason"][i],
-            )
-        )
-    return records
-
-
-def _connect(catalog_dir: Path | str) -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(str(Path(catalog_dir) / "bathos.db"))
-    con.execute(_LEDGER_TABLE_SCHEMA)
-    return con
+    return _LEDGER.read_fragments(catalog_dir)
 
 
 def _insert_warm_row(record: TrustLedgerRecord, catalog_dir: Path | str) -> None:
-    con = _connect(catalog_dir)
-    try:
-        existing = con.execute("SELECT id FROM trust_ledger WHERE id = ?", [record.id]).fetchone()
-        if existing:
-            return  # append-only: never update an existing ledger row
-        con.execute(
-            "INSERT INTO trust_ledger "
-            "(id, run_id, output_path, content_hash, from_state, to_state, "
-            "attestation_ref, amended_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                record.id,
-                record.run_id,
-                record.output_path,
-                record.content_hash,
-                record.from_state,
-                record.to_state,
-                record.attestation_ref,
-                record.amended_at,
-                record.reason,
-            ],
-        )
-    finally:
-        con.close()
+    _LEDGER.insert_warm_row(record, catalog_dir)
 
 
 def append_ledger_record(
@@ -237,59 +211,14 @@ def append_ledger_record(
     unchanged. `cwd` resolves the runlog project/root when the flag is on
     (defaults to `Path.cwd()` via `resolve_log_root`).
     """
-    from dataclasses import asdict
-
-    from bathos.runlog.emit import emit_or_legacy, unit_of_work
-
-    def _legacy_write() -> None:
-        write_ledger_fragment(record, catalog_dir)
-        _insert_warm_row(record, catalog_dir)
-
-    with unit_of_work(Path(catalog_dir)):
-        emit_or_legacy(
-            kind="trust_ledger.recorded",
-            entity=[record.id],
-            data=asdict(record),
-            legacy_write=_legacy_write,
-            cwd=cwd,
-        )
-    event(
-        "trust_ledger.append",
-        content_hash=record.content_hash,
-        from_state=record.from_state,
-        to_state=record.to_state,
-        attestation_ref=record.attestation_ref,
-    )
-    return record
+    return _LEDGER.append_record(record, catalog_dir, cwd=cwd)
 
 
 def latest_ledger_record(catalog_dir: Path | str, content_hash: str) -> TrustLedgerRecord | None:
     """Return the latest-by-``amended_at`` ledger record for ``content_hash``, or
     ``None`` if no record exists. This is the full-record counterpart to
     :func:`fold_trust_state`, which returns only the folded ``to_state`` string."""
-    con = _connect(catalog_dir)
-    try:
-        row = con.execute(
-            "SELECT id, run_id, output_path, content_hash, from_state, to_state, "
-            "attestation_ref, amended_at, reason FROM trust_ledger "
-            "WHERE content_hash = ? ORDER BY amended_at DESC LIMIT 1",
-            [content_hash],
-        ).fetchone()
-        if row is None:
-            return None
-        return TrustLedgerRecord(
-            id=row[0],
-            run_id=row[1],
-            output_path=row[2],
-            content_hash=row[3],
-            from_state=row[4],
-            to_state=row[5],
-            attestation_ref=row[6],
-            amended_at=row[7],
-            reason=row[8],
-        )
-    finally:
-        con.close()
+    return _LEDGER.latest_record_via_connect(catalog_dir, [("content_hash", content_hash)])
 
 
 def fold_trust_state(catalog_dir: Path | str, content_hash: str) -> str | None:
