@@ -2736,5 +2736,48 @@ def bearings_shadow_check_cmd(
     print(json.dumps(res, indent=2, default=str))
 
 
+parity_app = cyclopts.App(name="parity", help="Parity-evidence standard commands.")
+app.command(parity_app)
+
+
+@parity_app.command(name="where")
+def parity_where_cmd(
+    *,
+    parity_store: str = "",
+    json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+) -> None:
+    """Print the resolved parity-store path and which configuration layer decided."""
+    from bathos.parity.store import ParityStoreConfigError, resolve_parity_store
+
+    try:
+        res = resolve_parity_store(explicit=parity_store or None)
+    except ParityStoreConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_out:
+        print(json.dumps(res.to_dict(), indent=2, sort_keys=True))
+        return
+
+    print(f"store: {res.path if res.path is not None else 'off'}")
+    print(f"layer: {res.source}")
+    print("trace:")
+    print(res.format_trace())
+
+
+@parity_app.command(name="lint-store")
+def parity_lint_store_cmd(source_root: str = "") -> None:
+    """Check that parity library code contains no hard-coded default store path."""
+    from bathos.parity.store import lint_no_default_store_path
+
+    root = Path(source_root) if source_root else Path(__file__).resolve().parent / "parity"
+    violations = lint_no_default_store_path(root)
+    if violations:
+        for v in violations:
+            print(f"ERROR: {v}", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"OK: no hard-coded parity-store default path in {root}")
+
+
 if __name__ == "__main__":
     app()
