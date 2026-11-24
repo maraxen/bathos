@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-24
+
+### Added
+- **Rigor gates, `[hypothesis]` & continuous e-values (`#3094`, `#3095`, `#3099`, `#3098`):** unit-of-independence and source/batch confound lint gates, `correction_sweep.py` multiplicity correction sweeps, `[hypothesis]` sidecar block, continuous e-value accumulation in `fold_campaigns.py`, and `E_n` sequential evidence chart in `viz/`.
+- **Campaign formulation, extended citations & handoff reconciliation (`#3315`, `#2345`, `#1179`):** campaign formulation checks, extended `cite.py` reference validation, and `handoff_reconciliation.py`.
+- **Ledger, non-code blast-radius & output-tier packing (`#1474`, `#2686`, `#3495`, `idea-003`, `#2789`):** shared log-aware `ledger.py`, non-code anchors and frozen sidecar snapshots in `blast_radius.py`, output-tier retention policies, interim swappable `UnitPackReader` in `output_tiers/unit_pack_reader.py`, and `using-bathos` / `bathos-cluster` skill updates.
+- **Catalog ops & campaign edges (`#3508`, `#2238`, `#2213`, `#2079`):** `campaign_edges.py` graph queries/MCP tools, `runlog/project_id.py`, compaction `flock` serialization, and `reap.py` / `repair.py` / `verify.py` hardening.
+
+### Changed
+- **Full `ty` error-strength ratchet (`#4122`):** cleared all remaining `ty` diagnostics and removed `[tool.ty]` warning demotions so `ty check src/` runs at full error strength (0 diagnostics).
+
+### Fixed
+- **Test guard, postmortem, linter & pre-registration hardening (`#3323`, `#2820`, `#3061`, `#2916`, `#6645`, `#2224`, `#2220`, `#2218`):** `real_home_guard` home-write attribution, postmortem scaffold/value-flag fixes, configurable `[lint.naming]`, `validate.py` / `query.py` / `rich_fmt.py` / `claim.py` / `runner.py` fixes, and `prereg.py` script-stem / hashpin enforcement.
+- **4-prong adversarial audit remediation:** resolved confirmed P0/P1 findings across `viz/` (XSS escaping & SVG `inf`/`NaN` handling), `linter`/`correction_sweep`/`claim`/`cite`/`handoff_reconciliation`, `fold_campaigns`/`campaign_edges`/`mcp`/`reap`/`repair`/`prereg`, `ledger`/`blast_radius`/`compact`/`output_tiers`, and log-mode test isolation.
+
+### Held / Open
+- `#2322`, `#2314`, `#2677`, `#3096`, and `#3097` remain explicitly held/open.
+
 ## [0.17.0] - 2026-11-24
 
 ### Added
