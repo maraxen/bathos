@@ -2736,8 +2736,16 @@ def bearings_shadow_check_cmd(
     print(json.dumps(res, indent=2, default=str))
 
 
-parity_app = cyclopts.App(name="parity", help="Parity-evidence standard commands.")
+parity_app = cyclopts.App(name="parity", help="Parity-record and comparison-evidence standard commands.")
 app.command(parity_app)
+
+
+def _emit_parity_cli_error(exc: Exception, *, json_out: bool) -> None:
+    if json_out:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+    else:
+        print(f"Error: {exc}", file=sys.stderr)
+    raise SystemExit(1) from None
 
 
 @parity_app.command(name="where")
@@ -2752,8 +2760,7 @@ def parity_where_cmd(
     try:
         res = resolve_parity_store(explicit=parity_store or None)
     except ParityStoreConfigError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from None
+        _emit_parity_cli_error(exc, json_out=json_out)
 
     if json_out:
         print(json.dumps(res.to_dict(), indent=2, sort_keys=True))
@@ -2767,7 +2774,7 @@ def parity_where_cmd(
 
 @parity_app.command(name="lint-store")
 def parity_lint_store_cmd(source_root: str = "") -> None:
-    """Check that parity library code contains no hard-coded default store path."""
+    """Check that parity-record library code contains no hard-coded default store path."""
     from bathos.parity.store import lint_no_default_store_path
 
     root = Path(source_root) if source_root else Path(__file__).resolve().parent / "parity"
@@ -2792,8 +2799,7 @@ def parity_validate_cmd(
     try:
         _raw, data = load_parsed_declaration(Path(declaration_path))
     except ParityDeclareError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from None
+        _emit_parity_cli_error(exc, json_out=json_out)
 
     issues = validate_declaration(data)
     if json_out:
@@ -2839,9 +2845,9 @@ def parity_declare_cmd(
         ParityValidationError,
         ParityStoreConfigError,
         ParityStoreUnavailableError,
+        ValueError,
     ) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from None
+        _emit_parity_cli_error(exc, json_out=json_out)
 
     payload = {
         "record_id": res.record_id,
@@ -2868,11 +2874,22 @@ def parity_scaffold_cmd(
     impl_name: str = "my-tool",
 ) -> None:
     """Generate a starter ``*.parity.bth.toml`` declaration template."""
-    from bathos.parity.schema import render_declaration_scaffold
+    from bathos.parity.schema import _RECORD_ID_RE, render_declaration_scaffold
+
+    if not _RECORD_ID_RE.match(record_id):
+        print(
+            f"Error: invalid record_id {record_id!r} (must match ^[a-z0-9][a-z0-9._-]{{2,80}}$)",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
     text = render_declaration_scaffold(record_id, impl_name=impl_name)
     if out:
-        Path(out).write_text(text, encoding="utf-8")
+        try:
+            Path(out).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            print(f"Error: failed to write {out}: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
         print(f"wrote {out}")
     else:
         print(text, end="")
@@ -2890,8 +2907,10 @@ def parity_grade_cmd(
     no_track: bool = False,
     json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
 ) -> None:
-    """Grade a parity declaration against stored ``cell_evidence.v1`` (WP05d)."""
+    """Grade a parity record declaration against stored ``cell_evidence.v1`` (WP05d)."""
+    from bathos.parity.badge import format_kind_set
     from bathos.parity.declare import ParityDeclareError
+    from bathos.parity.evidence import CellEvidenceError
     from bathos.parity.grader import ParityVerifyError, grade_parity_record
     from bathos.parity.schema import ParityValidationError
     from bathos.parity.sealed_dump import SealedDumpError
@@ -2911,23 +2930,37 @@ def parity_grade_cmd(
         ParityDeclareError,
         ParityValidationError,
         ParityVerifyError,
+        CellEvidenceError,
         SealedDumpError,
         ParityStoreConfigError,
         ParityStoreUnavailableError,
+        OSError,
     ) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from None
+        _emit_parity_cli_error(exc, json_out=json_out)
 
     if json_out:
         print(json.dumps(res.result, indent=2, sort_keys=True))
     elif verify:
         print(f"VERIFIED: {res.result_path}")
     else:
-        cl = res.result["clauses"][0]
-        print(
-            f"graded {res.record_id}: {cl['axes']['result']['value']} "
-            f"{'+'.join(k.upper() for k in cl['kinds'])} {cl['passing']}/{cl['required']} -> {res.result_path}"
+        clauses = res.result.get("clauses", [])
+        clause_parts: list[str] = []
+        for cl in clauses:
+            ktxt = format_kind_set(
+                cl["kinds"],
+                fallback_from=cl.get("fallback_from"),
+                incompat_class=cl.get("incompatibility_class"),
+            )
+            clause_parts.append(
+                f"{cl['axes']['result']['value']} {ktxt} {cl['passing']}/{cl['required']}"
+            )
+        is_prov = (not clauses) or any(
+            cl.get("axes", {}).get("assurance", {}).get("value") == "PROVISIONAL"
+            for cl in clauses
         )
+        prov_prefix = "PROVISIONAL · " if is_prov else ""
+        summary = "; ".join(clause_parts) if clause_parts else "NO RESULT 0/0"
+        print(f"graded {res.record_id}: {prov_prefix}{summary} -> {res.result_path}")
 
 
 parity_report_app = cyclopts.App(name="report", help="Parity report generation and rendering (WP30a).")
@@ -2946,6 +2979,7 @@ def parity_report_build_cmd(
     """Build T2 parity report JSON, T3 bundle manifest, and T0/T1 badges from a result JSON."""
     from bathos.parity.badge import BadgeValidationError, ReportLintError
     from bathos.parity.declare import ParityDeclareError
+    from bathos.parity.evidence import CellEvidenceError
     from bathos.parity.report import build_parity_report
     from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
 
@@ -2958,14 +2992,19 @@ def parity_report_build_cmd(
         )
     except (
         FileNotFoundError,
+        OSError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        KeyError,
+        ValueError,
         ParityDeclareError,
+        CellEvidenceError,
         BadgeValidationError,
         ReportLintError,
         ParityStoreConfigError,
         ParityStoreUnavailableError,
     ) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from None
+        _emit_parity_cli_error(exc, json_out=json_out)
 
     if json_out:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -2990,9 +3029,9 @@ def parity_report_render_cmd(
     if not rpath.is_file():
         print(f"Error: report file not found: {rpath}", file=sys.stderr)
         raise SystemExit(1)
-    report = json.loads(rpath.read_text(encoding="utf-8"))
     fmt = format.strip().lower()
     try:
+        report = json.loads(rpath.read_text(encoding="utf-8"))
         if fmt in ("md", "markdown"):
             text = render_report_markdown(report)
         elif fmt == "html":
@@ -3000,15 +3039,14 @@ def parity_report_render_cmd(
         else:
             print(f"Error: unsupported render format {format!r}; expected md|html", file=sys.stderr)
             raise SystemExit(1)
-    except ReportLintError as exc:
+        if out:
+            Path(out).write_text(text, encoding="utf-8")
+            print(f"wrote {out}")
+        else:
+            print(text, end="")
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError, ReportLintError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
-
-    if out:
-        Path(out).write_text(text, encoding="utf-8")
-        print(f"wrote {out}")
-    else:
-        print(text, end="")
 
 
 if __name__ == "__main__":

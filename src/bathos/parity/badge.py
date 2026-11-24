@@ -11,14 +11,15 @@ from typing import Any
 
 from bathos.parity.schema import DATA_TIERS, PARITY_KINDS_ORDER, STANDARD_VERSION
 
-# Word 'parity' MUST be followed by one of: a kind word, "record", or "report" (§9.3.4).
+# Word 'parity' MUST be followed by one of: a kind word, "record(s)", or "report(s)" (§9.3.4).
+# Hyphenated/underscored identifiers (e.g. "aminx-parity-v1", "my_parity_check") are excluded.
 _BARE_PARITY_RE = re.compile(
-    r"\bparity\b(?!\s+(?:record|report|bitwise|within[-_]tolerance|distributional|behavioural|association|approximate)\b)",
+    r"(?<![a-zA-Z0-9_-])\bparity\b(?!\s+(?:records?|reports?|bitwise|within[-_]tolerance|distributional|behavioural|association|approximate)\b)(?![_-])",
     re.IGNORECASE,
 )
 _PASSES_OR_VALID_RE = re.compile(r"\b(?:PASSES|VALID)\b")
+_PROVISIONAL_TOKEN_RE = re.compile(r"(?<![a-zA-Z0-9_-])\bPROVISIONAL\b(?![_-])")
 _STD_VERSION_RE = re.compile(r"\bstd\s+\d+\.\d+\.\d+\b")
-_IMPL_REV_RE = re.compile(r"\b[a-zA-Z0-9._-]+@(?:[0-9a-f]{7,64}|mixed)\b")
 
 
 class BadgeValidationError(ValueError):
@@ -350,51 +351,102 @@ def render_t0(report_body: Mapping[str, Any], h1_full: str) -> str:
     return " · ".join(parts)
 
 
+def _has_impl_vs_ref_segment(segments: Sequence[str]) -> bool:
+    for seg in segments:
+        if " vs " not in seg:
+            continue
+        left, right = seg.split(" vs ", 1)
+        if "@" not in left or "@" not in right:
+            continue
+        impl_name, impl_rev = left.rsplit("@", 1)
+        ref_qual, ref_rev = right.rsplit("@", 1)
+        if impl_name.strip() and impl_rev.strip() and ref_qual.strip() and ref_rev.strip():
+            return True
+    return False
+
+
+def _segment_has_token(segments: Sequence[str], token: str) -> bool:
+    if token in segments:
+        return True
+    for seg in segments:
+        # Inline axis tokens on clause segments are comma-separated after the clause head
+        if ", " in seg:
+            _, tail = seg.split(", ", 1)
+            if token in [part.strip() for part in tail.split(", ")]:
+                return True
+    return False
+
+
 def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str]:
     """Validate structural completeness of rendered T0 and T1 strings (§9.3.4)."""
     errors: list[str] = []
-    for label, text, expected_link in (("T0", t0, "T1 "), ("T1", t1, "T2 ")):
-        if not _IMPL_REV_RE.search(text):
-            errors.append(f"{label} missing <IMPL>@<rev>")
-        if " vs " not in text or "@" not in text.split(" vs ", 1)[1]:
-            errors.append(f"{label} missing <REFERENCE-QUALIFIER>@<REF-REV>")
+    t0_segs = t0.split(" · ")
+    t1_segs = t1.split(" · ")
+    for label, text, segs, expected_link in (
+        ("T0", t0, t0_segs, "T1 "),
+        ("T1", t1, t1_segs, "T2 "),
+    ):
+        if not _has_impl_vs_ref_segment(segs):
+            errors.append(f"{label} missing <IMPL>@<rev> vs <REFERENCE-QUALIFIER>@<REF-REV>")
         if not _STD_VERSION_RE.search(text):
             errors.append(f"{label} missing 'std x.y.z'")
-        if f"· {expected_link}" not in text:
+        if not segs or not segs[-1].startswith(expected_link) or len(segs[-1]) <= len(expected_link):
             errors.append(f"{label} missing tier link '{expected_link}<hash>'")
 
+    parity_meta = report_body.get("parity_metadata", {})
+    if parity_meta.get("mode") == "exploratory":
+        if not t0_segs or t0_segs[0] != "EXPLORATORY":
+            errors.append("T0 missing leading EXPLORATORY when mode is exploratory")
+        if not t1_segs or t1_segs[0] != "EXPLORATORY":
+            errors.append("T1 missing leading EXPLORATORY when mode is exploratory")
+
+    if parity_meta.get("has_owner_stated_tolerance"):
+        if "owner-stated tolerance" not in t0_segs:
+            errors.append("T0 missing 'owner-stated tolerance' qualifier")
+        if "owner-stated tolerance" not in t1_segs:
+            errors.append("T1 missing 'owner-stated tolerance' qualifier")
+
     clauses = report_body.get("clauses", [])
+    saw_amended = False
     for cl in clauses:
         axes = cl["axes"]
         assur = axes["assurance"]["value"]
         cov = axes["coverage"]
         fresh = axes["freshness"]["value"]
         reg = axes["registration"]["value"]
+        if reg == "amended":
+            saw_amended = True
 
         if assur == "PROVISIONAL":
-            if not t0.startswith("PROVISIONAL") and "PROVISIONAL ·" not in t0:
+            if "PROVISIONAL" not in t0_segs:
                 errors.append("T0 missing PROVISIONAL when assurance is PROVISIONAL")
-            if "PROVISIONAL (" not in t1:
+            if not any(s.startswith("PROVISIONAL (") and "checks pending)" in s for s in t1_segs):
                 errors.append("T1 missing 'PROVISIONAL (<k> checks pending)'")
         if cov["value"] == "partial":
             pt = _coverage_parts_token(cov)
-            if pt and (pt not in t0 or pt not in t1):
+            if pt and (not _segment_has_token(t0_segs, pt) or not _segment_has_token(t1_segs, pt)):
                 errors.append(f"badge missing coverage token {pt!r}")
             if cov.get("knobs_uncovered") is None and (
-                "knobs not computed" not in t0 or "knobs not computed" not in t1
+                not _segment_has_token(t0_segs, "knobs not computed")
+                or not _segment_has_token(t1_segs, "knobs not computed")
             ):
                 errors.append("badge missing 'knobs not computed' for uncomputed u")
         if fresh == "stale":
             st_tok = f"stale ({int(axes['freshness'].get('stale_count') or 0)})"
-            if st_tok not in t0 or st_tok not in t1:
+            if not _segment_has_token(t0_segs, st_tok) or not _segment_has_token(t1_segs, st_tok):
                 errors.append(f"badge missing non-default freshness token {st_tok!r}")
-        if reg in ("retrospective", "amended") and (reg not in t0 or reg not in t1):
+        if reg in ("retrospective", "amended") and (
+            not _segment_has_token(t0_segs, reg) or not _segment_has_token(t1_segs, reg)
+        ):
             errors.append(f"badge missing non-default registration token {reg!r}")
 
-    if report_body.get("dual_display_result") is not None:
-        basis = report_body["dual_display_result"].get("basis", "first_declared")
+    dual = report_body.get("dual_display_result")
+    if saw_amended and dual is None:
+        errors.append("registration is 'amended' but dual_display_result is missing")
+    if dual is not None:
+        basis = dual.get("basis", "first_declared")
         seg = "as registered:" if basis == "registered" else "as first declared:"
-        if seg not in t0 or seg not in t1:
+        if not any(s.startswith(seg) for s in t0_segs) or not any(s.startswith(seg) for s in t1_segs):
             errors.append(f"badge missing required dual-display segment {seg!r}")
 
     # Sanity check known tokens
@@ -417,8 +469,11 @@ def lint_rendered_text(text: str, *, checks_pending: bool) -> list[str]:
 
     if checks_pending:
         for lineno, line in enumerate(text.splitlines(), 1):
-            if _PASSES_OR_VALID_RE.search(line) and "PROVISIONAL" not in line:
-                issues.append(
-                    f"line {lineno}: PASSES/VALID printed without PROVISIONAL while checks are pending"
-                )
+            pass_match = _PASSES_OR_VALID_RE.search(line)
+            if pass_match is not None:
+                prov_match = _PROVISIONAL_TOKEN_RE.search(line)
+                if prov_match is None or prov_match.start() > pass_match.start():
+                    issues.append(
+                        f"line {lineno}: PASSES/VALID printed without PROVISIONAL while checks are pending"
+                    )
     return issues

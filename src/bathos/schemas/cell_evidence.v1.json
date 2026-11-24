@@ -43,15 +43,41 @@
         "required": ["member_name", "canonical_digest", "dtype", "shape"]
       }
     },
-    "reference_bundle_sha256": { "type": ["string", "null"] },
-    "reference_arrays": { "type": ["object", "null"] },
-    "reference_dump_sha256": { "type": ["string", "null"] },
+    "reference_bundle_sha256": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        { "type": "null" }
+      ]
+    },
+    "reference_arrays": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["member_name", "canonical_digest", "dtype", "shape"]
+          }
+        },
+        { "type": "null" }
+      ]
+    },
+    "reference_dump_sha256": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        { "type": "null" }
+      ]
+    },
     "reference_dump_keys": { "type": ["object", "null"] },
     "adapter": {
       "type": "object",
       "required": ["name", "version"]
     },
-    "ref_env_blob_sha256": { "type": ["string", "null"] },
+    "ref_env_blob_sha256": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        { "type": "null" }
+      ]
+    },
     "compared_calls": { "type": "array" },
     "witnesses": { "type": "object" },
     "created_at": { "type": "string" }

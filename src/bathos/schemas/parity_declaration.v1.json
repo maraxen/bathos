@@ -142,6 +142,7 @@
           "data_tier": { "type": "string", "enum": ["smoke", "toy", "production_shape"] },
           "pairing": { "type": "string", "enum": ["fixture", "live"] },
           "pooling_rule": { "type": "string", "enum": ["all_runs", "per_input"] },
+          "tolerance_id": { "type": "string", "minLength": 1 },
           "assumptions": { "type": "array", "items": { "type": "string" } },
           "exploratory": { "type": "boolean" },
           "incompatibility": { "type": "object" }

@@ -15,10 +15,10 @@ from typing import Any
 
 STANDARD_VERSION = "1.0.0"
 
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-_RECORD_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,80}$")
-_SUPERSEDES_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,80}@[0-9a-f]{12}$")
-_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+\Z")
+_RECORD_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,80}\Z")
+_SUPERSEDES_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,80}@[0-9a-f]{12}\Z")
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 # Closed vocabularies (§3.2 - §3.10)
 PRONGS = frozenset({"reimplementation", "optimisation", "approximation"})
@@ -257,6 +257,31 @@ def _require_fields(
             issues.append(
                 ValidationIssue(f"{prefix}.{field}", "G01_MISSING_FIELD", f"missing required field '{prefix}.{field}'")
             )
+        elif isinstance(tbl[field], str) and not tbl[field].strip():
+            issues.append(
+                ValidationIssue(f"{prefix}.{field}", "G01_EMPTY_FIELD", f"'{prefix}.{field}' must be non-empty")
+            )
+
+
+def _require_nonempty_str_fields(
+    tbl: Mapping[str, Any],
+    prefix: str,
+    fields: Sequence[str],
+    issues: list[ValidationIssue],
+) -> None:
+    for field in fields:
+        if field not in tbl or tbl[field] is None:
+            issues.append(
+                ValidationIssue(f"{prefix}.{field}", "G01_MISSING_FIELD", f"missing required field '{prefix}.{field}'")
+            )
+        elif not isinstance(tbl[field], str):
+            issues.append(
+                ValidationIssue(f"{prefix}.{field}", "G01_TYPE", f"'{prefix}.{field}' must be a string")
+            )
+        elif not tbl[field].strip():
+            issues.append(
+                ValidationIssue(f"{prefix}.{field}", "G01_EMPTY_FIELD", f"'{prefix}.{field}' must be non-empty")
+            )
 
 
 def _validate_reference_identity(
@@ -269,9 +294,14 @@ def _validate_reference_identity(
         issues.append(ValidationIssue(f"{prefix}.identity", "G01_TYPE", "identity must be a table"))
         return
     if kind == "upstream_live":
-        _require_fields(identity, f"{prefix}.identity", ("repo", "commit"), issues)
+        _require_nonempty_str_fields(identity, f"{prefix}.identity", ("repo", "commit"), issues)
     elif kind == "sealed_dump":
-        _require_fields(identity, f"{prefix}.identity", ("dump_sha256", "upstream_commit"), issues)
+        _require_nonempty_str_fields(identity, f"{prefix}.identity", ("dump_sha256", "upstream_commit"), issues)
+        dsha = identity.get("dump_sha256")
+        if isinstance(dsha, str) and dsha.strip() and not _SHA256_HEX_RE.match(dsha.strip().lower()):
+            issues.append(
+                ValidationIssue(f"{prefix}.identity.dump_sha256", "G01_VALUE", "dump_sha256 must be 64-hex sha256")
+            )
         if not (_is_nonempty_str(identity.get("producer_record_id")) or _is_nonempty_str(identity.get("producer_run_id"))):
             issues.append(
                 ValidationIssue(
@@ -281,9 +311,9 @@ def _validate_reference_identity(
                 )
             )
     elif kind == "published_values":
-        _require_fields(identity, f"{prefix}.identity", ("doi", "locator", "transcription_run_id"), issues)
+        _require_nonempty_str_fields(identity, f"{prefix}.identity", ("doi", "locator", "transcription_run_id"), issues)
     elif kind == "experimental_data":
-        _require_fields(identity, f"{prefix}.identity", ("assay",), issues)
+        _require_nonempty_str_fields(identity, f"{prefix}.identity", ("assay",), issues)
         if not (_is_nonempty_str(identity.get("accession")) or _is_nonempty_str(identity.get("dataset_sha256"))):
             issues.append(
                 ValidationIssue(
@@ -293,9 +323,9 @@ def _validate_reference_identity(
                 )
             )
     elif kind == "own_prior_version":
-        _require_fields(identity, f"{prefix}.identity", ("repo", "commit"), issues)
+        _require_nonempty_str_fields(identity, f"{prefix}.identity", ("repo", "commit"), issues)
     elif kind == "reference_implementation":
-        _require_fields(identity, f"{prefix}.identity", ("repo", "commit", "entrypoint"), issues)
+        _require_nonempty_str_fields(identity, f"{prefix}.identity", ("repo", "commit", "entrypoint"), issues)
 
 
 def _validate_use_entry(
@@ -314,8 +344,12 @@ def _validate_use_entry(
         ("id", "purpose", "output_type", "quantity", "parity_kind", "metric", "negative_control", "judgement_id"),
         issues,
     )
-    if "judgement_id" in use and not _is_nonempty_str(use.get("judgement_id")):
-        issues.append(ValidationIssue(f"{prefix}.judgement_id", "G01_EMPTY_FIELD", "judgement_id must be non-empty"))
+    _require_nonempty_str_fields(
+        use,
+        prefix,
+        ("id", "purpose", "output_type", "quantity", "parity_kind", "judgement_id"),
+        issues,
+    )
     if "output_type" in use:
         ot = use["output_type"]
         if not isinstance(ot, str) or (ot not in OUTPUT_TYPES_BASE and not ot.startswith("other:")):
@@ -341,7 +375,7 @@ def _validate_use_entry(
 
     metric = use.get("metric")
     if isinstance(metric, Mapping):
-        _require_fields(metric, f"{prefix}.metric", ("id", "impl"), issues)
+        _require_nonempty_str_fields(metric, f"{prefix}.metric", ("id", "impl"), issues)
         metric_id = str(metric.get("id", "")).strip().lower()
         if metric_id in CORRELATION_RANK_METRICS and kind in PARITY_KINDS and kind != "association":
             issues.append(
@@ -356,7 +390,7 @@ def _validate_use_entry(
 
     neg = use.get("negative_control")
     if isinstance(neg, Mapping):
-        _require_fields(neg, f"{prefix}.negative_control", ("kind", "impl", "expect"), issues)
+        _require_nonempty_str_fields(neg, f"{prefix}.negative_control", ("kind", "impl", "expect"), issues)
     elif neg is not None:
         issues.append(
             ValidationIssue(f"{prefix}.negative_control", "G01_TYPE", "negative_control must be a table")
@@ -364,6 +398,7 @@ def _validate_use_entry(
 
     if kind == "association":
         _require_fields(use, prefix, ("pairing_unit", "min_n", "interval", "threshold", "multiplicity"), issues)
+        _require_nonempty_str_fields(use, prefix, ("pairing_unit", "multiplicity"), issues)
         min_n = use.get("min_n")
         if min_n is not None and (isinstance(min_n, bool) or not isinstance(min_n, int) or min_n < 3):
             issues.append(
@@ -376,6 +411,7 @@ def _validate_use_entry(
             )
     elif kind == "distributional":
         _require_fields(use, prefix, ("delta", "independent_unit", "procedure", "alpha", "multiplicity"), issues)
+        _require_nonempty_str_fields(use, prefix, ("independent_unit", "procedure", "multiplicity"), issues)
         if use.get("procedure") not in DISTRIBUTIONAL_PROCEDURES:
             issues.append(
                 ValidationIssue(
@@ -394,6 +430,7 @@ def _validate_use_entry(
             )
     elif kind == "behavioural":
         _require_fields(use, prefix, ("decision_function", "threshold"), issues)
+        _require_nonempty_str_fields(use, prefix, ("decision_function",), issues)
     elif kind == "approximate":
         _require_fields(
             use,
@@ -401,6 +438,7 @@ def _validate_use_entry(
             ("quality_metric", "quality_budget", "gained_quantity", "gained_measurement"),
             issues,
         )
+        _require_nonempty_str_fields(use, prefix, ("quality_metric", "gained_quantity", "gained_measurement"), issues)
 
     if "floor_multiple" in use:
         fm = use["floor_multiple"]
@@ -513,6 +551,21 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
             ),
             issues,
         )
+        _require_nonempty_str_fields(
+            parity,
+            "parity",
+            (
+                "schema_version",
+                "record_id",
+                "prong",
+                "layer_under_test",
+                "instrumentation",
+                "mode",
+                "strictness",
+                "badge_min_tier",
+            ),
+            issues,
+        )
         sv = parity.get("schema_version")
         if sv is not None and (not isinstance(sv, str) or not _SEMVER_RE.match(sv)):
             issues.append(
@@ -564,24 +617,37 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
                     f"invalid badge_min_tier {parity.get('badge_min_tier')!r}",
                 )
             )
-        if "prior_runs" in parity and not isinstance(parity["prior_runs"], list):
-            issues.append(ValidationIssue("parity.prior_runs", "G01_TYPE", "prior_runs must be a list"))
+        if "prior_runs" in parity:
+            pr_list = parity["prior_runs"]
+            if not isinstance(pr_list, list) or any(not isinstance(item, str) for item in pr_list):
+                issues.append(ValidationIssue("parity.prior_runs", "G01_TYPE", "prior_runs must be a list of strings"))
+        if "control" in parity and not isinstance(parity["control"], bool):
+            issues.append(ValidationIssue("parity.control", "G01_TYPE", "control must be a boolean"))
         sup = parity.get("supersedes")
-        if sup not in (None, "") and (not isinstance(sup, str) or not _SUPERSEDES_RE.match(sup)):
-            issues.append(
-                ValidationIssue(
-                    "parity.supersedes",
-                    "G01_SUPERSEDES",
-                    f"supersedes must match '<record_id>@<12-hex>', got {sup!r}",
+        if sup not in (None, ""):
+            if not isinstance(sup, str) or not _SUPERSEDES_RE.match(sup):
+                issues.append(
+                    ValidationIssue(
+                        "parity.supersedes",
+                        "G01_SUPERSEDES",
+                        f"supersedes must match '<record_id>@<12-hex>', got {sup!r}",
+                    )
                 )
-            )
+            if not isinstance(data.get("amendment"), Mapping):
+                issues.append(
+                    ValidationIssue(
+                        "amendment",
+                        "G01_MISSING_SECTION",
+                        "[amendment] is required when parity.supersedes is set (§3.2)",
+                    )
+                )
     elif parity is not None:
         issues.append(ValidationIssue("parity", "G01_TYPE", "[parity] must be a table"))
 
     # [implementation]
     impl = data.get("implementation")
     if isinstance(impl, Mapping):
-        _require_fields(impl, "implementation", ("name", "repo", "licence"), issues)
+        _require_nonempty_str_fields(impl, "implementation", ("name", "repo", "licence"), issues)
         if "revision" in impl:
             issues.append(
                 ValidationIssue(
@@ -613,6 +679,7 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
                 issues.append(ValidationIssue("reference[0]", "G01_TYPE", "reference[0] must be a table"))
             else:
                 _require_fields(ref, "reference[0]", ("id", "role", "kind", "identity", "licence"), issues)
+                _require_nonempty_str_fields(ref, "reference[0]", ("id", "role", "kind", "licence"), issues)
                 if ref.get("role") is not None and ref.get("role") not in REFERENCE_ROLES:
                     issues.append(
                         ValidationIssue("reference[0].role", "G01_ENUM", f"invalid role {ref.get('role')!r}")
@@ -644,6 +711,12 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
     reg = data.get("registry")
     if isinstance(reg, Mapping):
         _require_fields(reg, "registry", ("registry_id", "drift_status_max_age_days"), issues)
+        _require_nonempty_str_fields(reg, "registry", ("registry_id",), issues)
+        reg_id = reg.get("registry_id")
+        if isinstance(reg_id, str) and reg_id.strip() and not _SHA256_HEX_RE.match(reg_id.strip()):
+            issues.append(
+                ValidationIssue("registry.registry_id", "G01_VALUE", f"registry_id must be 64-hex sha256, got {reg_id!r}")
+            )
         age = reg.get("drift_status_max_age_days")
         if age is not None and (isinstance(age, bool) or not isinstance(age, int) or age < 0):
             issues.append(
@@ -679,20 +752,22 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
     if tolerances is not None and not isinstance(tolerances, list):
         issues.append(ValidationIssue("tolerance", "G01_TYPE", "[[tolerance]] must be an array of tables"))
         tolerances = []
-    if any_within_tol and not tolerances:
-        issues.append(
-            ValidationIssue(
-                "tolerance",
-                "G01_MISSING_SECTION",
-                "[[tolerance]] is required when any use declares within_tolerance",
-            )
-        )
     for idx, tol in enumerate(tolerances):
         prefix = f"tolerance[{idx}]"
         if not isinstance(tol, Mapping):
             issues.append(ValidationIssue(prefix, "G01_TYPE", "tolerance entry must be a table"))
             continue
         _require_fields(tol, prefix, ("id", "dtype", "applies_to", "atol", "rtol", "basis"), issues)
+        _require_nonempty_str_fields(tol, prefix, ("id", "dtype", "basis"), issues)
+        applies = tol.get("applies_to")
+        if applies is not None and (
+            not isinstance(applies, list)
+            or not applies
+            or any(not _is_nonempty_str(item) for item in applies)
+        ):
+            issues.append(
+                ValidationIssue(f"{prefix}.applies_to", "G01_VALUE", "applies_to must be a non-empty list of strings")
+            )
         for num_f in ("atol", "rtol"):
             val = tol.get(num_f)
             if val is not None and (isinstance(val, bool) or not isinstance(val, (int, float)) or val < 0):
@@ -708,6 +783,7 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
             be = tol.get("basis_evidence")
             if isinstance(be, Mapping):
                 _require_fields(be, f"{prefix}.basis_evidence", ("run_id", "data_tier", "shapes", "dtypes"), issues)
+                _require_nonempty_str_fields(be, f"{prefix}.basis_evidence", ("run_id", "data_tier"), issues)
                 if be.get("data_tier") is not None and be.get("data_tier") not in DATA_TIERS:
                     issues.append(
                         ValidationIssue(
@@ -749,6 +825,12 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
                 ("use_id", "component_id", "knob_setting", "axis_value", "data_tier", "pairing", "pooling_rule"),
                 issues,
             )
+            _require_nonempty_str_fields(
+                cell,
+                prefix,
+                ("use_id", "component_id", "data_tier", "pairing", "pooling_rule"),
+                issues,
+            )
             uid = cell.get("use_id")
             use_obj = uses_by_id.get(uid) if isinstance(uid, str) else None
             if uid is not None and use_obj is None:
@@ -774,6 +856,9 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
                     _require_fields(
                         incompat, f"{prefix}.incompatibility", ("class", "evidence", "fallback_use"), issues
                     )
+                    _require_nonempty_str_fields(
+                        incompat, f"{prefix}.incompatibility", ("class", "evidence"), issues
+                    )
                     icls = incompat.get("class")
                     if icls is not None and (
                         not isinstance(icls, str)
@@ -791,6 +876,8 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
                         _validate_use_entry(fb, f"{prefix}.incompatibility.fallback_use", issues)
                         if isinstance(fb, Mapping) and fb.get("parity_kind") in PARITY_KINDS:
                             eff_kind = fb.get("parity_kind")
+                            if eff_kind == "within_tolerance":
+                                any_within_tol = True
 
             if (
                 single_ref_kind in REFERENCE_KINDS
@@ -858,6 +945,15 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
     elif cell_plan is not None:
         issues.append(ValidationIssue("cell_plan", "G01_TYPE", "[[cell_plan]] must be an array of tables"))
 
+    if any_within_tol and not tolerances:
+        issues.append(
+            ValidationIssue(
+                "tolerance",
+                "G01_MISSING_SECTION",
+                "[[tolerance]] is required when any use or fallback_use declares within_tolerance",
+            )
+        )
+
     # [[waiver]]
     waivers = data.get("waiver", [])
     if waivers is not None and not isinstance(waivers, list):
@@ -869,16 +965,12 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
             issues.append(ValidationIssue(prefix, "G01_TYPE", "waiver entry must be a table"))
             continue
         _require_fields(w, prefix, ("cell_selector", "reason_code", "reason_text", "judgement_id"), issues)
+        _require_nonempty_str_fields(w, prefix, ("reason_code", "reason_text", "judgement_id"), issues)
         rc = w.get("reason_code")
         if rc is not None and rc not in WAIVER_REASON_CODES:
             issues.append(
                 ValidationIssue(f"{prefix}.reason_code", "G01_ENUM", f"invalid waiver reason_code {rc!r}")
             )
-        for non_empty in ("reason_text", "judgement_id"):
-            if non_empty in w and not _is_nonempty_str(w.get(non_empty)):
-                issues.append(
-                    ValidationIssue(f"{prefix}.{non_empty}", "G01_EMPTY_FIELD", f"{non_empty} must be non-empty")
-                )
 
     # [[assumption]] (§3.16)
     assumptions = data.get("assumption", [])
@@ -899,6 +991,7 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
             issues.append(ValidationIssue(prefix, "G01_TYPE", "assumption entry must be a table"))
             continue
         _require_fields(a, prefix, ("id", "text", "load_bearing", "status"), issues)
+        _require_nonempty_str_fields(a, prefix, ("id", "text", "status"), issues)
         st = a.get("status")
         if st == "probed" and not _is_nonempty_str(a.get("evidence")):
             issues.append(
@@ -915,11 +1008,18 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
     env = data.get("environment")
     if isinstance(env, Mapping):
         _require_fields(env, "environment", ("pool_critical", "frameworks"), issues)
-        if "pool_critical" in env and not isinstance(env["pool_critical"], list):
-            issues.append(ValidationIssue("environment.pool_critical", "G01_TYPE", "must be a list"))
+        if "pool_critical" in env:
+            pc = env["pool_critical"]
+            if not isinstance(pc, list) or any(not isinstance(item, str) for item in pc):
+                issues.append(ValidationIssue("environment.pool_critical", "G01_TYPE", "must be a list of strings"))
         fw = env.get("frameworks")
         if isinstance(fw, Mapping):
             _require_fields(fw, "environment.frameworks", ("ours", "reference"), issues)
+            for side in ("ours", "reference"):
+                if side in fw and (not isinstance(fw[side], list) or any(not isinstance(s, str) for s in fw[side])):
+                    issues.append(
+                        ValidationIssue(f"environment.frameworks.{side}", "G01_TYPE", f"{side} must be a list of strings")
+                    )
         elif fw is not None:
             issues.append(ValidationIssue("environment.frameworks", "G01_TYPE", "frameworks must be a table"))
     elif env is not None:
@@ -939,7 +1039,7 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
                         "results_seen is derived, never declared (§3.17.1)",
                     )
                 )
-            _require_fields(am, "amendment", ("reason", "judgement_id"), issues)
+            _require_nonempty_str_fields(am, "amendment", ("reason", "judgement_id", "derived_from_observation"), issues)
 
     # [holdout]
     if "holdout" in data:
@@ -974,6 +1074,9 @@ def validate_result_structure(result: Mapping[str, Any]) -> list[ValidationIssue
         "prior_records_on_pair",
     )
     _require_fields(result, "result", required_top, issues)
+    _require_nonempty_str_fields(
+        result, "result", ("schema_version", "standard_version", "record_id", "record_sha256", "grader_version"), issues
+    )
     if "bundle_sha256" not in result:
         issues.append(
             ValidationIssue("result.bundle_sha256", "G01_MISSING_FIELD", "missing required field 'result.bundle_sha256'")
@@ -982,10 +1085,64 @@ def validate_result_structure(result: Mapping[str, Any]) -> list[ValidationIssue
         issues.append(
             ValidationIssue("result.schema_version", "RESULT_SCHEMA", "schema_version must be 'parity_result.v1'")
         )
+    sv = result.get("standard_version")
+    if isinstance(sv, str) and not _SEMVER_RE.match(sv):
+        issues.append(ValidationIssue("result.standard_version", "RESULT_SCHEMA", f"invalid semver {sv!r}"))
+    rsha = result.get("record_sha256")
+    if isinstance(rsha, str) and not _SHA256_HEX_RE.match(rsha):
+        issues.append(ValidationIssue("result.record_sha256", "RESULT_SCHEMA", f"invalid record_sha256 {rsha!r}"))
+    prp = result.get("prior_records_on_pair")
+    if prp is not None and (isinstance(prp, bool) or not isinstance(prp, int) or prp < 0):
+        issues.append(ValidationIssue("result.prior_records_on_pair", "RESULT_TYPE", "must be non-negative int"))
+
+    gi = result.get("grade_inputs")
+    if isinstance(gi, Mapping):
+        for k in ("as_of", "target_revisions", "drift_run_id", "ledger_high_water_mark", "gate_stages", "comparison_backend"):
+            if k not in gi:
+                issues.append(ValidationIssue(f"result.grade_inputs.{k}", "RESULT_MISSING_FIELD", f"missing grade_inputs.{k}"))
+    elif gi is not None:
+        issues.append(ValidationIssue("result.grade_inputs", "RESULT_TYPE", "grade_inputs must be an object"))
+
+    ev_runs = result.get("evidence_runs")
+    if isinstance(ev_runs, list):
+        for idx, er in enumerate(ev_runs):
+            if not isinstance(er, Mapping):
+                issues.append(ValidationIssue(f"result.evidence_runs[{idx}]", "RESULT_TYPE", "must be an object"))
+                continue
+            for k in ("run_id", "outcome", "validity_state", "env_blob_sha256", "declaration_blob_sha256"):
+                if k not in er:
+                    issues.append(
+                        ValidationIssue(f"result.evidence_runs[{idx}].{k}", "RESULT_MISSING_FIELD", f"missing {k}")
+                    )
+
     cells = result.get("cells")
+    required_cell_keys = (
+        "cell_id",
+        "verdict",
+        "overlays",
+        "achieved_kinds",
+        "declared_kind",
+        "metric_values",
+        "n",
+        "tolerance_ref",
+        "evidence_run_ids",
+        "pooling_rule",
+        "cell_evidence_sha256",
+        "input_sha256",
+        "pin_set",
+        "nondegeneracy",
+        "evidence_level",
+        "flags",
+    )
     if isinstance(cells, list):
         for idx, cell in enumerate(cells):
-            if isinstance(cell, Mapping) and cell.get("verdict") not in VERDICTS:
+            if not isinstance(cell, Mapping):
+                issues.append(ValidationIssue(f"result.cells[{idx}]", "RESULT_TYPE", "must be an object"))
+                continue
+            for ck in required_cell_keys:
+                if ck not in cell:
+                    issues.append(ValidationIssue(f"result.cells[{idx}].{ck}", "RESULT_MISSING_FIELD", f"missing {ck}"))
+            if cell.get("verdict") not in VERDICTS:
                 issues.append(
                     ValidationIssue(
                         f"result.cells[{idx}].verdict",
@@ -993,20 +1150,55 @@ def validate_result_structure(result: Mapping[str, Any]) -> list[ValidationIssue
                         f"invalid verdict {cell.get('verdict')!r}",
                     )
                 )
+
+    counts = result.get("cell_counts")
+    if isinstance(counts, Mapping):
+        for ck in (
+            "required",
+            "passing",
+            "by_kind",
+            "not_covered",
+            "waived",
+            "not_run",
+            "declared_deviations",
+            "registry_knobs_non_excluded",
+            "registry_knobs_covered",
+            "unplanned_knobs",
+        ):
+            if ck not in counts:
+                issues.append(ValidationIssue(f"result.cell_counts.{ck}", "RESULT_MISSING_FIELD", f"missing {ck}"))
+
     clauses = result.get("clauses")
     if isinstance(clauses, list):
         for idx, clause in enumerate(clauses):
-            if isinstance(clause, Mapping):
-                axes = clause.get("axes")
-                if not isinstance(axes, Mapping):
-                    issues.append(ValidationIssue(f"result.clauses[{idx}].axes", "RESULT_AXES", "axes missing"))
-                else:
-                    _require_fields(
-                        axes,
-                        f"result.clauses[{idx}].axes",
-                        ("result", "coverage", "assurance", "freshness", "registration"),
-                        issues,
-                    )
+            if not isinstance(clause, Mapping):
+                issues.append(ValidationIssue(f"result.clauses[{idx}]", "RESULT_TYPE", "must be an object"))
+                continue
+            _require_fields(clause, f"result.clauses[{idx}]", ("clause_id", "kinds", "passing", "required", "axes"), issues)
+            axes = clause.get("axes")
+            if not isinstance(axes, Mapping):
+                issues.append(ValidationIssue(f"result.clauses[{idx}].axes", "RESULT_AXES", "axes missing"))
+            else:
+                _require_fields(
+                    axes,
+                    f"result.clauses[{idx}].axes",
+                    ("result", "coverage", "assurance", "freshness", "registration"),
+                    issues,
+                )
+
+    gates = result.get("gates")
+    if isinstance(gates, list):
+        for idx, g in enumerate(gates):
+            if not isinstance(g, Mapping) or "code" not in g or "stage" not in g:
+                issues.append(ValidationIssue(f"result.gates[{idx}]", "RESULT_GATES", "gate must have code and stage"))
+
+    badge = result.get("badge")
+    if badge is not None:
+        if not isinstance(badge, Mapping):
+            issues.append(ValidationIssue("result.badge", "RESULT_TYPE", "badge must be an object or null"))
+        else:
+            _require_nonempty_str_fields(badge, "result.badge", ("t0", "t1", "t1_sha256", "t2_sha256"), issues)
+
     return issues
 
 

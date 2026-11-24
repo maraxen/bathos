@@ -91,19 +91,23 @@ def _axis_signature(clause: Mapping[str, Any]) -> tuple[Any, ...]:
     assur = axes["assurance"]
     fresh = axes["freshness"]
     reg = axes["registration"]
+    res_val = str(axes["result"]["value"])
+    if res_val.startswith("PASSES EXCEPT DECLARED DEVIATIONS"):
+        res_sig = "PASSES EXCEPT DECLARED DEVIATIONS"
+    elif res_val.startswith("VALID EXCEPT DECLARED DEVIATIONS"):
+        res_sig = "VALID EXCEPT DECLARED DEVIATIONS"
+    else:
+        res_sig = res_val
     return (
         clause.get("fallback_from"),
         clause.get("incompatibility_class"),
-        axes["result"]["value"],
+        res_sig,
         cov["value"],
-        cov["not_run"],
-        cov["not_covered"],
         cov["knobs_uncovered"],
         assur["value"],
         assur["pending_count"],
         assur["lowest_stage"],
         fresh["value"],
-        fresh["stale_count"],
         reg["value"],
     )
 
@@ -278,10 +282,21 @@ def compute_axes_and_clauses(
             existing["not_covered"] += clause["not_covered"]
             existing["axes"]["result"]["v_count"] += clause["axes"]["result"]["v_count"]
             existing["axes"]["result"]["d_count"] += clause["axes"]["result"]["d_count"]
+            existing["axes"]["coverage"]["not_run"] += clause["axes"]["coverage"]["not_run"]
+            existing["axes"]["coverage"]["not_covered"] += clause["axes"]["coverage"]["not_covered"]
+            existing["axes"]["freshness"]["stale_count"] += clause["axes"]["freshness"]["stale_count"]
         else:
             merged.append(clause)
             if clause.get("fallback_from") is None:
                 by_sig[sig] = clause
+
+    for cl in merged:
+        res_ax = cl["axes"]["result"]
+        r_val = str(res_ax["value"])
+        if r_val.startswith("PASSES EXCEPT DECLARED DEVIATIONS"):
+            res_ax["value"] = f"PASSES EXCEPT DECLARED DEVIATIONS ({int(res_ax['d_count'])})"
+        elif r_val.startswith("VALID EXCEPT DECLARED DEVIATIONS"):
+            res_ax["value"] = f"VALID EXCEPT DECLARED DEVIATIONS ({int(res_ax['d_count'])})"
 
     merged.sort(
         key=lambda cl: (
@@ -313,12 +328,13 @@ def compute_axes_and_clauses(
             bucket["declared_deviations"] += 1
 
     r_all = [c for c in all_counted if c["verdict"] in ("pass", "fail", "not_run", "inconclusive", "contested")]
+    waived_cell_cnt = sum(1 for c in all_counted if c["verdict"] == "waived")
     cell_counts = {
         "required": len(r_all),
         "passing": sum(1 for c in r_all if c["verdict"] == "pass"),
         "by_kind": by_kind,
         "not_covered": sum(1 for c in all_counted if c["verdict"] == "not_covered"),
-        "waived": sum(1 for c in all_counted if c["verdict"] == "waived") + len(declaration.get("waiver", [])),
+        "waived": waived_cell_cnt or len(declaration.get("waiver", [])),
         "not_run": sum(1 for c in r_all if c["verdict"] == "not_run"),
         "declared_deviations": sum(1 for c in all_counted if c["verdict"] == "declared_deviation"),
         "registry_knobs_non_excluded": knobs_non_excluded,

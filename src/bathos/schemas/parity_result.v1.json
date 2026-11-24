@@ -29,9 +29,19 @@
     "record_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "ledger_entry_id": { "type": ["string", "null"] },
     "grader_version": { "type": "string", "minLength": 1 },
+    "results_seen": { "type": "boolean" },
     "grade_inputs": {
       "type": "object",
-      "required": ["as_of", "target_revisions", "drift_run_id", "ledger_high_water_mark", "gate_stages", "comparison_backend"]
+      "required": ["as_of", "target_revisions", "drift_run_id", "ledger_high_water_mark", "gate_stages", "comparison_backend"],
+      "properties": {
+        "as_of": { "type": "string", "minLength": 1 },
+        "target_revisions": { "type": "object" },
+        "drift_run_id": { "type": ["string", "null"] },
+        "ledger_high_water_mark": { "type": ["string", "null"] },
+        "gate_stages": { "type": "object" },
+        "comparison_backend": { "type": "object" },
+        "cell_runs": { "type": "object" }
+      }
     },
     "evidence_runs": {
       "type": "array",

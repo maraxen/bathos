@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import warnings
 from pathlib import Path
 
@@ -23,6 +25,22 @@ from bathos.parity.store import (
     require_parity_store,
     resolve_parity_store,
 )
+
+
+def _run_bth_cli(*args: str, env_extra: dict[str, str] | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    src_dir = str(Path(__file__).resolve().parent.parent / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = src_dir + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, "-m", "bathos.cli_cyclopts", *args],
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _isolated_env(tmp_path: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -137,6 +155,65 @@ class TestParityStoreResolution:
         assert len(violations) == 1
         assert ".bth/parity" in violations[0]
 
+        # AnnAssign, AsyncFunctionDef, Path.home() / ".bth" / "parity", os.path.join, parity_store
+        (bad_src / "extra.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            'DEFAULT_PARITY_STORE: str = "/tmp/x"\n'
+            "async def default_parity_store_dir() -> Path:\n"
+            '    return Path.home() / ".bth" / "parity"\n'
+            'def j() -> str:\n    return os.path.join("~", ".bth", "parity_store")\n',
+            encoding="utf-8",
+        )
+        extra_v = lint_no_default_store_path(bad_src)
+        assert any("DEFAULT_PARITY_STORE" in v for v in extra_v)
+        assert any("default_parity_store_dir" in v for v in extra_v)
+        assert any(".bth/parity" in v for v in extra_v)
+
+    def test_disabled_dirname_does_not_disable_and_quotas_preserved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regression: directory containing 'disabled' with plain pyproject.toml must fall through to XDG
+        proj = tmp_path / "disabled-feature"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\n[tool.bathos.parity]\nmax_files = 42\nmax_bytes = 9999\n',
+            encoding="utf-8",
+        )
+        xdg = tmp_path / "xdg"
+        (xdg / "bathos").mkdir(parents=True)
+        xdg_store = tmp_path / "xdg_store"
+        (xdg / "bathos" / "config.toml").write_text(
+            f'[parity]\nstore = "{xdg_store}"\n', encoding="utf-8"
+        )
+        res = resolve_parity_store(start_dir=proj, env={"XDG_CONFIG_HOME": str(xdg)})
+        assert res.source == LAYER_XDG
+        assert res.path == xdg_store.resolve()
+        assert res.max_files == 42
+        assert res.max_bytes == 9999
+
+        # explicit=""/"none" disables cleanly; XDG_CONFIG_HOME unset/"" falls back to Path.home()/.config
+        assert resolve_parity_store(explicit="", start_dir=proj, env={}).source == f"{LAYER_CLI}:disabled"
+        assert resolve_parity_store(explicit="none", start_dir=proj, env={}).source == f"{LAYER_CLI}:disabled"
+
+        fake_home = tmp_path / "custom_home"
+        (fake_home / ".config" / "bathos").mkdir(parents=True)
+        home_store = tmp_path / "home_store"
+        (fake_home / ".config" / "bathos" / "config.toml").write_text(
+            f'[parity]\nstore = "{home_store}"\n', encoding="utf-8"
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+        r_unset = resolve_parity_store(start_dir=tmp_path, env={})
+        assert r_unset.source == LAYER_XDG and r_unset.path == home_store.resolve()
+        r_empty = resolve_parity_store(start_dir=tmp_path, env={"XDG_CONFIG_HOME": ""})
+        assert r_empty.source == LAYER_XDG and r_empty.path == home_store.resolve()
+        r_rel = resolve_parity_store(start_dir=tmp_path, env={"XDG_CONFIG_HOME": "relative/dir"})
+        assert r_rel.source == LAYER_XDG and r_rel.path == home_store.resolve()
+
+    def test_torch_optional_extra_in_pyproject(self) -> None:
+        pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+        assert '"torch>=2.0"' in pyproject
+
 
 class TestParityStoreOperations:
     def test_put_get_prefix_and_atomic_dir(self, tmp_path: Path) -> None:
@@ -147,11 +224,25 @@ class TestParityStoreOperations:
         assert store.get_bytes(sha) == b"hello parity"
         assert store.resolve_prefix(sha[:12]) == sha
 
+        # Corruption detection on get_bytes
+        store.blob_path(sha).write_bytes(b"corrupted")
+        with pytest.raises(ValueError, match="blob corruption"):
+            store.get_bytes(sha)
+
         def _populate(d: Path) -> None:
             (d / "marker.json").write_text('{"ok":true}\n', encoding="utf-8")
 
         unit = store.write_unit_dir("units/cell-1", _populate)
         assert (unit / "marker.json").is_file()
+
+        # Path traversal & empty target refusal in write_unit_dir
+        for bad_target in ("", ".", "..", "../escape", "/tmp/abs"):
+            with pytest.raises(ValueError):
+                store.write_unit_dir(bad_target, _populate)
+
+        # Trailing newline in hex rejected by \Z
+        with pytest.raises(ValueError, match="Invalid sha256"):
+            store.blob_path(sha + "\n")
 
     def test_ambiguous_prefix_refused(self, tmp_path: Path) -> None:
         store = ParityStore(tmp_path / "store")
@@ -198,3 +289,22 @@ class TestCliParityWhere:
             os.chdir(old_cwd)
         stdout = capsys.readouterr().out
         assert "off" in stdout
+
+    def test_subprocess_cli_where_and_lint_store(self, tmp_path: Path) -> None:
+        store_dir = tmp_path / "sub_store"
+        proc_where = _run_bth_cli(
+            "parity", "where", "--json", env_extra={"BTH_PARITY_STORE": str(store_dir)}, cwd=tmp_path
+        )
+        assert proc_where.returncode == 0
+        assert Path(json.loads(proc_where.stdout)["path"]) == store_dir.resolve()
+
+        proc_lint_ok = _run_bth_cli("parity", "lint-store", cwd=tmp_path)
+        assert proc_lint_ok.returncode == 0
+        assert "OK:" in proc_lint_ok.stdout
+
+        bad_pkg = tmp_path / "bad_pkg"
+        bad_pkg.mkdir()
+        (bad_pkg / "leak.py").write_text('X = "~/.bth/parity"\n', encoding="utf-8")
+        proc_lint_fail = _run_bth_cli("parity", "lint-store", str(bad_pkg), cwd=tmp_path)
+        assert proc_lint_fail.returncode == 1
+        assert "ERROR:" in proc_lint_fail.stderr

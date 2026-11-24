@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from bathos.parity.schema import ParityValidationError, validate_declaration
-from bathos.parity.store import ParityStore, atomic_write_json, require_parity_store
+from bathos.parity.store import (
+    ParityStore,
+    atomic_write_json,
+    require_parity_store,
+    validate_safe_store_segment,
+)
 
 
 class ParityDeclareError(RuntimeError):
@@ -83,7 +88,7 @@ def declare_parity_record(
     if issues:
         raise ParityValidationError(issues)
 
-    record_id = str(data["parity"]["record_id"])
+    record_id = validate_safe_store_segment(str(data["parity"]["record_id"]), "record_id")
     head_dir = Path(repo_root).resolve() if repo_root is not None else path.parent
     head_commit = _capture_git_head(head_dir)
 
@@ -91,7 +96,10 @@ def declare_parity_record(
     decl_sha = store.put_bytes(raw_bytes)
     blob_path = store.blob_path(decl_sha)
 
-    decl_dir = store.root / "declarations" / record_id
+    decl_root = (store.root / "declarations").resolve()
+    decl_dir = (decl_root / record_id).resolve()
+    if decl_root not in decl_dir.parents:
+        raise ParityDeclareError(f"record_id escapes declarations directory: {record_id!r}")
     first_meta_path = decl_dir / "first.json"
     version_meta_path = decl_dir / f"{decl_sha}.json"
 
@@ -128,7 +136,8 @@ def load_declaration_baseline(
     record_id: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Return ``(first_meta, first_declaration_data)`` from store if ``declare`` was run."""
-    first_meta_path = store.root / "declarations" / record_id / "first.json"
+    safe_rid = validate_safe_store_segment(record_id, "record_id")
+    first_meta_path = store.root / "declarations" / safe_rid / "first.json"
     if not first_meta_path.is_file():
         return None, None
     first_meta = json.loads(first_meta_path.read_text(encoding="utf-8"))
@@ -144,7 +153,9 @@ def load_declaration_version_meta(
     decl_sha: str,
 ) -> dict[str, Any] | None:
     """Return stored declaration metadata (e.g. ``head_commit``) for ``decl_sha`` if declared."""
-    meta_path = store.root / "declarations" / record_id / f"{decl_sha}.json"
+    safe_rid = validate_safe_store_segment(record_id, "record_id")
+    safe_sha = validate_safe_store_segment(decl_sha, "decl_sha")
+    meta_path = store.root / "declarations" / safe_rid / f"{safe_sha}.json"
     if not meta_path.is_file():
         return None
     return json.loads(meta_path.read_text(encoding="utf-8"))

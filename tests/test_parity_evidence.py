@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import io
 import json
 import subprocess
 import sys
 from pathlib import Path
 
+import jsonschema
 import numpy as np
+import pytest
 
 from bathos.parity.evidence import (
+    CellEvidenceError,
     load_cell_evidence_for_record,
     validate_cell_evidence,
     write_cell_evidence,
@@ -126,18 +130,142 @@ print(manifest["ours_bundle_sha256"])
     def test_load_cell_evidence_for_record(self, tmp_path: Path) -> None:
         store = ParityStore(tmp_path / "store")
         arr = np.zeros((2, 3), dtype=np.float64)
-        write_cell_evidence(
+        _sha, manifest = write_cell_evidence(
             store=store,
             record_id="rec-1",
             cell_id="c1",
             run_id="r1",
             ours_arrays={"out": arr},
+            reference_arrays={"out": arr},
             input_sha256={"ours": ["c" * 64], "reference": ["d" * 64]},
         )
         loaded = load_cell_evidence_for_record(store, "rec-1")
         assert len(loaded) == 1
         assert loaded[0]["cell_id"] == "c1"
-        assert isinstance(RawArray(dtype="<f8", shape=(2, 3), data=arr.tobytes("C")), RawArray)
+        decoded_bundle = decode_npz(store.get_bytes(manifest["ours_bundle_sha256"]))
+        assert decoded_bundle["out"] == RawArray(dtype="<f8", shape=(2, 3), data=arr.tobytes("C"))
+        ce_schema = json.loads(
+            importlib.resources.files("bathos").joinpath("schemas", "cell_evidence.v1.json").read_text(encoding="utf-8")
+        )
+        jsonschema.validate(instance=manifest, schema=ce_schema)
+
+    def test_nc_tampered_ours_and_reference_digests_and_missing_blobs(self, tmp_path: Path) -> None:
+        store = ParityStore(tmp_path / "store")
+        arr = np.array([1.0, 2.0], dtype=np.float32)
+        _sha, manifest = write_cell_evidence(
+            store=store,
+            record_id="rec-tamper",
+            cell_id="c1",
+            run_id="r1",
+            ours_arrays={"y": arr},
+            reference_arrays={"y": arr},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        assert validate_cell_evidence(manifest, store=store) == []
+
+        # Tamper ours digest
+        bad_ours = json.loads(json.dumps(manifest))
+        bad_ours["ours_arrays"]["y"]["canonical_digest"] = "0" * 64
+        assert any("ours_arrays.y digest mismatch" in e for e in validate_cell_evidence(bad_ours, store=store))
+
+        # Tamper reference_bundle_sha256 / reference_arrays digest
+        bad_ref = json.loads(json.dumps(manifest))
+        bad_ref["reference_arrays"]["y"]["canonical_digest"] = "0" * 64
+        assert any("reference_arrays.y digest mismatch" in e for e in validate_cell_evidence(bad_ref, store=store))
+
+        bad_ref_blob = json.loads(json.dumps(manifest))
+        bad_ref_blob["reference_bundle_sha256"] = "f" * 64
+        assert any("failed to load reference_arrays bundle" in e for e in validate_cell_evidence(bad_ref_blob, store=store))
+
+        # Missing adapter.version and invalid reference_dump_sha256
+        bad_meta = json.loads(json.dumps(manifest))
+        del bad_meta["adapter"]["version"]
+        bad_meta["reference_dump_sha256"] = "not-hex"
+        errs = validate_cell_evidence(bad_meta, store=store)
+        assert any("adapter.version" in e for e in errs)
+        assert any("reference_dump_sha256" in e for e in errs)
+
+        # Tampered index JSON manifest_sha256 detected on load_cell_evidence_for_record
+        idx_file = store.root / "evidence" / "rec-tamper" / "r1" / "c1.json"
+        idx_obj = json.loads(idx_file.read_text(encoding="utf-8"))
+        idx_obj["ours_arrays"]["y"]["canonical_digest"] = "0" * 64
+        idx_file.write_text(json.dumps(idx_obj), encoding="utf-8")
+        with pytest.raises(CellEvidenceError, match="does not match content-addressed manifest"):
+            load_cell_evidence_for_record(store, "rec-tamper")
+
+    def test_nc_path_traversal_and_npy_key_normalization(self, tmp_path: Path) -> None:
+        store = ParityStore(tmp_path / "store")
+        arr = np.array([1.0], dtype=np.float32)
+
+        for bad_kwargs in (
+            {"record_id": "../../escape", "cell_id": "c1", "run_id": "r1"},
+            {"record_id": "rec-1", "cell_id": "../c1", "run_id": "r1"},
+            {"record_id": "rec-1", "cell_id": "c1", "run_id": "/tmp/evil"},
+        ):
+            with pytest.raises(ValueError):
+                write_cell_evidence(
+                    store=store,
+                    ours_arrays={"y": arr},
+                    input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+                    **bad_kwargs,
+                )
+        with pytest.raises(ValueError):
+            load_cell_evidence_for_record(store, "../escape")
+
+        # ".npy" suffix key normalizes cleanly; duplicate "y" + "y.npy" rejected
+        _sha, m_npy = write_cell_evidence(
+            store=store,
+            record_id="rec-npy",
+            cell_id="c1",
+            run_id="r1",
+            ours_arrays={"y.npy": arr},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        assert "y" in m_npy["ours_arrays"]
+        assert m_npy["ours_arrays"]["y"]["member_name"] == "y.npy"
+        assert validate_cell_evidence(m_npy, store=store) == []
+
+        with pytest.raises(CellEvidenceError, match="Duplicate array key"):
+            write_cell_evidence(
+                store=store,
+                record_id="rec-npy",
+                cell_id="c2",
+                run_id="r1",
+                ours_arrays={"y": arr, "y.npy": arr},
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+        with pytest.raises(ValueError, match="Duplicate array member"):
+            encode_npz({"y": arr, "y.npy": arr})
+
+    def test_npy_stdlib_edge_cases_and_invalid_input_sha(self, tmp_path: Path) -> None:
+        # 0-d scalar & empty array
+        scalar = np.array(3.5, dtype=np.float64)
+        empty = np.array([], dtype=np.float32)
+        for arr in (scalar, empty):
+            raw = decode_npy(encode_npy(arr))
+            assert raw.shape == arr.shape
+            assert canonical_array_digest(raw.dtype, raw.shape, raw.data) == canonical_array_digest(
+                arr.dtype.str, arr.shape, arr.tobytes("C")
+            )
+
+        # Fortran order rejected
+        f_arr = np.asfortranarray(np.arange(6, dtype=np.float32).reshape(2, 3))
+        buf = io.BytesIO()
+        np.save(buf, f_arr, allow_pickle=False)
+        with pytest.raises(ValueError, match="Fortran-ordered"):
+            decode_npy(buf.getvalue())
+
+        # Invalid input_sha256 hex rejected
+        store = ParityStore(tmp_path / "store")
+        with pytest.raises(CellEvidenceError, match="invalid sha256 digest"):
+            write_cell_evidence(
+                store=store,
+                record_id="rec-bad-inp",
+                cell_id="c1",
+                run_id="r1",
+                ours_arrays={"y": empty},
+                input_sha256={"ours": ["not-64-hex"], "reference": ["b" * 64]},
+            )
 
     def test_numpy_in_pyproject_dependencies(self) -> None:
         pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")

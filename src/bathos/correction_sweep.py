@@ -255,6 +255,12 @@ def iter_sweep_artifacts(
     for p in extra_paths:
         if p.is_file():
             if p.name.endswith(_SIDECAR_SUFFIX):
+                if (
+                    p.name == ".bth.toml"
+                    or p.name.endswith(_LOCK_FILE_SUFFIX)
+                    or is_parity_or_discrepancy_toml(p)
+                ):
+                    continue
                 _add(p, "sidecar")
             else:
                 _add(p, "spec")
@@ -262,6 +268,12 @@ def iter_sweep_artifacts(
             for ext in sorted(_SPEC_EXTENSIONS):
                 for sub in iter_project_files(p, ext, event_name="sweep.boundary_pruned"):
                     if sub.name.endswith(_SIDECAR_SUFFIX):
+                        if (
+                            sub.name == ".bth.toml"
+                            or sub.name.endswith(_LOCK_FILE_SUFFIX)
+                            or is_parity_or_discrepancy_toml(sub)
+                        ):
+                            continue
                         _add(sub, "sidecar")
                     elif not sub.name.endswith(_LOCK_FILE_SUFFIX):
                         _add(sub, "spec")

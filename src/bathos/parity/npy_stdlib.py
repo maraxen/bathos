@@ -261,9 +261,13 @@ def decode_npy(data: bytes) -> RawArray:
     if header.get("fortran_order"):
         raise ValueError("Fortran-ordered .npy arrays are not supported in stdlib canonical decoder")
 
-    raw_descr = str(header["descr"])
+    try:
+        raw_descr = str(header["descr"])
+        raw_shape = header["shape"]
+    except KeyError as exc:
+        raise ValueError(f"Malformed .npy header: missing required key {exc}") from exc
     norm_dtype = normalize_dtype_str(raw_descr)
-    shape = tuple(int(d) for d in header["shape"])
+    shape = tuple(int(d) for d in raw_shape)
     payload = data[hdr_end:]
     if raw_descr.startswith(">"):
         itemsize, _fmt = DTYPE_SPECS[norm_dtype]
@@ -282,9 +286,13 @@ def encode_npz(arrays: Mapping[str, Any], *, compress: bool = True) -> bytes:
     buf = io.BytesIO()
     compression = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     fixed_dt = (2026, 1, 1, 0, 0, 0)
+    seen_members: set[str] = set()
     with zipfile.ZipFile(buf, mode="w", compression=compression) as zf:
         for key in sorted(arrays):
             member_name = key if key.endswith(".npy") else f"{key}.npy"
+            if member_name in seen_members:
+                raise ValueError(f"Duplicate array member name in .npz archive: {member_name!r}")
+            seen_members.add(member_name)
             zi = zipfile.ZipInfo(filename=member_name, date_time=fixed_dt)
             zi.compress_type = compression
             zf.writestr(zi, encode_npy(arrays[key]))

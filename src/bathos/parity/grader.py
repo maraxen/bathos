@@ -16,9 +16,11 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import subprocess
 import tomllib
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,6 +29,7 @@ from typing import Any
 
 import numpy as np
 
+from bathos.archived_items import read_archived_item_fragments
 from bathos.catalog import read_runs, write_run
 from bathos.config import default_catalog_dir
 from bathos.git import capture_git_state
@@ -41,10 +44,11 @@ from bathos.parity.metrics import compare_bitwise, compare_within_tolerance, get
 from bathos.parity.schema import (
     STANDARD_VERSION,
     ParityValidationError,
+    canonical_json,
     compute_cell_id,
     validate_declaration,
 )
-from bathos.parity.sealed_dump import load_sealed_dump_arrays
+from bathos.parity.sealed_dump import SealedDumpError, load_sealed_dump_arrays
 from bathos.parity.store import ParityStore, atomic_write_bytes, require_parity_store
 from bathos.schema import Run
 from bathos.validity import ValidityResult, resolve_validity
@@ -121,6 +125,56 @@ def _load_bundle_arrays(store: ParityStore, bundle_sha: str) -> dict[str, np.nda
         return {k: np.asarray(z[k]) for k in sorted(z.files)}
 
 
+_DTYPE_ALIASES: dict[str, str] = {
+    "b1": "bool",
+    "bool": "bool",
+    "bool_": "bool",
+    "u1": "uint8",
+    "uint8": "uint8",
+    "i1": "int8",
+    "int8": "int8",
+    "u2": "uint16",
+    "uint16": "uint16",
+    "i2": "int16",
+    "int16": "int16",
+    "u4": "uint32",
+    "uint32": "uint32",
+    "i4": "int32",
+    "int32": "int32",
+    "u8": "uint64",
+    "uint64": "uint64",
+    "i8": "int64",
+    "int64": "int64",
+    "f2": "float16",
+    "float16": "float16",
+    "f4": "float32",
+    "float32": "float32",
+    "f8": "float64",
+    "float64": "float64",
+    "c8": "complex64",
+    "complex64": "complex64",
+    "c16": "complex128",
+    "complex128": "complex128",
+}
+
+
+def _tol_matches(
+    tol: Mapping[str, Any],
+    *,
+    friendly_dtype: str,
+    raw_dtype_str: str,
+    comp_id: str,
+) -> bool:
+    tol_dtype = str(tol.get("dtype", "")).strip()
+    tol_friendly = _DTYPE_ALIASES.get(tol_dtype.lstrip("<>=|"), tol_dtype)
+    if tol_dtype not in (friendly_dtype, raw_dtype_str) and tol_friendly != friendly_dtype:
+        return False
+    applies_to = tol.get("applies_to")
+    if not isinstance(applies_to, Sequence) or isinstance(applies_to, (str, bytes)) or not applies_to:
+        return False
+    return comp_id in applies_to or "*" in applies_to
+
+
 def _select_tolerance(
     declaration: Mapping[str, Any],
     cell_plan_entry: Mapping[str, Any],
@@ -129,29 +183,78 @@ def _select_tolerance(
     tolerances = declaration.get("tolerance", [])
     if not tolerances:
         return None
+    norm_dtype = arr_dtype_str.lstrip("<>=|")
+    friendly = _DTYPE_ALIASES.get(norm_dtype, arr_dtype_str)
+    comp_id = str(cell_plan_entry.get("component_id", "model"))
     tol_id = cell_plan_entry.get("tolerance_id")
     if tol_id:
         for tol in tolerances:
             if tol.get("id") == tol_id:
-                return dict(tol)
-    norm_dtype = arr_dtype_str.lstrip("<>=|")
-    dtype_aliases = {
-        "f2": "float16",
-        "f4": "float32",
-        "f8": "float64",
-        "float16": "float16",
-        "float32": "float32",
-        "float64": "float64",
-    }
-    friendly = dtype_aliases.get(norm_dtype, arr_dtype_str)
-    comp_id = str(cell_plan_entry.get("component_id", "model"))
+                if _tol_matches(tol, friendly_dtype=friendly, raw_dtype_str=arr_dtype_str, comp_id=comp_id):
+                    return dict(tol)
+                return None
+        return None
     for tol in tolerances:
-        applies_to = tol.get("applies_to", [])
-        if tol.get("dtype") in (friendly, arr_dtype_str) and (
-            comp_id in applies_to or "*" in applies_to or not applies_to
-        ):
+        if _tol_matches(tol, friendly_dtype=friendly, raw_dtype_str=arr_dtype_str, comp_id=comp_id):
             return dict(tol)
-    return dict(tolerances[0])
+    return None
+
+
+def _finite_or_none(val: float | None) -> float | None:
+    if val is None or not math.isfinite(val):
+        return None
+    return float(val)
+
+
+def _pair_identity_key(declaration: Mapping[str, Any]) -> tuple[str, str, str]:
+    impl_repo = str(declaration.get("implementation", {}).get("repo", "")).strip()
+    refs = declaration.get("reference", [])
+    primary_ref = refs[0] if refs and isinstance(refs[0], Mapping) else {}
+    ref_kind = str(primary_ref.get("kind", "")).strip()
+    ref_identity = primary_ref.get("identity", {})
+    ident_json = canonical_json(ref_identity) if isinstance(ref_identity, Mapping) else "{}"
+    return (impl_repo, ref_kind, ident_json)
+
+
+def _count_prior_records_on_pair(
+    store: ParityStore,
+    declaration: Mapping[str, Any],
+    current_record_id: str,
+) -> int:
+    """Count distinct other record_ids in store sharing (implementation.repo, comparator identity) (§3.17.1)."""
+    decl_root = store.root / "declarations"
+    if not decl_root.is_dir():
+        return 0
+    target_key = _pair_identity_key(declaration)
+    if not target_key[0]:
+        return 0
+    count = 0
+    for rec_dir in sorted(decl_root.iterdir()):
+        if not rec_dir.is_dir() or rec_dir.name == current_record_id:
+            continue
+        meta_files: list[Path] = []
+        first_file = rec_dir / "first.json"
+        if first_file.is_file():
+            meta_files.append(first_file)
+        for jf in sorted(rec_dir.glob("*.json")):
+            if jf != first_file:
+                meta_files.append(jf)
+        matched = False
+        for mf in meta_files:
+            try:
+                meta = json.loads(mf.read_text(encoding="utf-8"))
+                decl_sha = meta.get("declaration_sha256")
+                if not isinstance(decl_sha, str):
+                    continue
+                other_decl = tomllib.loads(store.get_bytes(decl_sha).decode("utf-8"))
+                if _pair_identity_key(other_decl) == target_key:
+                    matched = True
+                    break
+            except Exception:
+                continue
+        if matched:
+            count += 1
+    return count
 
 
 def _target_revisions_from_decl(declaration: Mapping[str, Any], impl_rev: str) -> dict[str, Any]:
@@ -247,8 +350,11 @@ def _evaluate_cell(
             continue
         if run.status not in ("completed", "failed"):
             saw_non_terminal = True
-        elif rid not in manifest_run_ids:
-            saw_terminal_without_evidence = True
+        else:
+            if run.outcome == "invariant_fail":
+                saw_invariant_fail = True
+            if rid not in manifest_run_ids:
+                saw_terminal_without_evidence = True
 
     base_row: dict[str, Any] = {
         "cell_id": cell_id,
@@ -278,21 +384,22 @@ def _evaluate_cell(
         "verdict": "not_run",
     }
 
-    # G04 evidence-absence and invariant rules take precedence before G10
+    # G04 evidence-absence, terminal-status, and invariant rules take precedence before G10
     if saw_invariant_fail:
         base_row["verdict"] = "fail"
         base_row["flags"] = ["invariant_fail"]
+    elif saw_non_terminal:
+        base_row["verdict"] = "not_run"
+    elif saw_terminal_without_evidence:
+        base_row["verdict"] = "inconclusive"
+        base_row["flags"] = ["run_failed"]
     elif not usable_manifests:
-        if saw_terminal_without_evidence:
-            base_row["verdict"] = "inconclusive"
-            base_row["flags"] = ["run_failed"]
-        elif saw_non_terminal or not evidence_run_ids:
-            base_row["verdict"] = "not_run"
-        else:
-            # All manifests belonged to validity-hidden runs -> effectively no valid evidence
-            base_row["verdict"] = "not_run"
+        base_row["verdict"] = "not_run"
     else:
         # Validate manifest integrity & run built-in comparison (G10 elementwise/bitwise half)
+        usable_manifests.sort(
+            key=lambda m: (str(m.get("created_at", "")), str(m.get("run_id", "")))
+        )
         selected_manifest = usable_manifests[-1]
         base_row["cell_evidence_sha256"] = selected_manifest.get("manifest_sha256")
         base_row["input_sha256"] = selected_manifest.get("input_sha256", {"ours": [], "reference": []})
@@ -301,98 +408,165 @@ def _evaluate_cell(
             base_row["verdict"] = "fail"
             base_row["flags"] = ["digest_mismatch"]
         else:
-            ours_arrays = _load_bundle_arrays(store, str(selected_manifest["ours_bundle_sha256"]))
+            ours_arrays: dict[str, np.ndarray] = {}
             ref_arrays: dict[str, np.ndarray] = {}
-            if selected_manifest.get("reference_bundle_sha256"):
-                ref_arrays = _load_bundle_arrays(store, str(selected_manifest["reference_bundle_sha256"]))
-            elif ref_kind == "sealed_dump":
-                dump_sha = str(
-                    selected_manifest.get("reference_dump_sha256")
-                    or ref_entry.get("identity", {}).get("dump_sha256", "")
-                )
-                if dump_sha:
-                    if dump_sha not in sealed_dump_cache:
-                        sealed_dump_cache[dump_sha] = load_sealed_dump_arrays(store, dump_sha)
-                    dump_all = sealed_dump_cache[dump_sha]
-                    dump_key_map = selected_manifest.get("reference_dump_keys") or plan_cell.get("dump_keys") or {}
-                    for out_name in ours_arrays:
-                        ref_key = str(dump_key_map.get(out_name, out_name))
-                        if ref_key in dump_all:
-                            ref_arrays[out_name] = dump_all[ref_key]
+            missing_ours: list[str] = []
+            load_flag: str | None = None
 
-            missing_ref = [k for k in ours_arrays if k not in ref_arrays]
-            if missing_ref:
-                base_row["verdict"] = "fail"
-                base_row["flags"] = ["fixture_mismatch"]
-            elif declared_kind in ("bitwise", "within_tolerance"):
-                all_bitwise = True
-                all_within_tol = True
-                worst_abs = 0.0
-                worst_rel = 0.0
-                per_array_metrics: dict[str, Any] = {}
-                tol_used: str | None = None
-                total_elems = 0
-                for arr_name in sorted(ours_arrays):
-                    ours_a = ours_arrays[arr_name]
-                    ref_a = ref_arrays[arr_name]
-                    bw = compare_bitwise(ours_a, ref_a)
-                    if not bw.equal:
-                        all_bitwise = False
-                    tol = _select_tolerance(declaration, plan_cell, ours_a.dtype.str)
-                    if tol is not None:
-                        tol_used = str(tol["id"])
-                        ew = compare_within_tolerance(
-                            ours_a,
-                            ref_a,
-                            atol=float(tol["atol"]),
-                            rtol=float(tol["rtol"]),
-                        )
-                        if not ew.within_tolerance:
-                            all_within_tol = False
-                        if ew.max_abs_diff is not None:
-                            worst_abs = max(worst_abs, ew.max_abs_diff)
-                        if ew.max_rel_diff is not None:
-                            worst_rel = max(worst_rel, ew.max_rel_diff)
-                        total_elems += ew.n_elements
-                        per_array_metrics[arr_name] = {
-                            "bitwise_equal": bw.equal,
-                            "within_tolerance": ew.within_tolerance,
-                            "max_abs_diff": ew.max_abs_diff,
-                            "max_rel_diff": ew.max_rel_diff,
-                            "mean_abs_diff": ew.mean_abs_diff,
-                            "n_exceeding": ew.n_exceeding,
-                            "atol": float(tol["atol"]),
-                            "rtol": float(tol["rtol"]),
-                        }
+            try:
+                ours_arrays = _load_bundle_arrays(store, str(selected_manifest["ours_bundle_sha256"]))
+            except (FileNotFoundError, ValueError, KeyError, zipfile.BadZipFile, EOFError, OSError):
+                load_flag = "digest_mismatch"
+
+            if load_flag is None:
+                if ref_kind == "sealed_dump":
+                    # NEVER load reference_bundle_sha256 for sealed_dump; require authoritative identity.dump_sha256.
+                    authoritative_dump_sha = str(
+                        ref_entry.get("identity", {}).get("dump_sha256", "")
+                    ).strip().lower()
+                    manifest_dump_sha = selected_manifest.get("reference_dump_sha256")
+                    if not authoritative_dump_sha or (
+                        manifest_dump_sha is not None
+                        and str(manifest_dump_sha).strip().lower() != authoritative_dump_sha
+                    ):
+                        load_flag = "fixture_mismatch"
                     else:
-                        all_within_tol = all_bitwise
-                        total_elems += int(ours_a.size)
-                        per_array_metrics[arr_name] = {"bitwise_equal": bw.equal}
+                        try:
+                            if authoritative_dump_sha not in sealed_dump_cache:
+                                sealed_dump_cache[authoritative_dump_sha] = load_sealed_dump_arrays(
+                                    store, authoritative_dump_sha
+                                )
+                            dump_all = sealed_dump_cache[authoritative_dump_sha]
+                        except (
+                            SealedDumpError,
+                            FileNotFoundError,
+                            ValueError,
+                            zipfile.BadZipFile,
+                            EOFError,
+                            OSError,
+                        ):
+                            load_flag = "digest_mismatch"
+                        else:
+                            dump_key_map = (
+                                selected_manifest.get("reference_dump_keys")
+                                or plan_cell.get("dump_keys")
+                                or {}
+                            )
+                            for out_name in ours_arrays:
+                                ref_key = str(dump_key_map.get(out_name, out_name))
+                                if ref_key in dump_all:
+                                    ref_arrays[out_name] = dump_all[ref_key]
+                            missing_ours = [str(k) for k in dump_key_map if str(k) not in ours_arrays]
+                elif selected_manifest.get("reference_bundle_sha256"):
+                    try:
+                        ref_arrays = _load_bundle_arrays(
+                            store, str(selected_manifest["reference_bundle_sha256"])
+                        )
+                    except (FileNotFoundError, ValueError, KeyError, zipfile.BadZipFile, EOFError, OSError):
+                        load_flag = "digest_mismatch"
+                    else:
+                        missing_ours = [k for k in ref_arrays if k not in ours_arrays]
 
-                achieved: list[str] = []
-                if all_bitwise:
-                    achieved.append("bitwise")
-                if all_bitwise or all_within_tol:
-                    achieved.append("within_tolerance")
-
-                base_row["achieved_kinds"] = achieved
-                base_row["tolerance_ref"] = tol_used
-                base_row["n"] = total_elems
-                base_row["metric_values"] = {
-                    "max_abs_diff": worst_abs,
-                    "max_rel_diff": worst_rel,
-                    "arrays": per_array_metrics,
-                }
-                if declared_kind in achieved:
-                    base_row["verdict"] = "pass"
-                    base_row["flags"] = []
-                else:
-                    base_row["verdict"] = "fail"
-                    base_row["flags"] = ["kind_shortfall"]
+            if load_flag is not None:
+                base_row["verdict"] = "fail"
+                base_row["flags"] = [load_flag]
             else:
-                # Other kinds wait for WP49c / WP05c in Ring 3
-                base_row["verdict"] = "inconclusive"
-                base_row["flags"] = ["kind_grader_not_active_ring0"]
+                missing_ref = [k for k in ours_arrays if k not in ref_arrays]
+                if missing_ref or missing_ours:
+                    base_row["verdict"] = "fail"
+                    base_row["flags"] = ["fixture_mismatch"]
+                elif declared_kind in ("bitwise", "within_tolerance"):
+                    all_bitwise = True
+                    all_within_tol = True
+                    missing_tolerance = False
+                    worst_abs: float | None = None
+                    worst_rel: float | None = None
+                    saw_nonfinite_abs = False
+                    saw_nonfinite_rel = False
+                    per_array_metrics: dict[str, Any] = {}
+                    tol_used: str | None = None
+                    total_elems = 0
+                    for arr_name in sorted(ours_arrays):
+                        ours_a = ours_arrays[arr_name]
+                        ref_a = ref_arrays[arr_name]
+                        bw = compare_bitwise(ours_a, ref_a)
+                        if not bw.equal:
+                            all_bitwise = False
+                        tol = _select_tolerance(declaration, plan_cell, ours_a.dtype.str)
+                        if tol is not None:
+                            tol_used = str(tol["id"])
+                            ew = compare_within_tolerance(
+                                ours_a,
+                                ref_a,
+                                atol=float(tol["atol"]),
+                                rtol=float(tol["rtol"]),
+                            )
+                            if not ew.within_tolerance:
+                                all_within_tol = False
+                            fin_abs = _finite_or_none(ew.max_abs_diff)
+                            fin_rel = _finite_or_none(ew.max_rel_diff)
+                            fin_mean = _finite_or_none(ew.mean_abs_diff)
+                            if fin_abs is None:
+                                saw_nonfinite_abs = True
+                            elif not saw_nonfinite_abs:
+                                worst_abs = fin_abs if worst_abs is None else max(worst_abs, fin_abs)
+                            if fin_rel is None:
+                                saw_nonfinite_rel = True
+                            elif not saw_nonfinite_rel:
+                                worst_rel = fin_rel if worst_rel is None else max(worst_rel, fin_rel)
+                            total_elems += ew.n_elements
+                            per_array_metrics[arr_name] = {
+                                "bitwise_equal": bw.equal,
+                                "within_tolerance": ew.within_tolerance,
+                                "max_abs_diff": fin_abs,
+                                "max_rel_diff": fin_rel,
+                                "mean_abs_diff": fin_mean,
+                                "n_exceeding": ew.n_exceeding,
+                                "atol": float(tol["atol"]),
+                                "rtol": float(tol["rtol"]),
+                            }
+                        elif declared_kind == "within_tolerance":
+                            missing_tolerance = True
+                            all_within_tol = False
+                            saw_nonfinite_abs = True
+                            saw_nonfinite_rel = True
+                            total_elems += int(ours_a.size)
+                            per_array_metrics[arr_name] = {
+                                "bitwise_equal": bw.equal,
+                                "tolerance_missing": True,
+                            }
+                        else:
+                            all_within_tol = all_bitwise
+                            total_elems += int(ours_a.size)
+                            per_array_metrics[arr_name] = {"bitwise_equal": bw.equal}
+
+                    achieved: list[str] = []
+                    if all_bitwise:
+                        achieved.append("bitwise")
+                    if all_bitwise or (all_within_tol and not missing_tolerance):
+                        achieved.append("within_tolerance")
+
+                    base_row["achieved_kinds"] = achieved
+                    base_row["tolerance_ref"] = tol_used
+                    base_row["n"] = total_elems
+                    base_row["metric_values"] = {
+                        "max_abs_diff": None if saw_nonfinite_abs else worst_abs,
+                        "max_rel_diff": None if saw_nonfinite_rel else worst_rel,
+                        "arrays": per_array_metrics,
+                    }
+                    if missing_tolerance:
+                        base_row["verdict"] = "fail"
+                        base_row["flags"] = ["basis_insufficient"]
+                    elif declared_kind in achieved:
+                        base_row["verdict"] = "pass"
+                        base_row["flags"] = []
+                    else:
+                        base_row["verdict"] = "fail"
+                        base_row["flags"] = ["kind_shortfall"]
+                else:
+                    # Other kinds wait for WP49c / WP05c in Ring 3
+                    base_row["verdict"] = "inconclusive"
+                    base_row["flags"] = ["kind_grader_not_active_ring0"]
 
     for hook in hooks:
         extra_overlays = hook(base_row, declaration)
@@ -442,8 +616,40 @@ def _build_result_payload(
     runs_by_id = _load_runs_by_id(catalog_dir)
     known_run_ids = [rid for rid in referenced_run_ids if rid in runs_by_id]
     validity_by_id: dict[str, ValidityResult] = {}
-    if known_run_ids and catalog_dir is not None and (catalog_dir / "bathos.db").is_file():
+    if known_run_ids and catalog_dir is not None:
         validity_by_id = resolve_validity(known_run_ids, catalog_dir=catalog_dir)
+        if not (catalog_dir / "bathos.db").is_file():
+            # Cool-tier archived_items fallback before `bth compact` creates bathos.db
+            try:
+                latest_arch: dict[str, Any] = {}
+                for rec in sorted(read_archived_item_fragments(catalog_dir), key=lambda r: r.recorded_at):
+                    latest_arch[rec.id] = rec
+                archived_rids = {
+                    rid
+                    for rec in latest_arch.values()
+                    if rec.event == "archived"
+                    for rid in rec.run_ids
+                }
+                for rid in known_run_ids:
+                    if rid in archived_rids and (rid not in validity_by_id or not validity_by_id[rid].is_hidden):
+                        cur = validity_by_id.get(rid)
+                        validity_by_id[rid] = ValidityResult(
+                            run_id=rid,
+                            state="archived",
+                            reason="cool-tier archived_items",
+                            replacement_id=None,
+                            version_source=cur.version_source if cur else "unknown",
+                            evidence_tier=cur.evidence_tier if cur else "undeclared",
+                            is_hidden=True,
+                        )
+            except Exception:
+                pass
+
+    manifest_decl_sha_by_run: dict[str, str] = {}
+    for m in manifests:
+        rid = str(m.get("run_id", ""))
+        if rid and isinstance(m.get("declaration_blob_sha256"), str) and m["declaration_blob_sha256"]:
+            manifest_decl_sha_by_run[rid] = str(m["declaration_blob_sha256"])
 
     evidence_runs_summary: list[dict[str, Any]] = []
     for rid in referenced_run_ids:
@@ -457,7 +663,7 @@ def _build_result_payload(
                 "validity_state": val.state if val else "current",
                 "is_hidden": bool(val.is_hidden) if val else False,
                 "env_blob_sha256": None,
-                "declaration_blob_sha256": decl_sha,
+                "declaration_blob_sha256": manifest_decl_sha_by_run.get(rid, decl_sha),
             }
         )
 
@@ -542,7 +748,13 @@ def _build_result_payload(
     # Derived results_seen (§3.17.1): true iff prior_runs non-empty OR any evidence run exists
     prior_runs = list(declaration.get("parity", {}).get("prior_runs", []))
     results_seen = bool(prior_runs or referenced_run_ids)
+    prior_records_count = _count_prior_records_on_pair(store, declaration, record_id)
 
+    norm_cell_runs = {
+        str(cid): [str(r) for r in rids]
+        for cid, rids in sorted(declared_cell_runs.items())
+        if rids
+    }
     grade_inputs = {
         "as_of": as_of,
         "target_revisions": _target_revisions_from_decl(declaration, impl_rev),
@@ -550,6 +762,7 @@ def _build_result_payload(
         "ledger_high_water_mark": None,
         "gate_stages": {g["code"]: g["stage"] for g in gates},
         "comparison_backend": dict(comparison_backend),
+        "cell_runs": norm_cell_runs,
     }
 
     return {
@@ -571,7 +784,7 @@ def _build_result_payload(
         "gates": gates,
         "amendments": [],
         "dual_display_result": dual_display_result,
-        "prior_records_on_pair": len(prior_runs),
+        "prior_records_on_pair": prior_records_count,
         "bundle_sha256": None,
     }
 
@@ -633,15 +846,28 @@ def grade_parity_record(
             existing_obj = json.loads(existing_bytes.decode("utf-8"))
         except Exception as exc:
             raise ParityVerifyError(f"Malformed result JSON at {out_p}: {exc}") from exc
-        recorded_inputs = existing_obj.get("grade_inputs", {})
-        replay_as_of = str(recorded_inputs.get("as_of") or datetime.now(UTC).isoformat())
-        replay_gate_stages = dict(recorded_inputs.get("gate_stages") or {})
-        replay_backend = dict(recorded_inputs.get("comparison_backend") or get_backend_identity())
-        replay_ev_runs = (
-            evidence_run_ids
-            if evidence_run_ids is not None
-            else ([r["run_id"] for r in existing_obj.get("evidence_runs", [])] if existing_obj.get("evidence_runs") else None)
-        )
+        if not isinstance(existing_obj, Mapping):
+            raise ParityVerifyError(f"Result JSON at {out_p} must be an object")
+        recorded_inputs = existing_obj.get("grade_inputs")
+        if not isinstance(recorded_inputs, Mapping) or not recorded_inputs.get("as_of"):
+            raise ParityVerifyError(f"Result JSON at {out_p} missing grade_inputs.as_of")
+        replay_as_of = str(recorded_inputs["as_of"])
+        # Always recompute gate_stages and comparison_backend; never trust recorded values on verify.
+        replay_gate_stages = {code: "shadow" for code in RING0_ACTIVE_G_CODES}
+        replay_backend = get_backend_identity()
+        # Discover runs fresh from store (respecting only caller-passed evidence_run_ids).
+        replay_ev_runs = evidence_run_ids
+        if cell_runs is not None:
+            replay_cell_runs: Mapping[str, Sequence[str]] = cell_runs
+        else:
+            raw_cell_runs = recorded_inputs.get("cell_runs")
+            if raw_cell_runs is None:
+                replay_cell_runs = {}
+            elif isinstance(raw_cell_runs, Mapping):
+                replay_cell_runs = raw_cell_runs
+            else:
+                raise ParityVerifyError(f"Result JSON at {out_p} has invalid grade_inputs.cell_runs")
+
         replayed = _build_result_payload(
             declaration=declaration,
             decl_sha=decl_sha,
@@ -651,13 +877,12 @@ def grade_parity_record(
             store=store,
             catalog_dir=cat_dir,
             evidence_run_ids=replay_ev_runs,
-            declared_cell_runs=cell_runs or {},
+            declared_cell_runs=replay_cell_runs,
             as_of=replay_as_of,
             gate_stages=replay_gate_stages,
             comparison_backend=replay_backend,
             overlay_hooks=overlay_hooks,
         )
-        # Preserve stored declaration if verify re-read a baseline? If record_sha256 differs, bytes differ!
         replayed_bytes = serialize_result(replayed)
         if replayed_bytes != existing_bytes:
             raise ParityVerifyError(

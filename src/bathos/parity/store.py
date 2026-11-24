@@ -25,21 +25,40 @@ import shutil
 import tomllib
 import uuid
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-_HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
+_HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}\Z")
 
 LAYER_CLI = "cli_arg"
 LAYER_ENV = "env:BTH_PARITY_STORE"
 LAYER_PYPROJECT = "pyproject:[tool.bathos.parity]"
 LAYER_XDG = "xdg:config.toml"
 LAYER_OFF = "off"
+
+
+def validate_safe_store_segment(value: Any, field_name: str) -> str:
+    """Validate that *value* is a single safe path segment (no traversal or separators)."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Invalid {field_name}: must be a non-empty string")
+    seg = value.strip()
+    if seg != value:
+        raise ValueError(f"Invalid {field_name}: leading or trailing whitespace not allowed ({value!r})")
+    if (
+        "\x00" in seg
+        or "/" in seg
+        or "\\" in seg
+        or ".." in seg
+        or seg.startswith(".")
+        or Path(seg).is_absolute()
+    ):
+        raise ValueError(f"Invalid {field_name}: path traversal or separator not allowed ({value!r})")
+    return seg
 
 
 class ParityStoreConfigError(ValueError):
@@ -52,7 +71,7 @@ class ParityStoreUnavailableError(RuntimeError):
     def __init__(self, resolution: ParityStoreResolution) -> None:
         self.resolution = resolution
         super().__init__(
-            f"Parity store is not configured ({resolution.source}). Resolution trace:\n"
+            f"Store for parity records is not configured ({resolution.source}). Resolution trace:\n"
             + resolution.format_trace()
         )
 
@@ -121,7 +140,7 @@ def _parse_int_quota(val: Any, *, field_name: str, config_path: Path) -> int | N
     return val
 
 
-def _read_pyproject_parity(pyproject_path: Path) -> tuple[Path | None, int | None, int | None, str]:
+def _read_pyproject_parity(pyproject_path: Path) -> tuple[Path | None, int | None, int | None, str, str]:
     try:
         raw_bytes = pyproject_path.read_bytes()
         data = tomllib.loads(raw_bytes.decode("utf-8"))
@@ -132,21 +151,21 @@ def _read_pyproject_parity(pyproject_path: Path) -> tuple[Path | None, int | Non
 
     tool = data.get("tool")
     if tool is None:
-        return None, None, None, f"{pyproject_path}: no [tool] table"
+        return None, None, None, "absent", f"{pyproject_path}: no [tool] table"
     if not isinstance(tool, dict):
         raise ParityStoreConfigError(
             f"Malformed pyproject.toml at {pyproject_path}: [tool] must be a table"
         )
     bathos_tbl = tool.get("bathos")
     if bathos_tbl is None:
-        return None, None, None, f"{pyproject_path}: no [tool.bathos] table"
+        return None, None, None, "absent", f"{pyproject_path}: no [tool.bathos] table"
     if not isinstance(bathos_tbl, dict):
         raise ParityStoreConfigError(
             f"Malformed pyproject.toml at {pyproject_path}: [tool.bathos] must be a table"
         )
     parity_tbl = bathos_tbl.get("parity")
     if parity_tbl is None:
-        return None, None, None, f"{pyproject_path}: no [tool.bathos.parity] table"
+        return None, None, None, "absent", f"{pyproject_path}: no [tool.bathos.parity] table"
     if not isinstance(parity_tbl, dict):
         raise ParityStoreConfigError(
             f"Malformed pyproject.toml at {pyproject_path}: [tool.bathos.parity] must be a table"
@@ -160,19 +179,19 @@ def _read_pyproject_parity(pyproject_path: Path) -> tuple[Path | None, int | Non
     )
     store_val = parity_tbl.get("store")
     if store_val is None:
-        return None, max_files, max_bytes, f"{pyproject_path}: [tool.bathos.parity].store not set"
+        return None, max_files, max_bytes, "absent", f"{pyproject_path}: [tool.bathos.parity].store not set"
     if not isinstance(store_val, str):
         raise ParityStoreConfigError(
             f"Malformed pyproject.toml at {pyproject_path}: [tool.bathos.parity].store must be a string, got {type(store_val).__name__}"
         )
     stripped = store_val.strip()
     if not stripped or stripped.lower() == "none":
-        return None, max_files, max_bytes, f"{pyproject_path}: [tool.bathos.parity].store disabled ({stripped!r})"
+        return None, max_files, max_bytes, "disabled", f"{pyproject_path}: [tool.bathos.parity].store disabled ({stripped!r})"
     resolved = _resolve_store_path(stripped, base_dir=pyproject_path.parent)
-    return resolved, max_files, max_bytes, f"{pyproject_path}: {resolved}"
+    return resolved, max_files, max_bytes, "selected", f"{pyproject_path}: {resolved}"
 
 
-def _read_xdg_parity(config_path: Path) -> tuple[Path | None, int | None, int | None, str]:
+def _read_xdg_parity(config_path: Path) -> tuple[Path | None, int | None, int | None, str, str]:
     try:
         raw_bytes = config_path.read_bytes()
         data = tomllib.loads(raw_bytes.decode("utf-8"))
@@ -183,7 +202,7 @@ def _read_xdg_parity(config_path: Path) -> tuple[Path | None, int | None, int | 
 
     parity_tbl = data.get("parity")
     if parity_tbl is None:
-        return None, None, None, f"{config_path}: no [parity] table"
+        return None, None, None, "absent", f"{config_path}: no [parity] table"
     if not isinstance(parity_tbl, dict):
         raise ParityStoreConfigError(
             f"Malformed XDG bathos config at {config_path}: [parity] must be a table"
@@ -196,16 +215,55 @@ def _read_xdg_parity(config_path: Path) -> tuple[Path | None, int | None, int | 
     )
     store_val = parity_tbl.get("store")
     if store_val is None:
-        return None, max_files, max_bytes, f"{config_path}: [parity].store not set"
+        return None, max_files, max_bytes, "absent", f"{config_path}: [parity].store not set"
     if not isinstance(store_val, str):
         raise ParityStoreConfigError(
             f"Malformed XDG bathos config at {config_path}: [parity].store must be a string, got {type(store_val).__name__}"
         )
     stripped = store_val.strip()
     if not stripped or stripped.lower() == "none":
-        return None, max_files, max_bytes, f"{config_path}: [parity].store disabled ({stripped!r})"
+        return None, max_files, max_bytes, "disabled", f"{config_path}: [parity].store disabled ({stripped!r})"
     resolved = _resolve_store_path(stripped, base_dir=config_path.parent)
-    return resolved, max_files, max_bytes, f"{config_path}: {resolved}"
+    return resolved, max_files, max_bytes, "selected", f"{config_path}: {resolved}"
+
+
+def _resolve_xdg_config_path(environ: Mapping[str, str]) -> tuple[Path, str]:
+    xdg_raw = environ.get("XDG_CONFIG_HOME")
+    if xdg_raw is None:
+        xdg_base = Path.home() / ".config"
+        xdg_note = f"default ~/.config ({xdg_base})"
+    elif not xdg_raw.strip():
+        xdg_base = Path.home() / ".config"
+        xdg_note = f"XDG_CONFIG_HOME empty -> {xdg_base}"
+    else:
+        xdg_candidate = Path(xdg_raw).expanduser()
+        if not xdg_candidate.is_absolute():
+            xdg_base = Path.home() / ".config"
+            xdg_note = f"XDG_CONFIG_HOME relative ({xdg_raw!r}) ignored -> {xdg_base}"
+        else:
+            xdg_base = xdg_candidate
+            xdg_note = f"XDG_CONFIG_HOME={xdg_base}"
+    return xdg_base / "bathos" / "config.toml", xdg_note
+
+
+def _collect_quota_fallbacks(cwd: Path, environ: Mapping[str, str]) -> tuple[int | None, int | None]:
+    """Read optional quota overrides from pyproject.toml -> XDG without failing on malformed config."""
+    p_files: int | None = None
+    p_bytes: int | None = None
+    x_files: int | None = None
+    x_bytes: int | None = None
+    pyproject_path = _find_nearest_pyproject(cwd)
+    if pyproject_path is not None:
+        with contextlib.suppress(ParityStoreConfigError):
+            _pp, p_files, p_bytes, _pst, _pd = _read_pyproject_parity(pyproject_path)
+    xdg_config, _note = _resolve_xdg_config_path(environ)
+    if xdg_config.is_file():
+        with contextlib.suppress(ParityStoreConfigError):
+            _xp, x_files, x_bytes, _xst, _xd = _read_xdg_parity(xdg_config)
+    return (
+        p_files if p_files is not None else x_files,
+        p_bytes if p_bytes is not None else x_bytes,
+    )
 
 
 def resolve_parity_store(
@@ -229,11 +287,6 @@ def resolve_parity_store(
     cwd = (start_dir or Path.cwd()).resolve()
     trace: list[ResolutionLayer] = []
 
-    # Read optional quota/config layers even if overridden? Wait: read config layers as
-    # we walk, or stop at first match while recording remaining layers if needed.
-    # Always inspect lower config files ONLY if reached, OR record every layer cleanly in trace.
-    # For trace completeness when off, all 5 layers are inspected and named in trace.
-
     # Layer 1: Explicit CLI / function argument
     if explicit is not None:
         raw_explicit = str(explicit).strip()
@@ -242,7 +295,14 @@ def resolve_parity_store(
             return ParityStoreResolution(path=None, source=f"{LAYER_CLI}:disabled", trace=tuple(trace))
         resolved_cli = _resolve_store_path(raw_explicit, base_dir=cwd)
         trace.append(ResolutionLayer(LAYER_CLI, "selected", str(resolved_cli)))
-        return ParityStoreResolution(path=resolved_cli, source=LAYER_CLI, trace=tuple(trace))
+        q_files, q_bytes = _collect_quota_fallbacks(cwd, environ)
+        return ParityStoreResolution(
+            path=resolved_cli,
+            source=LAYER_CLI,
+            trace=tuple(trace),
+            max_files=q_files,
+            max_bytes=q_bytes,
+        )
     trace.append(ResolutionLayer(LAYER_CLI, "unset", "not passed"))
 
     # Layer 2: BTH_PARITY_STORE environment variable
@@ -253,23 +313,38 @@ def resolve_parity_store(
             return ParityStoreResolution(path=None, source=f"{LAYER_ENV}:disabled", trace=tuple(trace))
         resolved_env = _resolve_store_path(raw_env, base_dir=cwd)
         trace.append(ResolutionLayer(LAYER_ENV, "selected", str(resolved_env)))
-        return ParityStoreResolution(path=resolved_env, source=LAYER_ENV, trace=tuple(trace))
+        q_files, q_bytes = _collect_quota_fallbacks(cwd, environ)
+        return ParityStoreResolution(
+            path=resolved_env,
+            source=LAYER_ENV,
+            trace=tuple(trace),
+            max_files=q_files,
+            max_bytes=q_bytes,
+        )
     trace.append(ResolutionLayer(LAYER_ENV, "unset", "BTH_PARITY_STORE not set"))
 
     # Layer 3: Nearest pyproject.toml [tool.bathos.parity]
+    p_files: int | None = None
+    p_bytes: int | None = None
     pyproject_path = _find_nearest_pyproject(cwd)
     if pyproject_path is not None:
-        p_path, p_files, p_bytes, p_detail = _read_pyproject_parity(pyproject_path)
-        if p_path is not None:
+        p_path, p_files, p_bytes, p_status, p_detail = _read_pyproject_parity(pyproject_path)
+        if p_status == "selected" and p_path is not None:
             trace.append(ResolutionLayer(LAYER_PYPROJECT, "selected", p_detail))
+            xdg_config, _xdg_note = _resolve_xdg_config_path(environ)
+            x_files: int | None = None
+            x_bytes: int | None = None
+            if xdg_config.is_file():
+                with contextlib.suppress(ParityStoreConfigError):
+                    _xp, x_files, x_bytes, _xst, _xd = _read_xdg_parity(xdg_config)
             return ParityStoreResolution(
                 path=p_path,
                 source=LAYER_PYPROJECT,
                 trace=tuple(trace),
-                max_files=p_files,
-                max_bytes=p_bytes,
+                max_files=p_files if p_files is not None else x_files,
+                max_bytes=p_bytes if p_bytes is not None else x_bytes,
             )
-        if "disabled" in p_detail:
+        if p_status == "disabled":
             trace.append(ResolutionLayer(LAYER_PYPROJECT, "disabled", p_detail))
             return ParityStoreResolution(
                 path=None,
@@ -283,37 +358,28 @@ def resolve_parity_store(
         trace.append(ResolutionLayer(LAYER_PYPROJECT, "absent", f"no pyproject.toml found from {cwd}"))
 
     # Layer 4: ${XDG_CONFIG_HOME:-~/.config}/bathos/config.toml [parity]
-    xdg_raw = environ.get("XDG_CONFIG_HOME")
-    if xdg_raw is None:
-        xdg_base = Path.home() / ".config"
-        xdg_note = f"default ~/.config ({xdg_base})"
-    elif not xdg_raw.strip():
-        xdg_base = Path.home() / ".config"
-        xdg_note = f"XDG_CONFIG_HOME empty -> {xdg_base}"
-    else:
-        xdg_base = Path(xdg_raw).expanduser()
-        xdg_note = f"XDG_CONFIG_HOME={xdg_base}"
-
-    xdg_config = xdg_base / "bathos" / "config.toml"
+    xdg_config, xdg_note = _resolve_xdg_config_path(environ)
     if xdg_config.is_file():
-        x_path, x_files, x_bytes, x_detail = _read_xdg_parity(xdg_config)
-        if x_path is not None:
+        x_path, x_files, x_bytes, x_status, x_detail = _read_xdg_parity(xdg_config)
+        eff_files = x_files if x_files is not None else p_files
+        eff_bytes = x_bytes if x_bytes is not None else p_bytes
+        if x_status == "selected" and x_path is not None:
             trace.append(ResolutionLayer(LAYER_XDG, "selected", x_detail))
             return ParityStoreResolution(
                 path=x_path,
                 source=LAYER_XDG,
                 trace=tuple(trace),
-                max_files=x_files,
-                max_bytes=x_bytes,
+                max_files=eff_files,
+                max_bytes=eff_bytes,
             )
-        if "disabled" in x_detail:
+        if x_status == "disabled":
             trace.append(ResolutionLayer(LAYER_XDG, "disabled", x_detail))
             return ParityStoreResolution(
                 path=None,
                 source=f"{LAYER_XDG}:disabled",
                 trace=tuple(trace),
-                max_files=x_files,
-                max_bytes=x_bytes,
+                max_files=eff_files,
+                max_bytes=eff_bytes,
             )
         trace.append(ResolutionLayer(LAYER_XDG, "absent", x_detail))
     else:
@@ -434,8 +500,13 @@ class ParityStore:
 
     def write_unit_dir(self, rel_target: Path | str, populate_fn: Callable[[Path], None]) -> Path:
         """Populate a temporary directory and atomically rename it to ``root / rel_target``."""
-        target = (self.root / rel_target).resolve()
-        if self.root not in target.parents and target != self.root:
+        raw_rel = str(rel_target).strip()
+        if not raw_rel or raw_rel in (".", ".."):
+            raise ValueError(f"Invalid unit directory target: {rel_target!r}")
+        if Path(raw_rel).is_absolute():
+            raise ValueError(f"Unit directory target must be relative: {rel_target!r}")
+        target = (self.root / raw_rel).resolve()
+        if self.root not in target.parents or target == self.root:
             raise ValueError(f"Unit directory escapes store root: {rel_target!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp_dir = target.parent / f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
@@ -445,7 +516,13 @@ class ParityStore:
             if target.exists():
                 shutil.rmtree(tmp_dir)
                 return target
-            os.replace(tmp_dir, target)
+            try:
+                os.replace(tmp_dir, target)
+            except OSError:
+                if target.exists():
+                    shutil.rmtree(tmp_dir)
+                    return target
+                raise
             return target
         except BaseException:
             with contextlib.suppress(OSError):
@@ -493,11 +570,44 @@ class ParityStore:
 
 
 _FORBIDDEN_DEFAULT_PATH_PATTERNS = (
-    re.compile(r"\.bth[/\\]parity\b"),
-    re.compile(r"\.cache[/\\]bathos[/\\]parity\b"),
+    re.compile(r"\.bth[/\\]parity(?:_store)?\b"),
+    re.compile(r"\.cache[/\\]bathos[/\\]parity(?:_store)?\b"),
     re.compile(r"default_parity_store", re.IGNORECASE),
     re.compile(r"DEFAULT_PARITY_STORE"),
 )
+
+
+def _extract_path_segments(node: ast.AST) -> list[str]:
+    """Flatten ``BinOp(Div)`` and ``path.join(...)`` expressions into string path segments."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [s for s in re.split(r"[/\\]+", node.value) if s]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _extract_path_segments(node.left) + _extract_path_segments(node.right)
+    if isinstance(node, ast.Call):
+        fn = node.func
+        attr = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
+        if attr in ("join", "joinpath", "Path"):
+            segs: list[str] = []
+            if isinstance(fn, ast.Attribute) and attr == "joinpath":
+                segs.extend(_extract_path_segments(fn.value))
+            for arg in node.args:
+                segs.extend(_extract_path_segments(arg))
+            return segs
+    return []
+
+
+def _segments_contain_forbidden_parity_path(segs: Sequence[str]) -> bool:
+    for idx, seg in enumerate(segs):
+        if seg == ".bth" and idx + 1 < len(segs) and segs[idx + 1] in ("parity", "parity_store"):
+            return True
+        if (
+            seg == ".cache"
+            and idx + 2 < len(segs)
+            and segs[idx + 1] == "bathos"
+            and segs[idx + 2] in ("parity", "parity_store")
+        ):
+            return True
+    return False
 
 
 def lint_no_default_store_path(source_root: Path) -> list[str]:
@@ -515,8 +625,9 @@ def lint_no_default_store_path(source_root: Path) -> list[str]:
         except (OSError, SyntaxError) as exc:
             violations.append(f"{py_file}: failed to inspect ({exc})")
             continue
+        flagged_lines: set[tuple[int, str]] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and any(
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
                 pat.search(node.name) for pat in _FORBIDDEN_DEFAULT_PATH_PATTERNS
             ):
                 violations.append(
@@ -535,5 +646,22 @@ def lint_no_default_store_path(source_root: Path) -> list[str]:
                     ):
                         violations.append(
                             f"{py_file}:{node.lineno}: forbidden default parity store constant {target.id!r}"
+                        )
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and any(
+                    pat.search(node.target.id) for pat in _FORBIDDEN_DEFAULT_PATH_PATTERNS
+                ):
+                    violations.append(
+                        f"{py_file}:{node.lineno}: forbidden default parity store constant {node.target.id!r}"
+                    )
+            elif isinstance(node, (ast.BinOp, ast.Call)):
+                segs = _extract_path_segments(node)
+                if _segments_contain_forbidden_parity_path(segs):
+                    joined = "/".join(segs)
+                    key = (node.lineno, joined)
+                    if key not in flagged_lines:
+                        flagged_lines.add(key)
+                        violations.append(
+                            f"{py_file}:{node.lineno}: hard-coded parity store path expression {joined!r}"
                         )
     return violations

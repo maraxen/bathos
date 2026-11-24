@@ -18,15 +18,25 @@ from bathos.parity.npy_stdlib import (
     coerce_to_raw_array,
     decode_npz,
     encode_npz,
+    normalize_dtype_str,
 )
-from bathos.parity.store import ParityStore, atomic_write_json
+from bathos.parity.store import ParityStore, atomic_write_json, validate_safe_store_segment
 
 CELL_EVIDENCE_SCHEMA_VERSION = "cell_evidence.v1"
-_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 class CellEvidenceError(ValueError):
     """Raised when ``cell_evidence.v1`` writing or ingest validation fails."""
+
+
+def _normalize_array_key(name: str) -> str:
+    if not isinstance(name, str) or not name.strip():
+        raise CellEvidenceError(f"Array name must be a non-empty string, got {name!r}")
+    norm = name[:-4] if name.endswith(".npy") else name
+    if not norm or not norm.strip():
+        raise CellEvidenceError(f"Array name {name!r} is empty after stripping '.npy'")
+    return norm
 
 
 def _store_array_bundle(
@@ -37,11 +47,16 @@ def _store_array_bundle(
         raise CellEvidenceError("At least one array is required to build a cell-evidence bundle")
     coerced: dict[str, RawArray] = {}
     descriptors: dict[str, dict[str, Any]] = {}
-    for name in sorted(arrays):
-        raw = coerce_to_raw_array(arrays[name])
-        coerced[name] = raw
-        descriptors[name] = {
-            "member_name": f"{name}.npy",
+    for raw_name in sorted(arrays):
+        norm_name = _normalize_array_key(raw_name)
+        if norm_name in coerced:
+            raise CellEvidenceError(
+                f"Duplicate array key after .npy normalization: {raw_name!r} collides with {norm_name!r}"
+            )
+        raw = coerce_to_raw_array(arrays[raw_name])
+        coerced[norm_name] = raw
+        descriptors[norm_name] = {
+            "member_name": f"{norm_name}.npy",
             "dtype": raw.dtype,
             "shape": list(raw.shape),
             "canonical_digest": canonical_array_digest(raw.dtype, raw.shape, raw.data),
@@ -49,6 +64,25 @@ def _store_array_bundle(
     npz_bytes = encode_npz(coerced)
     bundle_sha = store.put_bytes(npz_bytes)
     return bundle_sha, descriptors
+
+
+def _safe_evidence_dir(store: ParityStore, record_id: str) -> Path:
+    rec_seg = validate_safe_store_segment(record_id, "record_id")
+    ev_root = (store.root / "evidence").resolve()
+    rec_dir = (ev_root / rec_seg).resolve()
+    if ev_root not in rec_dir.parents:
+        raise CellEvidenceError(f"record_id escapes evidence directory: {record_id!r}")
+    return rec_dir
+
+
+def _safe_evidence_index_path(store: ParityStore, record_id: str, run_id: str, cell_id: str) -> Path:
+    rec_dir = _safe_evidence_dir(store, record_id)
+    run_seg = validate_safe_store_segment(run_id, "run_id")
+    cell_seg = validate_safe_store_segment(cell_id, "cell_id")
+    target = (rec_dir / run_seg / f"{cell_seg}.json").resolve()
+    if rec_dir not in target.parents:
+        raise CellEvidenceError(f"Evidence path escapes record directory: {record_id!r}/{run_id!r}/{cell_id!r}")
+    return target
 
 
 def write_cell_evidence(
@@ -74,6 +108,10 @@ def write_cell_evidence(
     Returns ``(manifest_sha256, manifest_dict)``.
     """
     parity_store = store if isinstance(store, ParityStore) else ParityStore(store)
+    safe_record_id = validate_safe_store_segment(record_id, "record_id")
+    safe_cell_id = validate_safe_store_segment(cell_id, "cell_id")
+    safe_run_id = validate_safe_store_segment(run_id, "run_id")
+    index_target = _safe_evidence_index_path(parity_store, safe_record_id, safe_run_id, safe_cell_id)
 
     ours_bundle_sha, ours_desc = _store_array_bundle(parity_store, ours_arrays)
 
@@ -89,9 +127,9 @@ def write_cell_evidence(
 
     manifest: dict[str, Any] = {
         "schema_version": CELL_EVIDENCE_SCHEMA_VERSION,
-        "record_id": str(record_id),
-        "cell_id": str(cell_id),
-        "run_id": str(run_id),
+        "record_id": safe_record_id,
+        "cell_id": safe_cell_id,
+        "run_id": safe_run_id,
         "input_sha256": norm_inputs,
         "ours_bundle_sha256": ours_bundle_sha,
         "ours_arrays": ours_desc,
@@ -124,9 +162,96 @@ def write_cell_evidence(
     ).encode("utf-8")
     manifest_sha = parity_store.put_bytes(manifest_bytes)
 
-    index_target = parity_store.root / "evidence" / str(record_id) / str(run_id) / f"{cell_id}.json"
     atomic_write_json(index_target, {"manifest_sha256": manifest_sha, **manifest})
     return manifest_sha, manifest
+
+
+def _validate_array_descriptors(
+    arrays_map: Any,
+    *,
+    field_label: str,
+    bundle_sha: Any,
+    store: ParityStore | None,
+    errors: list[str],
+) -> None:
+    if not isinstance(arrays_map, Mapping) or not arrays_map:
+        errors.append(f"missing or empty '{field_label}'")
+        return
+    for arr_name, meta in arrays_map.items():
+        if not isinstance(arr_name, str) or not arr_name.strip():
+            errors.append(f"{field_label} contains empty array name {arr_name!r}")
+            continue
+        if not isinstance(meta, Mapping):
+            errors.append(f"{field_label}.{arr_name} must be a mapping")
+            continue
+        mname = meta.get("member_name")
+        if not isinstance(mname, str) or not mname.strip():
+            errors.append(f"{field_label}.{arr_name}.member_name must be a non-empty string")
+        elif mname != f"{arr_name}.npy":
+            errors.append(
+                f"{field_label}.{arr_name}.member_name mismatch: expected {f'{arr_name}.npy'!r}, got {mname!r}"
+            )
+        cdig = meta.get("canonical_digest")
+        if not isinstance(cdig, str) or not _HEX64_RE.match(cdig):
+            errors.append(f"{field_label}.{arr_name}.canonical_digest must be a 64-hex string")
+        dtype_val = meta.get("dtype")
+        if not isinstance(dtype_val, str) or not dtype_val.strip():
+            errors.append(f"{field_label}.{arr_name}.dtype must be a non-empty string")
+        else:
+            try:
+                normalize_dtype_str(dtype_val)
+            except ValueError as exc:
+                errors.append(f"{field_label}.{arr_name}.dtype invalid: {exc}")
+        shape_val = meta.get("shape")
+        if (
+            not isinstance(shape_val, Sequence)
+            or isinstance(shape_val, (str, bytes))
+            or any(isinstance(d, bool) or not isinstance(d, int) or d < 0 for d in shape_val)
+        ):
+            errors.append(f"{field_label}.{arr_name}.shape must be a list of non-negative integers")
+
+    if store is not None and isinstance(bundle_sha, str) and _HEX64_RE.match(bundle_sha):
+        try:
+            npz_bytes = store.get_bytes(bundle_sha)
+            decoded = decode_npz(npz_bytes)
+        except Exception as exc:
+            errors.append(f"failed to load {field_label} bundle {bundle_sha}: {exc}")
+            return
+        extra_members = sorted(set(decoded.keys()) - {str(k) for k in arrays_map})
+        if extra_members:
+            errors.append(
+                f"{field_label} bundle {bundle_sha} contains undeclared member(s): {extra_members}"
+            )
+        for arr_name, meta in arrays_map.items():
+            if not isinstance(meta, Mapping):
+                continue
+            if arr_name not in decoded:
+                errors.append(f"{field_label}.{arr_name} missing from .npz bundle")
+                continue
+            raw = decoded[arr_name]
+            recomputed = canonical_array_digest(raw.dtype, raw.shape, raw.data)
+            if recomputed != meta.get("canonical_digest"):
+                errors.append(
+                    f"{field_label}.{arr_name} digest mismatch: manifest={meta.get('canonical_digest')}, computed={recomputed}"
+                )
+            dtype_val = meta.get("dtype")
+            if isinstance(dtype_val, str):
+                try:
+                    if normalize_dtype_str(dtype_val) != raw.dtype:
+                        errors.append(
+                            f"{field_label}.{arr_name} dtype mismatch: manifest={dtype_val!r}, bundle={raw.dtype!r}"
+                        )
+                except ValueError:
+                    pass
+            shape_val = meta.get("shape")
+            if (
+                isinstance(shape_val, Sequence)
+                and not isinstance(shape_val, (str, bytes))
+                and list(raw.shape) != list(shape_val)
+            ):
+                errors.append(
+                    f"{field_label}.{arr_name} shape mismatch: manifest={list(shape_val)}, bundle={list(raw.shape)}"
+                )
 
 
 def validate_cell_evidence(
@@ -140,8 +265,10 @@ def validate_cell_evidence(
         errors.append(f"schema_version must be {CELL_EVIDENCE_SCHEMA_VERSION!r}")
     for key in ("record_id", "cell_id", "run_id"):
         val = manifest.get(key)
-        if not isinstance(val, str) or not val.strip():
-            errors.append(f"missing or empty required field {key!r}")
+        try:
+            validate_safe_store_segment(val, key)
+        except ValueError as exc:
+            errors.append(str(exc))
 
     inp = manifest.get("input_sha256")
     if not isinstance(inp, Mapping):
@@ -161,45 +288,82 @@ def validate_cell_evidence(
         errors.append("missing or invalid 'ours_bundle_sha256'")
 
     ours_arrays = manifest.get("ours_arrays")
-    if not isinstance(ours_arrays, Mapping) or not ours_arrays:
-        errors.append("missing or empty 'ours_arrays'")
+    _validate_array_descriptors(
+        ours_arrays,
+        field_label="ours_arrays",
+        bundle_sha=ours_bundle,
+        store=store,
+        errors=errors,
+    )
+
+    ref_bundle = manifest.get("reference_bundle_sha256")
+    ref_arrays = manifest.get("reference_arrays")
+    if ref_bundle is not None:
+        if not isinstance(ref_bundle, str) or not _HEX64_RE.match(ref_bundle):
+            errors.append("invalid 'reference_bundle_sha256': must be 64-hex string or null")
+        if ref_arrays is None:
+            errors.append("reference_arrays is required when reference_bundle_sha256 is set")
+        else:
+            _validate_array_descriptors(
+                ref_arrays,
+                field_label="reference_arrays",
+                bundle_sha=ref_bundle,
+                store=store,
+                errors=errors,
+            )
+    elif ref_arrays is not None:
+        errors.append("reference_bundle_sha256 is required when reference_arrays is set")
+
+    for opt_hex_key in ("reference_dump_sha256", "ref_env_blob_sha256"):
+        opt_val = manifest.get(opt_hex_key)
+        if opt_val is not None and (not isinstance(opt_val, str) or not _HEX64_RE.match(opt_val)):
+            errors.append(f"invalid '{opt_hex_key}': must be 64-hex string or null")
 
     adapter = manifest.get("adapter")
-    if not isinstance(adapter, Mapping) or not adapter.get("name"):
-        errors.append("missing adapter.name")
-
-    if store is not None and isinstance(ours_bundle, str) and _HEX64_RE.match(ours_bundle) and isinstance(ours_arrays, Mapping):
-        try:
-            npz_bytes = store.get_bytes(ours_bundle)
-            decoded = decode_npz(npz_bytes)
-        except Exception as exc:
-            errors.append(f"failed to load ours_bundle_sha256 {ours_bundle}: {exc}")
-            decoded = {}
-        for arr_name, meta in ours_arrays.items():
-            if not isinstance(meta, Mapping):
-                errors.append(f"ours_arrays.{arr_name} must be a mapping")
-                continue
-            if arr_name not in decoded:
-                errors.append(f"ours_arrays.{arr_name} missing from .npz bundle")
-                continue
-            raw = decoded[arr_name]
-            recomputed = canonical_array_digest(raw.dtype, raw.shape, raw.data)
-            if recomputed != meta.get("canonical_digest"):
-                errors.append(
-                    f"ours_arrays.{arr_name} digest mismatch: manifest={meta.get('canonical_digest')}, computed={recomputed}"
-                )
+    if not isinstance(adapter, Mapping):
+        errors.append("missing required field 'adapter'")
+    else:
+        if not isinstance(adapter.get("name"), str) or not str(adapter["name"]).strip():
+            errors.append("missing adapter.name")
+        if not isinstance(adapter.get("version"), str) or not str(adapter["version"]).strip():
+            errors.append("missing adapter.version")
 
     return errors
 
 
 def load_cell_evidence_for_record(store: ParityStore, record_id: str) -> list[dict[str, Any]]:
-    """Load all indexed ``cell_evidence.v1`` manifests for *record_id* in deterministic order."""
-    ev_dir = store.root / "evidence" / record_id
+    """Load and verify all indexed ``cell_evidence.v1`` manifests for *record_id*."""
+    ev_dir = _safe_evidence_dir(store, record_id)
     if not ev_dir.is_dir():
         return []
     manifests: list[dict[str, Any]] = []
     for json_file in sorted(ev_dir.glob("*/*.json")):
         if json_file.name.startswith("."):
             continue
-        manifests.append(json.loads(json_file.read_text(encoding="utf-8")))
+        resolved = json_file.resolve()
+        if ev_dir not in resolved.parents:
+            raise CellEvidenceError(f"Evidence index file escapes record directory: {json_file}")
+        try:
+            idx_obj = json.loads(json_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise CellEvidenceError(f"Malformed evidence index JSON {json_file}: {exc}") from exc
+        if not isinstance(idx_obj, dict):
+            raise CellEvidenceError(f"Evidence index {json_file} must be a JSON object")
+        m_sha = idx_obj.get("manifest_sha256")
+        if not isinstance(m_sha, str) or not _HEX64_RE.match(m_sha):
+            raise CellEvidenceError(f"Evidence index {json_file} missing valid manifest_sha256")
+        try:
+            blob_bytes = store.get_bytes(m_sha)
+            blob_obj = json.loads(blob_bytes.decode("utf-8"))
+        except Exception as exc:
+            raise CellEvidenceError(
+                f"Evidence manifest blob {m_sha} for {json_file} missing or corrupt: {exc}"
+            ) from exc
+        idx_body = {k: v for k, v in idx_obj.items() if k != "manifest_sha256"}
+        if blob_obj != idx_body:
+            raise CellEvidenceError(
+                f"Evidence index {json_file} does not match content-addressed manifest {m_sha}"
+            )
+        manifests.append(idx_obj)
+    manifests.sort(key=lambda m: (str(m.get("created_at", "")), str(m.get("run_id", "")), str(m.get("cell_id", ""))))
     return manifests

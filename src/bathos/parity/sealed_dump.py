@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,9 +16,28 @@ import numpy as np
 from bathos.parity.npy_stdlib import canonical_array_digest, decode_npz
 from bathos.parity.store import ParityStore, atomic_write_json
 
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
+
 
 class SealedDumpError(RuntimeError):
     """Raised on missing manifest, missing stem, sha mismatch, missing array key, or corrupt dump."""
+
+
+def _validate_sha256_hex(sha: Any, *, label: str = "dump_sha256") -> str:
+    if not isinstance(sha, str):
+        raise SealedDumpError(f"Invalid {label}: expected 64-hex string, got {type(sha).__name__}")
+    norm = sha.strip().lower()
+    if not _HEX64_RE.match(norm):
+        raise SealedDumpError(f"Invalid {label}: expected 64 lowercase hex chars, got {sha!r}")
+    return norm
+
+
+def _sealed_dump_manifest_path(store: ParityStore, norm_sha: str) -> Path:
+    sealed_root = (store.root / "sealed_dumps").resolve()
+    target = (sealed_root / f"{norm_sha}.json").resolve()
+    if sealed_root not in target.parents:
+        raise SealedDumpError(f"Sealed dump manifest path escapes store root: {norm_sha!r}")
+    return target
 
 
 @dataclass(frozen=True)
@@ -51,11 +72,12 @@ def _sha256_bytes(data: bytes) -> str:
 
 def build_dump_digest_manifest(npz_bytes: bytes, *, expected_sha256: str, stem: str = "", path: Path | None = None) -> SealedDumpRecord:
     """Verify *npz_bytes* matches *expected_sha256* and build its canonical array digest manifest."""
+    norm_expected = _validate_sha256_hex(expected_sha256, label="expected_sha256")
     actual = _sha256_bytes(npz_bytes)
-    if actual != expected_sha256.lower():
+    if actual != norm_expected:
         raise SealedDumpError(
             f"Sealed dump sha256 mismatch{f' ({path})' if path else ''}: "
-            f"computed {actual} != pinned {expected_sha256.lower()}"
+            f"computed {actual} != pinned {norm_expected}"
         )
     try:
         decoded = decode_npz(npz_bytes)
@@ -126,47 +148,66 @@ def ingest_sealed_dump(
     stem: str = "",
 ) -> SealedDumpRecord:
     """Verify *dump_path* against *expected_sha256*, store its bytes and member digest manifest."""
+    norm_expected = _validate_sha256_hex(expected_sha256, label="expected_sha256")
     dump_p = Path(dump_path)
     if not dump_p.is_file():
         raise SealedDumpError(f"Sealed dump file not found: {dump_p}")
     npz_bytes = dump_p.read_bytes()
     rec = build_dump_digest_manifest(
-        npz_bytes, expected_sha256=expected_sha256, stem=stem or dump_p.stem, path=dump_p
+        npz_bytes, expected_sha256=norm_expected, stem=stem or dump_p.stem, path=dump_p
     )
     store.put_bytes(npz_bytes)
-    manifest_path = store.root / "sealed_dumps" / f"{rec.dump_sha256}.json"
+    manifest_path = _sealed_dump_manifest_path(store, rec.dump_sha256)
     atomic_write_json(manifest_path, rec.to_manifest_dict())
     return rec
 
 
 def load_sealed_dump_manifest(store: ParityStore, dump_sha256: str) -> dict[str, Any]:
-    """Load or reconstruct the member canonical-digest manifest for *dump_sha256*."""
-    manifest_path = store.root / "sealed_dumps" / f"{dump_sha256.lower()}.json"
-    if manifest_path.is_file():
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    """Load and verify the member canonical-digest manifest for *dump_sha256*."""
+    norm_sha = _validate_sha256_hex(dump_sha256)
+    manifest_path = _sealed_dump_manifest_path(store, norm_sha)
     try:
-        npz_bytes = store.get_bytes(dump_sha256)
+        npz_bytes = store.get_bytes(norm_sha)
     except Exception as exc:
-        raise SealedDumpError(f"Failed to load sealed dump {dump_sha256}: {exc}") from exc
-    rec = build_dump_digest_manifest(npz_bytes, expected_sha256=dump_sha256)
-    payload = rec.to_manifest_dict()
-    atomic_write_json(manifest_path, payload)
-    return payload
+        raise SealedDumpError(f"Failed to load sealed dump {norm_sha}: {exc}") from exc
+    rec = build_dump_digest_manifest(npz_bytes, expected_sha256=norm_sha)
+    expected_payload = rec.to_manifest_dict()
+    if manifest_path.is_file():
+        try:
+            cached = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SealedDumpError(f"Malformed sealed dump manifest {manifest_path}: {exc}") from exc
+        if not isinstance(cached, dict) or str(cached.get("dump_sha256", "")).lower() != norm_sha:
+            raise SealedDumpError(
+                f"Sealed dump manifest {manifest_path} dump_sha256 mismatch"
+            )
+        if cached.get("members") != expected_payload["members"]:
+            raise SealedDumpError(
+                f"Sealed dump manifest {manifest_path} members do not match verified blob {norm_sha}"
+            )
+        return cached
+    atomic_write_json(manifest_path, expected_payload)
+    return expected_payload
 
 
 def load_sealed_dump_arrays(store: ParityStore, dump_sha256: str) -> dict[str, np.ndarray]:
     """Verify and load all arrays from sealed dump *dump_sha256* stored in *store*."""
+    norm_sha = _validate_sha256_hex(dump_sha256)
     try:
-        npz_bytes = store.get_bytes(dump_sha256)
+        npz_bytes = store.get_bytes(norm_sha)
     except Exception as exc:
-        raise SealedDumpError(f"Sealed dump {dump_sha256} unavailable/corrupt: {exc}") from exc
-    with np.load(io.BytesIO(npz_bytes), allow_pickle=False) as z:
-        return {k: np.asarray(z[k]) for k in sorted(z.files)}
+        raise SealedDumpError(f"Sealed dump {norm_sha} unavailable/corrupt: {exc}") from exc
+    try:
+        with np.load(io.BytesIO(npz_bytes), allow_pickle=False) as z:
+            return {k: np.asarray(z[k]) for k in sorted(z.files)}
+    except (zipfile.BadZipFile, ValueError, EOFError, OSError) as exc:
+        raise SealedDumpError(f"Corrupt sealed dump archive {norm_sha}: {exc}") from exc
 
 
 def load_sealed_dump_array(store: ParityStore, dump_sha256: str, key: str) -> np.ndarray:
     """Verify and load one named array *key* from sealed dump *dump_sha256*."""
-    arrays = load_sealed_dump_arrays(store, dump_sha256)
+    norm_sha = _validate_sha256_hex(dump_sha256)
+    arrays = load_sealed_dump_arrays(store, norm_sha)
     if key not in arrays:
-        raise SealedDumpError(f"Key {key!r} missing from sealed dump {dump_sha256[:12]}")
+        raise SealedDumpError(f"Key {key!r} missing from sealed dump {norm_sha[:12]}")
     return arrays[key]
