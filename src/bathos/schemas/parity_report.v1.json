@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bathos.dev/schemas/parity_report.v1.json",
+  "title": "Bathos Parity Report Schema v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "standard_version",
+    "record_id",
+    "record_sha256",
+    "tool",
+    "references",
+    "environment",
+    "uses",
+    "components",
+    "cells",
+    "cell_counts",
+    "clauses",
+    "gates",
+    "discrepancies",
+    "staleness",
+    "amendments",
+    "audit",
+    "provenance",
+    "prior_records_on_pair",
+    "bundle_sha256",
+    "generator"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "parity_report.v1" },
+    "standard_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "record_id": { "type": "string", "minLength": 1 },
+    "record_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "badge": {
+      "type": "object",
+      "required": ["t0", "t1", "t1_sha256", "t2_sha256"]
+    }
+  }
+}

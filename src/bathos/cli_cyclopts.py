@@ -2930,5 +2930,86 @@ def parity_grade_cmd(
         )
 
 
+parity_report_app = cyclopts.App(name="report", help="Parity report generation and rendering (WP30a).")
+parity_app.command(parity_report_app)
+
+
+@parity_report_app.command(name="build")
+def parity_report_build_cmd(
+    result_path: str,
+    *,
+    decl_path: str = "",
+    parity_store: str = "",
+    out: str = "",
+    json_out: Annotated[bool, cyclopts.Parameter(name="--json")] = False,
+) -> None:
+    """Build T2 parity report JSON, T3 bundle manifest, and T0/T1 badges from a result JSON."""
+    from bathos.parity.badge import BadgeValidationError, ReportLintError
+    from bathos.parity.declare import ParityDeclareError
+    from bathos.parity.report import build_parity_report
+    from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
+
+    try:
+        out_p, report = build_parity_report(
+            result_path,
+            decl_path=decl_path or None,
+            parity_store=parity_store or None,
+            output_path=out or None,
+        )
+    except (
+        FileNotFoundError,
+        ParityDeclareError,
+        BadgeValidationError,
+        ReportLintError,
+        ParityStoreConfigError,
+        ParityStoreUnavailableError,
+    ) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if json_out:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(report["badge"]["t0"])
+        print(report["badge"]["t1"])
+        print(f"report: {out_p}")
+
+
+@parity_report_app.command(name="render")
+def parity_report_render_cmd(
+    report_path: str,
+    *,
+    format: str = "md",
+    out: str = "",
+) -> None:
+    """Render a ``parity_report.v1`` JSON file to Markdown or HTML (reads only JSON)."""
+    from bathos.parity.badge import ReportLintError
+    from bathos.parity.report import render_report_html, render_report_markdown
+
+    rpath = Path(report_path)
+    if not rpath.is_file():
+        print(f"Error: report file not found: {rpath}", file=sys.stderr)
+        raise SystemExit(1)
+    report = json.loads(rpath.read_text(encoding="utf-8"))
+    fmt = format.strip().lower()
+    try:
+        if fmt in ("md", "markdown"):
+            text = render_report_markdown(report)
+        elif fmt == "html":
+            text = render_report_html(report)
+        else:
+            print(f"Error: unsupported render format {format!r}; expected md|html", file=sys.stderr)
+            raise SystemExit(1)
+    except ReportLintError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    if out:
+        Path(out).write_text(text, encoding="utf-8")
+        print(f"wrote {out}")
+    else:
+        print(text, end="")
+
+
 if __name__ == "__main__":
     app()
