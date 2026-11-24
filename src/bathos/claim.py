@@ -128,6 +128,7 @@ class ClaimFile:
     path: Path
     sha256: str
     decision_scope: dict[str, Any] = field(default_factory=dict)  # debt #2199
+    formulation: dict[str, Any] = field(default_factory=dict)  # #3315
 
 
 def parse_claim(path: Path) -> ClaimFile:
@@ -186,6 +187,13 @@ def parse_claim(path: Path) -> ClaimFile:
     # Compute SHA256 of file content
     sha256_hex = hashlib.sha256(content).hexdigest()
 
+    raw_formulation = (
+        claim_section["formulation"]
+        if "formulation" in claim_section
+        else data.get("formulation", {})
+    )
+    formulation: Any = dict(raw_formulation) if isinstance(raw_formulation, dict) else raw_formulation
+
     return ClaimFile(
         headline=headline,
         kill_condition=kill_condition,
@@ -199,6 +207,7 @@ def parse_claim(path: Path) -> ClaimFile:
         path=path,
         sha256=sha256_hex,
         decision_scope=decision_scope,
+        formulation=formulation,
     )
 
 
@@ -610,7 +619,57 @@ def validate_claim(
                 "campaign conclude will block unless tested or explicitly waived"
             )
 
+    # #3315: validate campaign formulation when attached to claim
+    if claim.formulation:
+        form_res = validate_claim_formulation(claim, require=True)
+        errors.extend(form_res.errors)
+        warnings.extend(form_res.warnings)
+
     return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=warnings, infos=infos)
+
+
+def validate_claim_formulation(
+    claim: ClaimFile,
+    formulation: Any = None,
+    *,
+    require: bool = False,
+) -> ValidationResult:
+    """Validate campaign formulation requirements attached to a claim (#3315).
+
+    Opt-in by default: when ``formulation`` is None, ``claim.formulation`` is empty,
+    and ``require`` is False, returns ``ValidationResult(ok=True)``.
+    """
+    payload = formulation if formulation is not None else claim.formulation
+    has_payload = bool(payload) if isinstance(payload, dict) else payload is not None
+    if not has_payload:
+        if not require:
+            return ValidationResult(ok=True)
+        return ValidationResult(
+            ok=False,
+            errors=[
+                ValidationError(
+                    "Campaign formulation is required (#3315): declare [formulation] with "
+                    "matrix, decision_tree (bounded fallbacks), and reuse_table"
+                )
+            ],
+        )
+
+    from bathos.campaign_formulation import validate_formulation
+
+    known_hypotheses = [
+        str(h.get("id")).strip()
+        for h in claim.hypotheses
+        if isinstance(h, dict) and str(h.get("id") or "").strip()
+    ]
+    res = validate_formulation(
+        payload,
+        known_hypotheses=known_hypotheses or None,
+    )
+    return ValidationResult(
+        ok=res.ok,
+        errors=[ValidationError(msg) for msg in res.errors],
+        warnings=list(res.warnings),
+    )
 
 
 def scaffold_claim(campaign_id: str, db: duckdb.DuckDBPyConnection, workspace_root: Path) -> Path:
@@ -689,6 +748,8 @@ def register_claim(
     ack_suspect: str = "",
     ack_unverifiable: str = "",
     allow_mixed_estimand: str = "",
+    formulation: Any = None,
+    require_formulation: bool = False,
 ) -> None:
     """Register a claim file with a campaign.
 
@@ -718,6 +779,21 @@ def register_claim(
 
     if not abs_path.exists():
         raise FileNotFoundError(f"Claim file not found at {abs_path}")
+
+    parsed_claim = parse_claim(abs_path)
+    if formulation is not None or parsed_claim.formulation or require_formulation:
+        form_res = validate_claim_formulation(
+            parsed_claim,
+            formulation=formulation,
+            require=True,
+        )
+        if not form_res.ok:
+            from bathos.campaigns import CampaignError
+
+            raise CampaignError(
+                "; ".join(e.message for e in form_res.errors)
+            )
+        event("claim.formulation_validated", campaign_id=campaign_id, claim_path=str(rel_path))
 
     with unit_of_work(catalog_dir):
         try:
