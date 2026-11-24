@@ -437,7 +437,7 @@ def build_packet(
             exclusions.append({"path": path, "reason": reason})
 
     # ── Runs and their sidecars ─────────────────────────────────────────────────
-    runs: list[dict[str, Any]] = []
+    runs: list[tuple[datetime, dict[str, Any]]] = []
     sidecars: dict[tuple[str, str], bytes] = {}
     sidecar_unresolved: list[dict[str, str]] = []
     labels_stripped: list[str] = []
@@ -488,8 +488,8 @@ def build_packet(
             for field in ("command", "tags"):
                 if isinstance(rec.get(field), str):
                     rec[field] = _scrub_abs_paths(rec[field])
-            runs.append((ts, rec))  # type: ignore[arg-type]
-    runs_sorted = [rec for _, rec in sorted(runs, key=lambda t: (t[0], str(t[1]["id"])))]  # type: ignore[index]
+            runs.append((ts, rec))
+    runs_sorted = [rec for _, rec in sorted(runs, key=lambda t: (t[0], str(t[1]["id"])))]
     # Many runs share a sidecar and commit, and a miss tries every suffix of the path.
     blob_cache: dict[str, subprocess.CompletedProcess[bytes]] = {}
 

@@ -207,8 +207,10 @@ def _collect_findings_cited_runs(project_root: Path) -> set[str]:
             with contextlib.suppress(Exception):
                 with open(vf, "rb") as fp:
                     vdata = tomllib.load(fp)
-                v_tbl = vdata.get("verdict") if isinstance(vdata.get("verdict"), dict) else {}
-                pm_tbl = vdata.get("postmortem") if isinstance(vdata.get("postmortem"), dict) else {}
+                raw_v = vdata.get("verdict")
+                v_tbl: dict[str, Any] = raw_v if isinstance(raw_v, dict) else {}
+                raw_pm = vdata.get("postmortem")
+                pm_tbl: dict[str, Any] = raw_pm if isinstance(raw_pm, dict) else {}
                 raw_st = str(
                     vdata.get("status")
                     or v_tbl.get("status")
@@ -218,7 +220,8 @@ def _collect_findings_cited_runs(project_root: Path) -> set[str]:
                 )
                 if raw_st in ("refuted_or_superseded", "superseded", "void"):
                     continue
-                for tbl in (vdata, v_tbl, pm_tbl):
+                tables_to_scan: tuple[dict[str, Any], ...] = (vdata, v_tbl, pm_tbl)
+                for tbl in tables_to_scan:
                     for k in ("supporting_runs", "run_ids", "outcome", "status"):
                         cited.update(_extract_run_tokens_from_obj(tbl.get(k)))
 
@@ -275,11 +278,12 @@ def _collect_claims_cited_runs(
             with contextlib.suppress(Exception):
                 with open(vf, "rb") as fp:
                     vdata = tomllib.load(fp)
-                for tbl in (
-                    vdata,
-                    vdata.get("verdict") if isinstance(vdata.get("verdict"), dict) else {},
-                    vdata.get("postmortem") if isinstance(vdata.get("postmortem"), dict) else {},
-                ):
+                raw_v = vdata.get("verdict")
+                v_tbl: dict[str, Any] = raw_v if isinstance(raw_v, dict) else {}
+                raw_pm = vdata.get("postmortem")
+                pm_tbl: dict[str, Any] = raw_pm if isinstance(raw_pm, dict) else {}
+                tables_to_scan: tuple[dict[str, Any], ...] = (vdata, v_tbl, pm_tbl)
+                for tbl in tables_to_scan:
                     for k in ("campaign_id", "campaign", "campaigns"):
                         val = tbl.get(k)
                         if isinstance(val, str) and val.strip():
@@ -434,8 +438,10 @@ def _collect_active_script_citations(project_root: Path) -> set[str]:
             with contextlib.suppress(Exception):
                 with open(vf, "rb") as fp:
                     vdata = tomllib.load(fp)
-                v_tbl = vdata.get("verdict") if isinstance(vdata.get("verdict"), dict) else {}
-                pm_tbl = vdata.get("postmortem") if isinstance(vdata.get("postmortem"), dict) else {}
+                raw_v = vdata.get("verdict")
+                v_tbl: dict[str, Any] = raw_v if isinstance(raw_v, dict) else {}
+                raw_pm = vdata.get("postmortem")
+                pm_tbl: dict[str, Any] = raw_pm if isinstance(raw_pm, dict) else {}
                 raw_st = str(
                     vdata.get("status")
                     or v_tbl.get("status")

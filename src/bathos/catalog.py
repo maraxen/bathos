@@ -111,7 +111,7 @@ def read_runs_report(catalog_dir: Path) -> tuple[list[Run], list[CorruptFragment
         return [], corrupt
 
     combined = pa.concat_tables(tables, promote_options="permissive")
-    order = pc.sort_indices(combined, sort_keys=[("timestamp", "descending")])
+    order = getattr(pc, "sort_indices")(combined, sort_keys=[("timestamp", "descending")])
     combined = combined.take(order)
     pydict = combined.to_pydict()
     runs = [Run.from_arrow_row(pydict, i) for i in range(combined.num_rows)]

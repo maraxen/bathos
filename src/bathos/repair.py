@@ -1334,7 +1334,8 @@ def _handle_reexport_from_warm(
     for warm_row in warm_rows:
         # Create dict from row
         row_dict = dict(zip(col_names, warm_row))
-        run_uuid = row_dict.get("id")
+        raw_id = row_dict.get("id")
+        run_uuid = raw_id if isinstance(raw_id, str) else str(raw_id or "")
 
         # Skip runs already in cool tier
         if run_uuid in cool_uuids:

@@ -137,18 +137,18 @@ def resolve_agent_mode(
 ) -> AgentMode:
     """Priority: CLI flag → sidecar [experiment] agent_mode → project [defaults] → global → 'collaborative'."""
     if cli_flag in ("collaborative", "autonomous"):
-        return cli_flag  # type: ignore
+        return cli_flag
     if sidecar and sidecar.agent_mode in ("collaborative", "autonomous"):
-        return sidecar.agent_mode  # type: ignore
+        return sidecar.agent_mode
     if project_config is not None:
         # ProjectConfig may have a .defaults dict from [defaults] section
         defaults = getattr(project_config, "defaults", {}) or {}
         if defaults.get("agent_mode") in ("collaborative", "autonomous"):
-            return defaults["agent_mode"]  # type: ignore
+            return defaults["agent_mode"]
     if global_config:
         val = global_config.get("defaults", {}).get("agent_mode")
         if val in ("collaborative", "autonomous"):
-            return val  # type: ignore
+            return val
     return "collaborative"
 
 
@@ -762,7 +762,7 @@ def gate_check(
         # Ungated directory — always pass
         return GateResult(ok=True, mode=mode, bundle=bundle)
 
-    if not bundle.found:
+    if not bundle.found or bundle.path is None:
         payload = _gate_failure_payload(
             error_code=GateErrorCode.SIDECAR_MISSING,
             phase="pre_execution",

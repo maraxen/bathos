@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import tomlkit
+import tomlkit.items
 
 from bathos.errors import (
     CharterInvalidError,

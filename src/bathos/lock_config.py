@@ -167,11 +167,15 @@ def _file_layers(
 
 
 def _check_location(value: object, source: str) -> LockLocation:
-    if not isinstance(value, str) or value.strip().lower() not in LOCK_LOCATIONS:
-        raise LockConfigError(
-            f"{source}: lock_location must be one of {list(LOCK_LOCATIONS)}, got {value!r}"
-        )
-    return value.strip().lower()  # type: ignore[return-value]
+    if isinstance(value, str):
+        norm = value.strip().lower()
+        if norm == "git":
+            return "git"
+        if norm == "tree":
+            return "tree"
+    raise LockConfigError(
+        f"{source}: lock_location must be one of {list(LOCK_LOCATIONS)}, got {value!r}"
+    )
 
 
 def _check_flag(value: object, source: str, from_env: bool) -> bool:
@@ -226,56 +230,58 @@ def resolve_lock_settings(
     pass ``lock_dir="none"`` to disable the fallback directory explicitly.
     """
     base_cwd = Path(cwd) if cwd is not None else Path.cwd()
-    explicit = {
-        "lock_location": lock_location,
-        "lock_dir": lock_dir,
-        "ignore_outputs": ignore_outputs,
-    }
     notes: list[str] = []
     file_layers = _file_layers(base_cwd, notes if tolerate_malformed_project_config else None)
     # Eager: a malformed file at ANY layer raises, even when a higher layer would decide every key (spec P1).
     tables: dict[int, dict | None] = {i: load() for i, (_label, _base, load) in enumerate(file_layers)}
 
-    values: dict[str, object] = {}
-    layers: dict[str, str] = {}
-    for key in _KEYS:
-        arg = explicit[key]
+    def _resolve_raw(
+        key: str, arg: object | None, default_val: object
+    ) -> tuple[object, str, Path, bool, str]:
         if arg is not None:
-            if key == "ignore_outputs":
-                values[key] = _check_flag(arg, f"argument {key}", from_env=False)
-            else:
-                values[key] = _convert(key, str(arg), f"argument {key}", base_cwd)
-            layers[key] = "argument" + (
-                " (disabled)" if key == "lock_dir" and values[key] is None else ""
-            )
-            continue
+            raw = arg if key == "ignore_outputs" else str(arg)
+            return raw, f"argument {key}", base_cwd, False, "argument"
         env = _ENV[key]
         if env in os.environ:
-            values[key] = _convert(key, os.environ[env], f"${env}", base_cwd, from_env=True)
-            layers[key] = f"${env}" + (
-                " (disabled)" if key == "lock_dir" and values[key] is None else ""
-            )
-            continue
+            return os.environ[env], f"${env}", base_cwd, True, f"${env}"
         for index, (label, base, _load) in enumerate(file_layers):
             table = tables[index]
             if table is not None and key in table:
-                values[key] = _convert(key, table[key], f"{label} {key}", base)
-                layers[key] = label + (
-                    " (disabled)" if key == "lock_dir" and values[key] is None else ""
-                )
-                break
-        else:
-            layers[key] = "default"
-            values[key] = {
-                "lock_location": "git",
-                "lock_dir": Path(catalog_dir) / "locks",
-                "ignore_outputs": False,
-            }[key]
+                return table[key], f"{label} {key}", base, False, label
+        return default_val, "default", base_cwd, False, "default"
+
+    layers: dict[str, str] = {}
+
+    raw_loc, src_loc, _, env_loc, lbl_loc = _resolve_raw("lock_location", lock_location, "git")
+    resolved_location = (
+        "git"
+        if lbl_loc == "default"
+        else _check_location(raw_loc, src_loc)
+    )
+    layers["lock_location"] = lbl_loc
+
+    raw_dir, src_dir, base_dir, _, lbl_dir = _resolve_raw(
+        "lock_dir", lock_dir, Path(catalog_dir) / "locks"
+    )
+    resolved_dir: Path | None = (
+        Path(catalog_dir) / "locks"
+        if lbl_dir == "default"
+        else _check_dir(raw_dir, src_dir, base_dir)
+    )
+    layers["lock_dir"] = lbl_dir + (" (disabled)" if resolved_dir is None else "")
+
+    raw_ign, src_ign, _, env_ign, lbl_ign = _resolve_raw("ignore_outputs", ignore_outputs, False)
+    resolved_ignore = (
+        False
+        if lbl_ign == "default"
+        else _check_flag(raw_ign, src_ign, from_env=env_ign)
+    )
+    layers["ignore_outputs"] = lbl_ign
 
     return LockSettings(
-        lock_location=values["lock_location"],  # type: ignore[arg-type]
-        lock_dir=values["lock_dir"],  # type: ignore[arg-type]
-        ignore_outputs=values["ignore_outputs"],  # type: ignore[arg-type]
+        lock_location=resolved_location,
+        lock_dir=resolved_dir,
+        ignore_outputs=resolved_ignore,
         layers=layers,
         warnings=tuple(notes),
     )

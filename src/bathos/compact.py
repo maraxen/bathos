@@ -1042,7 +1042,8 @@ def compact(
         if db_path.exists():
             temp_con = duckdb.connect(str(db_path), read_only=True)
             try:
-                warm_rows_before = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+                count_row = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()
+                warm_rows_before = count_row[0] if count_row is not None else 0
             except Exception:
                 warm_rows_before = 0
             finally:
@@ -1324,10 +1325,10 @@ def compact(
                             for v in getattr(pm, "anomalies", {}).values()
                         )
 
-                        curr_outcome = (
-                            con.execute("SELECT outcome FROM runs WHERE id = ?", [run.id]).fetchone()[0]
-                            or ""
-                        )
+                        outcome_row = con.execute(
+                            "SELECT outcome FROM runs WHERE id = ?", [run.id]
+                        ).fetchone()
+                        curr_outcome = (outcome_row[0] if outcome_row is not None else None) or ""
                         outcome = (
                             postmortem_verdict_override
                             if postmortem_verdict_override != "none"
@@ -1545,7 +1546,8 @@ def compact(
         try:
             temp_con = duckdb.connect(str(db_path), read_only=True)
             try:
-                warm_rows_after = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+                after_row = temp_con.execute("SELECT COUNT(*) FROM runs").fetchone()
+                warm_rows_after = after_row[0] if after_row is not None else 0
             finally:
                 temp_con.close()
         except Exception:

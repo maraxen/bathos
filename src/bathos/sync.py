@@ -220,49 +220,50 @@ def sync_catalog(
         stall_thread.start()
 
         # Stream-read stderr for progress2 format and stdout for completion info
-        for line in iter(proc.stderr.readline, ""):
-            if not line:
-                break
-            line = line.strip()
+        if proc.stderr is not None:
+            for line in iter(proc.stderr.readline, ""):
+                if not line:
+                    break
+                line = line.strip()
 
-            # Parse progress2 format: "   1,234 100%    1.23MB/s    0:00:01 (xfr#1, to-chk=0/1)"
-            m = re.match(
-                r"\s*([\d,]+)\s+(\d+)%\s+([\d.]+\S*)\s+\S+(?:\s+\(xfr#(\d+),.*\))?",
-                line,
-            )
-            if m:
-                bytes_str = m.group(1).replace(",", "")
-                pct_str = m.group(2)
-                rate_str = m.group(3)
-                xfr_str = m.group(4)
+                # Parse progress2 format: "   1,234 100%    1.23MB/s    0:00:01 (xfr#1, to-chk=0/1)"
+                m = re.match(
+                    r"\s*([\d,]+)\s+(\d+)%\s+([\d.]+\S*)\s+\S+(?:\s+\(xfr#(\d+),.*\))?",
+                    line,
+                )
+                if m:
+                    bytes_str = m.group(1).replace(",", "")
+                    pct_str = m.group(2)
+                    rate_str = m.group(3)
+                    xfr_str = m.group(4)
 
-                try:
-                    bytes_xfr = int(bytes_str)
-                    pct = int(pct_str)
-                    total_bytes = bytes_xfr
-                    progress2_seen = True
-                    # "xfr#N" is rsync's own running count of files transferred
-                    # so far in this session -- the true file count. Bytes are
-                    # per-file progress, not a transfer total, and must not be
-                    # used as a stand-in for "how many files transferred"
-                    # (#1945: that conflation is why `transferred` under-/
-                    # over-reported, including showing 0 after a real transfer).
-                    if xfr_str is not None:
-                        total_files = int(xfr_str)
-                    with last_progress_ts_lock:
-                        last_progress_ts_ref[0] = time.monotonic()
+                    try:
+                        bytes_xfr = int(bytes_str)
+                        pct = int(pct_str)
+                        total_bytes = bytes_xfr
+                        progress2_seen = True
+                        # "xfr#N" is rsync's own running count of files transferred
+                        # so far in this session -- the true file count. Bytes are
+                        # per-file progress, not a transfer total, and must not be
+                        # used as a stand-in for "how many files transferred"
+                        # (#1945: that conflation is why `transferred` under-/
+                        # over-reported, including showing 0 after a real transfer).
+                        if xfr_str is not None:
+                            total_files = int(xfr_str)
+                        with last_progress_ts_lock:
+                            last_progress_ts_ref[0] = time.monotonic()
 
-                    event(
-                        "sync.rsync_progress",
-                        bytes_transferred=bytes_xfr,
-                        pct=pct,
-                        xfer_rate=rate_str,
-                    )
-                except (ValueError, IndexError):
-                    pass
+                        event(
+                            "sync.rsync_progress",
+                            bytes_transferred=bytes_xfr,
+                            pct=pct,
+                            xfer_rate=rate_str,
+                        )
+                    except (ValueError, IndexError):
+                        pass
 
         # Read any remaining stdout (e.g., final stats)
-        remaining_stdout = proc.stdout.read()
+        remaining_stdout = proc.stdout.read() if proc.stdout is not None else ""
         if remaining_stdout:
             stdout_output = remaining_stdout
 

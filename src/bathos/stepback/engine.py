@@ -727,7 +727,7 @@ def record_stepback_review(
         rubric_meta_id: str | None = None
         rubric_version: str | None = None
         rubric_sha: str | None = None
-        rubric_scores_dict: dict[str, int] = {}
+        rubric_scores_dict: dict[str, float | int] = {}
         open_analysis_obj: OpenAnalysis | None = None
 
         norm_path_kind = str(path_kind).lower().strip()

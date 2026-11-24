@@ -489,8 +489,10 @@ def _validate_amendments(
 
     def resolve(run_id: str) -> tuple[str | None, str | None]:
         """(full id or None, error text or None) for `run_id` through `run_lookup`."""
+        if run_lookup is None:
+            return None, "run_lookup unavailable"
         try:
-            found = run_lookup(run_id)  # type: ignore[misc]
+            found = run_lookup(run_id)
         except Exception as e:  # noqa: BLE001 -- an ambiguous prefix or a failed read
             return None, str(e)
         return (getattr(found, "id", None) if found is not None else None), None

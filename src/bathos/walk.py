@@ -43,7 +43,7 @@ PRUNE_DIRS = frozenset(
 
 def iter_project_files(
     root: Path,
-    suffix: str,
+    suffix: str | tuple[str, ...],
     *,
     event_name: str = "walk.boundary_pruned",
 ) -> list[Path]:

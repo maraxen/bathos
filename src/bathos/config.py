@@ -320,7 +320,7 @@ def load_project_config(path: Path) -> ProjectConfig:
 def register_project(slug: str, catalog_dir: Path) -> None:
     """Register project in global registry at ~/.bth/projects.toml."""
     try:
-        import toml  # type: ignore
+        import toml
 
         registry: dict = {}
         if PROJECTS_REGISTRY.exists():

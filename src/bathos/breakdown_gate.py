@@ -17,9 +17,11 @@ import hashlib
 import json
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Protocol
 
 import duckdb
 
@@ -34,6 +36,13 @@ from bathos.sidecar import (
     uncovered_aggregate_message,
     uncovered_aggregates,
 )
+
+
+class _RunLike(Protocol):
+    @property
+    def id(self) -> str: ...
+    @property
+    def metadata(self) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -171,7 +180,7 @@ def breakdown_gate(run, sidecar: Sidecar, *, check_columns: bool = True) -> list
 
 
 def check_runs(
-    runs: dict[str, object | None],
+    runs: Mapping[str, _RunLike | None],
     workspace_root: Path,
     *,
     db=None,
@@ -203,7 +212,7 @@ def check_runs(
 
 
 def check_near_bound(
-    runs: dict[str, object | None],
+    runs: Mapping[str, _RunLike | None],
     workspace_root: Path,
     *,
     db=None,
@@ -350,7 +359,7 @@ def _run_finished_metadata(db, run_id: str) -> str | None:
 
 def fetch_member_runs(
     db, run_ids: list[str], catalog_dir: Path | None, *, cool_runs=None, log_mode: bool = False
-) -> dict[str, object | None]:
+) -> dict[str, _RunLike | None]:
     """Rows for `run_ids` from the active backend, falling back to cool fragments (members that
     exist only in the cool tier are gated too). An id found nowhere maps to None.
 
@@ -359,7 +368,7 @@ def fetch_member_runs(
     the index's `runs.metadata` does not carry results.
     """
     wanted = list(dict.fromkeys(run_ids))
-    found: dict[str, object | None] = {}
+    found: dict[str, _RunLike | None] = {}
     if wanted and db is not None:
         marks = ", ".join("?" for _ in wanted)
         for cols in (

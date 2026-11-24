@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterable
+from dataclasses import MISSING
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -211,7 +213,11 @@ def _run_from_index_row(row: dict) -> Run:
     def _json_list(value: object) -> list:
         if not value:
             return []
-        return json.loads(value) if isinstance(value, str) else list(value)
+        if isinstance(value, str):
+            return json.loads(value)
+        if isinstance(value, Iterable):
+            return list(value)
+        return []
 
     timestamp = row.get("timestamp")
     if isinstance(timestamp, str) and timestamp:
@@ -225,7 +231,11 @@ def _run_from_index_row(row: dict) -> Run:
         if f.name in ("argv", "output_paths", "tags"):
             kwargs[f.name] = _json_list(val)
         elif f.name == "timestamp":
-            kwargs[f.name] = timestamp if timestamp is not None else f.default_factory()
+            kwargs[f.name] = (
+                timestamp
+                if timestamp is not None
+                else (f.default_factory() if f.default_factory is not MISSING else None)
+            )
         elif f.name in _WARM_FALSY_DEFAULTS:
             kwargs[f.name] = val if val else copy.copy(_WARM_FALSY_DEFAULTS[f.name])
         elif f.name in _WARM_NONE_FALSE:

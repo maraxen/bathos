@@ -12,6 +12,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import duckdb
@@ -923,7 +924,6 @@ def link_cool_runs_to_campaigns(
     Resolves unique prefix campaign IDs and skips orphaned references with no campaign row.
     """
     from types import SimpleNamespace
-    from typing import Any
 
     from bathos.sidecar import SidecarError, resolve_sidecar_for_run
 
@@ -2343,7 +2343,9 @@ def list_campaigns(
         for cool in read_cool_campaigns(catalog_dir):
             if project_slug and cool.project_slug != project_slug:
                 continue
-            by_id[cool.id] = _merge_warm_cool(by_id.get(cool.id), cool)
+            merged = _merge_warm_cool(by_id.get(cool.id), cool)
+            if merged is not None:
+                by_id[cool.id] = merged
     campaigns = [c for c in by_id.values() if c is not None]
     if status:
         campaigns = [c for c in campaigns if c.status == status]
@@ -2592,6 +2594,7 @@ def emit_campaign_report(
     campaign_conclusion = campaign.conclusion
 
     member_ids = union_campaign_member_ids(db, campaign_id, cat)
+    review_data: dict[str, Any]
     if not member_ids:
         review_data = {
             "total_runs": 0,

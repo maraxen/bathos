@@ -102,6 +102,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
+from typing import Any
 
 from bathos.anchor import AnchorStore, DurableAnchorStore, find_anchors, register_anchor
 from bathos.figure_manifest import RenderState
@@ -191,7 +193,7 @@ class FigureEntry:
             )
 
 
-def build_figure_entry(**data: object) -> FigureEntry:
+def build_figure_entry(**data: Any) -> FigureEntry:
     """Construct a :class:`FigureEntry`, enforcing the forbidden-inline-field guard.
 
     This is "the schema" referred to by spec §7's Critical bullet: it REJECTS any
@@ -224,7 +226,7 @@ def build_figure_entry(**data: object) -> FigureEntry:
     unknown = data.keys() - _ALLOWED_FIELDS
     if unknown:
         raise TypeError(f"figure_entry schema has no field(s) {sorted(unknown)}")
-    return FigureEntry(**data)  # type: ignore[arg-type]
+    return FigureEntry(**data)
 
 
 def _encode_typed_fields(entry: FigureEntry) -> str:
@@ -269,7 +271,7 @@ def _decode_typed_fields(
 
 
 def register_figure_entry(
-    catalog_dir: object,
+    catalog_dir: Path | str | None,
     *,
     asset_sha256: str,
     sidecar_ref: str,
@@ -341,7 +343,12 @@ def register_figure_entry(
         attestation_ref=attestation_ref,
     )
 
-    active_store = store if store is not None else DurableAnchorStore(catalog_dir)
+    if store is not None:
+        active_store = store
+    else:
+        if catalog_dir is None:
+            raise ValueError("catalog_dir is required when store is None")
+        active_store = DurableAnchorStore(catalog_dir)
     register_anchor(
         catalog_dir,
         sidecar_ref,
@@ -356,7 +363,7 @@ def register_figure_entry(
 
 
 def find_figure_entries(
-    catalog_dir: object,
+    catalog_dir: Path | str | None,
     *,
     asset_sha256: str | None = None,
     input_hash: str | None = None,
@@ -398,7 +405,7 @@ def find_figure_entries(
 
 
 def get_figure_entry(
-    catalog_dir: object,
+    catalog_dir: Path | str | None,
     asset_sha256: str,
     *,
     store: AnchorStore | None = None,

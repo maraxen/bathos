@@ -16,11 +16,13 @@ import subprocess
 import sys
 import time
 import uuid
+from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import cisternal
 import cyclopts
+from cisternal.registration.wired import wire
 from fastmcp import FastMCP
 
 from bathos.anchor import find_anchors, get_anchor, register_anchor
@@ -2027,10 +2029,15 @@ def graduate_product_tool(
     except GraduationRefused as e:
         return {"ok": False, "error": str(e), "error_code": "graduation_refused"}
     except BathosError as e:
+        raw_code = getattr(e, "code", None)
         return {
             "ok": False,
             "error": str(e),
-            "error_code": e.code.value if hasattr(e, "code") else "graduation_refused",
+            "error_code": (
+                str(raw_code.value)
+                if isinstance(raw_code, Enum)
+                else (raw_code if isinstance(raw_code, str) and raw_code else "graduation_refused")
+            ),
         }
 
 
@@ -3439,7 +3446,13 @@ def campaign_conclude_tool(
         except BreakdownRefused as e:
             return _breakdown_refusal_result(e)
         except BathosError as e:
-            return {"error": str(e), "error_code": e.code.value if hasattr(e, "code") else "conclude_failed"}
+            raw_code = getattr(e, "code", None)
+            err_code = (
+                str(raw_code.value)
+                if isinstance(raw_code, Enum)
+                else (raw_code if isinstance(raw_code, str) and raw_code else "conclude_failed")
+            )
+            return {"error": str(e), "error_code": err_code}
         except CampaignError as e:
             return {"error": str(e)}
         finally:
@@ -3593,6 +3606,7 @@ def cite_run_tool(
     from bathos.cite import format_citation
     from bathos.errors import (
         HIDDEN_STATE_TO_EXCEPTION,
+        ResultHiddenError,
         ResultSuspectUnacknowledgedError,
         ResultUnverifiableUnacknowledgedError,
     )
@@ -3610,7 +3624,7 @@ def cite_run_tool(
     banner = None
     if v:
         if v.is_hidden:
-            exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state)
+            exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ResultHiddenError)
             raise exc_cls(
                 f"Cannot cite run {run.id}: run is hidden ({v.state}): {v.reason or ''}",
                 run_id=run.id,
@@ -5294,10 +5308,15 @@ def _claim_register_sync(
         except BreakdownRefused as e:
             return _breakdown_refusal_result(e)
         except BathosError as e:
+            raw_code = getattr(e, "code", None)
             return {
                 "ok": False,
                 "error": str(e),
-                "error_code": e.code.value if hasattr(e, "code") else "register_failed",
+                "error_code": (
+                    str(raw_code.value)
+                    if isinstance(raw_code, Enum)
+                    else (raw_code if isinstance(raw_code, str) and raw_code else "register_failed")
+                ),
             }
         except (RuntimeError, FileNotFoundError) as e:
             return {"ok": False, "error": str(e), "error_code": "register_failed"}
@@ -7627,14 +7646,26 @@ async def charter_pivot(
 ) -> dict:
     """Execute purpose ledger pivot, reaffirming or retiring all live purposes."""
     from bathos.charter import pivot
+    from bathos.errors import CharterInvalidError
     from bathos.workspace import resolve_workspace
+
+    typed_dispositions: dict[str, Literal["reaffirm", "retire"]] = {}
+    for pid, disp in dispositions.items():
+        if disp == "reaffirm":
+            typed_dispositions[pid] = "reaffirm"
+        elif disp == "retire":
+            typed_dispositions[pid] = "retire"
+        else:
+            raise CharterInvalidError(
+                f"Disposition for purpose '{pid}' must be 'reaffirm' or 'retire', got '{disp}'"
+            )
 
     root = Path(project_root) if project_root else resolve_workspace().fs_root
     cat_p = Path(catalog_dir) if catalog_dir else None
     res = pivot(
         root,
         reason=reason,
-        dispositions=dispositions,
+        dispositions=typed_dispositions,
         retired_reasons=retired_reasons,
         cheapest_next_test=cheapest_next_test,
         catalog_dir=cat_p,
@@ -8402,7 +8433,7 @@ if __name__ == "__main__":
     app.run()
 
 
-_WIRED = cisternal.wire(
+_WIRED = wire(
     app,
     registry="bathos",
     expected=[

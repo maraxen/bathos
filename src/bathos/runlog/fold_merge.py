@@ -78,16 +78,19 @@ def dedup_import_snapshots(events: list[dict]) -> list[dict]:
     for ev in imported:
         data = ev.get("data") or {}
         key = (
-            ev.get("kind"),
-            tuple(ev.get("entity") or []),
+            str(ev.get("kind") or ""),
+            tuple(ev.get("entity") or ()),
             data.get("source_class"),
             data.get("source_locator"),
         )
         ordinal = data.get("snapshot") or 0
         current = grouped.get(key)
-        current_ordinal = ((current.get("data") or {}).get("snapshot") or 0) if current else None
-        if current is None or ordinal > current_ordinal:
+        if current is None:
             grouped[key] = ev
+        else:
+            current_ordinal = (current.get("data") or {}).get("snapshot") or 0
+            if ordinal > current_ordinal:
+                grouped[key] = ev
     return live + list(grouped.values())
 
 

@@ -426,6 +426,10 @@ def compare_reading(
         ).fetchone()
     finally:
         con.close()
+    if row is None:
+        raise BearingsNoConfirmedCharterError(
+            f"No confirmed charter record found in catalog for project {slug!r}"
+        )
     charter_sha = str(row[0])
     charter_purposes: dict[str, dict[str, Any]] = json.loads(row[1] or "{}")
 

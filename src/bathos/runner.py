@@ -1778,7 +1778,7 @@ def _run_script_impl(
         try:
             from bathos.query import get_run
 
-            parent_run = get_run(catalog_dir, derived_from)
+            parent_run = get_run(derived_from, catalog_dir)
             if parent_run:
                 event("lineage.resolved", child_run_uuid=run.id, parent_run_uuid=parent_run.id)
             else:

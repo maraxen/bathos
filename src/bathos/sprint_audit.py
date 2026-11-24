@@ -144,9 +144,10 @@ def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
     try:
         with connect_read(db_path.parent, read_only=True) as conn:
             # Count total runs
-            total = conn.execute(
+            total_row = conn.execute(
                 "SELECT COUNT(*) FROM runs WHERE project_slug = ?", [project_slug]
-            ).fetchone()[0]
+            ).fetchone()
+            total = total_row[0] if total_row is not None else 0
 
             if total == 0:
                 return SignalResult(
@@ -157,10 +158,11 @@ def signal_control_arm_rate(project_slug: str, db_path: Path) -> SignalResult:
                 )
 
             # Count control arm runs (outcome LIKE 'ctrl_%')
-            ctrl_count = conn.execute(
+            ctrl_row = conn.execute(
                 "SELECT COUNT(*) FROM runs WHERE project_slug = ? AND outcome LIKE 'ctrl_%'",
                 [project_slug],
-            ).fetchone()[0]
+            ).fetchone()
+            ctrl_count = ctrl_row[0] if ctrl_row is not None else 0
 
             rate = ctrl_count / total
 
@@ -686,6 +688,8 @@ def signal_stepback_turnaround_anomalies(
 
         anomaly_count = 0
         for r in agent_reviews:
+            if r.dispatched_at is None:
+                continue
             t_disp = datetime.fromisoformat(r.dispatched_at.replace("Z", "+00:00"))
             t_creat = datetime.fromisoformat(r.created_at.replace("Z", "+00:00"))
             duration_s = (t_creat - t_disp).total_seconds()
@@ -1117,25 +1121,33 @@ def sprint_audit(hours: int = 24) -> dict:
 
             # Signal 15: stepback_unvarying_verdicts
             sig15 = signal_stepback_unvarying_verdicts(project["slug"], db_path, catalog_dir)
-            signals["stepback_unvarying_verdicts"] = sig15.value
+            signals["stepback_unvarying_verdicts"] = (
+                sig15.value if sig15.value is not None else 0.0
+            )
             if sig15.level == "WARNING":
                 anomalies.append(sig15.message)
 
             # Signal 16: stepback_low_evidence_rate
             sig16 = signal_stepback_low_evidence_rate(project["slug"], db_path, catalog_dir)
-            signals["stepback_low_evidence_rate"] = sig16.value
+            signals["stepback_low_evidence_rate"] = (
+                sig16.value if sig16.value is not None else 0.0
+            )
             if sig16.level == "WARNING":
                 anomalies.append(sig16.message)
 
             # Signal 17: stepback_ignored_escalations
             sig17 = signal_stepback_ignored_escalations(project["slug"], db_path, catalog_dir)
-            signals["stepback_ignored_escalations"] = sig17.value
+            signals["stepback_ignored_escalations"] = (
+                sig17.value if sig17.value is not None else 0.0
+            )
             if sig17.level == "WARNING":
                 anomalies.append(sig17.message)
 
             # Signal 18: stepback_turnaround_anomalies
             sig18 = signal_stepback_turnaround_anomalies(project["slug"], db_path, catalog_dir)
-            signals["stepback_turnaround_anomalies"] = sig18.value
+            signals["stepback_turnaround_anomalies"] = (
+                sig18.value if sig18.value is not None else 0.0
+            )
             if sig18.level == "WARNING":
                 anomalies.append(sig18.message)
 

@@ -187,8 +187,9 @@ def resolve_finding_status(
 
     if finding.supporting_runs:
         cd = Path(catalog_dir or default_catalog_dir())
+        wr = Path(workspace_root) if workspace_root is not None else None
         validity_map = resolve_validity(
-            finding.supporting_runs, catalog_dir=cd, workspace_root=workspace_root
+            finding.supporting_runs, catalog_dir=cd, workspace_root=wr
         )
         if all(v.is_hidden for v in validity_map.values()):
             return "needs-recheck"
@@ -620,8 +621,9 @@ def list_findings(
         if f.supporting_runs:
             all_supporting_runs.update(f.supporting_runs)
 
+    wr = Path(workspace_root) if workspace_root is not None else None
     validity_map = (
-        resolve_validity(sorted(all_supporting_runs), catalog_dir=cd, workspace_root=workspace_root)
+        resolve_validity(sorted(all_supporting_runs), catalog_dir=cd, workspace_root=wr)
         if all_supporting_runs
         else {}
     )

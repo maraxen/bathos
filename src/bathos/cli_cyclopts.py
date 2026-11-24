@@ -19,10 +19,10 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import cyclopts
-from cisternal import wire
+from cisternal.registration.wired import wire
 
 from bathos.cli_render import cyclopts_result_action
 from bathos.mcp_auth import get_or_create_token
@@ -1140,25 +1140,30 @@ def submit(
         try:
             result = check_parity_confounds_for_submit(parsed_sidecar, cat_dir)
             stage_name = parsed_sidecar.gate_stage
+            parity_stem = (
+                parsed_sidecar.reproduction.requires_parity_stem
+                if parsed_sidecar.reproduction
+                else None
+            )
 
             if result["satisfied"] is False and result["tier_enforced"]:
                 print(
                     f"PARITY_PREREQUISITE_UNMET: no passing parity run for "
-                    f"'{parsed_sidecar.reproduction.requires_parity_stem}' found",
+                    f"'{parity_stem}' found",
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
             elif result["satisfied"] is False and not result["tier_enforced"]:
                 print(
                     f"WARNING: no passing parity run for "
-                    f"'{parsed_sidecar.reproduction.requires_parity_stem}' found "
+                    f"'{parity_stem}' found "
                     f"(advisory for {stage_name} stage)",
                     file=sys.stderr,
                 )
             elif result["satisfied"] is None:
                 print(
                     f"WARNING: could not determine parity prerequisite status for "
-                    f"'{parsed_sidecar.reproduction.requires_parity_stem}' (warm DB absent); "
+                    f"'{parity_stem}' (warm DB absent); "
                     "proceeding with caution",
                     file=sys.stderr,
                 )
@@ -1829,7 +1834,12 @@ def export_cmd(
             raise SystemExit(1) from None
 
         if dry_run:
-            print(result.stdout, end="")
+            print(
+                f"Would export {result.surface} plugin bundle to {result.out} "
+                f"({len(result.files)} files):"
+            )
+            for f in result.files:
+                print(f"  {f}")
         else:
             print(f"Exported {result.surface} plugin bundle to {result.out}")
         raise SystemExit(0)
@@ -2491,7 +2501,7 @@ def charter_pivot_cmd(
     root = Path(project_root) if project_root else resolve_workspace().fs_root
     cat_p = Path(catalog_dir) if catalog_dir else None
 
-    dispositions: dict[str, str] = {}
+    dispositions: dict[str, Literal["reaffirm", "retire"]] = {}
     retired_reasons: dict[str, str] = {}
 
     for r_item in reaffirm:

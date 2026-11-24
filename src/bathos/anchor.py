@@ -467,6 +467,14 @@ def get_anchor_store(catalog_dir: Path | str) -> AnchorStore:
     return CatalogAnchorStore(catalog_dir)
 
 
+def _resolve_store(catalog_dir: Path | str | None, store: AnchorStore | None) -> AnchorStore:
+    if store is not None:
+        return store
+    if catalog_dir is None:
+        raise ValueError("catalog_dir is required when store is None")
+    return get_anchor_store(catalog_dir)
+
+
 def register_anchor(
     catalog_dir: Path | str | None,
     path: str,
@@ -507,7 +515,7 @@ def register_anchor(
     Returns:
         The inserted (or re-inserted) AnchorRecord.
     """
-    active_store = store if store is not None else get_anchor_store(catalog_dir)
+    active_store = _resolve_store(catalog_dir, store)
     record = AnchorRecord(
         path=str(path),
         sha256=sha256,
@@ -527,7 +535,7 @@ def get_anchor(
     store: AnchorStore | None = None,
 ) -> AnchorRecord | None:
     """Read back an anchored sidecar by (path, sha256). Round-trips register_anchor."""
-    active_store = store if store is not None else get_anchor_store(catalog_dir)
+    active_store = _resolve_store(catalog_dir, store)
     return active_store.get(str(path), sha256)
 
 
@@ -544,7 +552,7 @@ def find_anchors(
 
     Backs bathos.readback.figure_lookup's composition with this seam.
     """
-    active_store = store if store is not None else get_anchor_store(catalog_dir)
+    active_store = _resolve_store(catalog_dir, store)
     return active_store.find(
         kind=kind, sha256=sha256, content_hash=content_hash, campaign_id=campaign_id
     )

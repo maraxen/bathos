@@ -816,6 +816,7 @@ def register_claim(
             from bathos.errors import (
                 HIDDEN_STATE_TO_EXCEPTION,
                 EstimandBoundaryMixedError,
+                ResultHiddenError,
                 ResultSuspectUnacknowledgedError,
                 ResultUnverifiableUnacknowledgedError,
             )
@@ -827,7 +828,7 @@ def register_claim(
             )
             for mid, v in validity_map.items():
                 if v.is_hidden:
-                    exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state)
+                    exc_cls = HIDDEN_STATE_TO_EXCEPTION.get(v.state, ResultHiddenError)
                     raise exc_cls(
                         f"Campaign member run {mid} is hidden ({v.state}): {v.reason or ''}",
                         run_id=mid,

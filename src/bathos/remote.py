@@ -27,10 +27,10 @@ def list_remotes(config: ProjectConfig) -> list[tuple[str, str, str]]:
     Returns:
         List of tuples (name, host, remote_root) sorted alphabetically by name.
     """
-    remotes_list = []
+    remotes_list: list[tuple[str, str, str]] = []
     for name, remote_config in config.remotes.items():
-        host = remote_config.get("host")
-        remote_root = remote_config.get("remote_root")
+        host = str(remote_config.get("host") or "")
+        remote_root = str(remote_config.get("remote_root") or "")
         remotes_list.append((name, host, remote_root))
 
     # Sort by name (first element of tuple)

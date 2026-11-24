@@ -227,8 +227,9 @@ def render_advisor_brief(
             lines.append(f"- **Stopping Threshold**: `{camp.stopping_threshold}`")
         else:
             lines.append("- **Stopping Threshold**: *None locked*")
-        if getattr(camp, "target_metric", None):
-            lines.append(f"- **Target Metric**: `{camp.target_metric}`")
+        target_metric = getattr(camp, "target_metric", None)
+        if target_metric:
+            lines.append(f"- **Target Metric**: `{target_metric}`")
         # Check threshold edits
         thresh_eval = triggers_res.get("triggers_evaluated", {}).get("threshold_edit", {})
         if thresh_eval.get("fired"):
