@@ -65,5 +65,8 @@ tmp/
 # records local worktree branch names from a past sprint — machine-local and
 # transient (the worktrees it names are long gone)
 .praxia/worktree_manifests/
+# daily per-session hook fire and search telemetry logs (ephemeral, high volume)
+.praxia/hook_fires-*.jsonl
+.praxia/search_calls-*.jsonl
 /.bth/refs/manifest.jsonl
 /.bth/refs/.manifest.lock

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-24
+
+### Added
+- **Scientific validity gates (`#2202`, `#2662`, `#2200`, `#2199`; spec `260707`):** `[invariants]` hard-fail block (`InvariantSpec`, `evaluate_invariants`), confirmatory `[sanity]`, `claim.assumptions` conclusion gate, prose data-quality claim guard, declared-vs-analyzed factor/arm coverage checks, `decision_scope` vs `regime`, and `check_single_cell_gate` wired into `lint_project`.
+- **Exploratory Mode Contract S3–S5 (spec `261015`):** `observations.py` & `appraisal.py` ledgers + `runlog/fold_observations.py` + idempotent `index.py` views + `bth observe`/`bth appraise` CLI & MCP tools, `[holdout]` (`HoldoutSpec`, rank/C8/C9/C10 checks), `--from-observation` linkage, S5 `run:<id>:<field>` calibration source + SESOI-vs-MDE lint, 7 registered domain error codes (`Observation*`/`Appraisal*`), and 5 new corpus rule cards (`PREREG-006`, `DSGN-006`..`008`, `STAT-006`).
+- **`get_run` UUID prefix lookup & `using-bathos` skill hardening (`#3333`, `#2346`, `#2323`, `#2177`):** unambiguous prefix lookup in `query.py` plus literature-review, code/port parity, PyTorch device-placement, and nested-struct guidance in `using-bathos` (`tests/test_using_bathos_skill.py`).
+
+### Changed
+- **Catalog verification & sprint-audit scaling (`#3052`, `#1182`):** O(1) `connect_read` + batched event lookup and stat-keyed legacy cache in `verify.py`; log-mode `sprint_audit` query against `index.db` `submits` table; `compact_submit_provenance` helper in `catalog.py`.
+
+### Fixed
+- **MCP `project_root`, `bth run --sidecar` & portable sidecar resolution (`#3582`, `#2243`, `#2225`):** `project_root` & `missing_path` diagnostics in `mcp.py`, `--sidecar` forwarding in `cluster.py`/`runner.py`, portable relative `sidecar_path` with `resolve_sidecar_for_run` in `claim.py`, and `run_tool` `cwd` forwarding fix.
+
 ## [0.16.0] - 2026-11-23
 
 ### Added

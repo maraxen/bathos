@@ -3,7 +3,7 @@
     "bathos": {
       "args": [
         "--from",
-        "bathos==0.16.0",
+        "bathos==0.17.0",
         "bth-mcp"
       ],
       "command": "uvx",

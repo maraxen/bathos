@@ -10,12 +10,13 @@ bathos is a standalone experiment tracking CLI for a single researcher across 10
 
 ---
 
-## Current Status (as of 2026-11-23)
+## Current Status (as of 2026-11-24)
 
-**Latest: v0.16.0 (2026-11-23) — 5,152 tests collected.**
+**Latest: v0.17.0 (2026-11-24) — 5,241 tests collected.**
 
 Full version history is in [`CHANGELOG.md`](CHANGELOG.md). Summary of recent versions:
 
+- **Scientific validity gates, Exploratory S3–S5 & scaling (`v0.17.0`)** — `[invariants]` / confirmatory `[sanity]` / `claim.assumptions` gate / prose data-quality & factor-coverage checks / `decision_scope` vs `regime` (`#2202`, `#2662`, `#2200`, `#2199`), `observations.py` & `appraisal.py` (`bth observe`/`appraise`, `[holdout]`, `--from-observation`, S5 calibration source lint, 7 domain error codes, 5 corpus rule cards), O(1) `bth verify` & `index.db` `submits` scaling (`#3052`, `#1182`), MCP `project_root` & `bth run --sidecar` & portable `sidecar_path` (`#3582`, `#2243`, `#2225`), and `get_run` prefix lookup + `using-bathos` hardening (`#3333`, `#2346`, `#2323`, `#2177`)
 - **Sprint hygiene, integrity gates & C2 catalog hardening (`v0.16.0`)** — stoichiometry stage-graph/reagents/`verify_citations --strict-coords` (`#6687`/`#6688`), `bathos-progress-report` skill + literature-parity skill smoke tests (`#4379`), blast-status false-clean & `connect_read` fallback (`#3563`), stepback trigger fixes (`#3236`), postmortem-override decision-doc flagging (`#3494`), unresolved outcome & result JSON validation (`#3326`/`#3327`), and C2 catalog/sidecar/repair/ingest hardening (`#3051`/`#3118`/`#2819`)
 - **Bearings v1 (`v0.15.0`)** — multi-scale goal awareness (observe-only), human-confirmed project charters (`bth charter confirm`), deterministic blind packets and reading records (`PacketLeakError`), AC-9 `[charter] purpose` labels, and shadow mode (`cisternal>=0.1.7`, `shadow.label`, `bth sync` shadow support)
 - **Result Validity, Supersession & Archive (`v0.14.0`)** — `.bth/instruments/*.toml` defect & estimand-change registries, `version_resolver.py`, `validity_cache.db`, `--include-invalid`, `.bth/findings/*.toml` lifecycle (`bth finding create/list/show/settle/supersede/reopen`), `bth-session-start-hook`, `bth archive-sweep`, doc store archival, and `bth telemetry-rotate`
