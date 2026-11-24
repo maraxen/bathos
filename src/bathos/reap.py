@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import socket
 import subprocess
 from dataclasses import dataclass
@@ -93,6 +94,64 @@ class ReapStats:
     skipped_count: int
 
 
+_SLURM_NONTERMINAL_STATES = frozenset(
+    {
+        "RUNNING",
+        "PENDING",
+        "CONFIGURING",
+        "RESIZING",
+        "COMPLETING",
+        "SUSPENDED",
+        "REQUEUED",
+        "STAGE_OUT",
+    }
+)
+_GENERIC_LAUNCHERS = frozenset(
+    {
+        "python",
+        "python3",
+        "uv",
+        "run",
+        "bash",
+        "sh",
+        "zsh",
+        "env",
+        "timeout",
+        "nice",
+        "nohup",
+        "setsid",
+    }
+)
+
+
+def _is_slurm_nonterminal(state: str | None) -> bool:
+    if not state:
+        return False
+    base = state.strip().split()[0].rstrip("+").upper()
+    return base in _SLURM_NONTERMINAL_STATES
+
+
+def _normalize_utc(ts: object) -> datetime | None:
+    if isinstance(ts, str):
+        cleaned = ts.strip()
+        if not cleaned:
+            return None
+        try:
+            ts = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC)
+
+
+def _is_generic_launcher(exe: str) -> bool:
+    base = Path(exe.replace("\\", "/")).name.lower()
+    return base in _GENERIC_LAUNCHERS or base.startswith(("python3.", "python2."))
+
+
 def _query_slurm_job_details(job_id: str) -> tuple[str | None, str | None, str | None]:
     """Query SLURM job state and exit code using sacct -X.
 
@@ -127,17 +186,28 @@ def _query_slurm_job_details(job_id: str) -> tuple[str | None, str | None, str |
         if not lines:
             # Empty output = no record found
             return None, None, "sacct_no_record"
-        first = lines[0]
-        if "|" in first:
-            parts = [p.strip() for p in first.split("|")]
-            state = parts[0]
-            exit_code = parts[1] if len(parts) > 1 and parts[1] else None
-        else:
-            state = first
-            exit_code = None
-        if not state:
+        parsed: list[tuple[str, str | None]] = []
+        for row_line in lines:
+            if "|" in row_line:
+                parts = [p.strip() for p in row_line.split("|")]
+                st = parts[0]
+                ec = parts[1] if len(parts) > 1 and parts[1] else None
+            else:
+                st = row_line
+                ec = None
+            if st:
+                parsed.append((st, ec))
+        if not parsed:
             return None, None, "sacct_no_record"
-        return state, exit_code, None
+        # Array jobs stay active if ANY task row is in an active/non-terminal state.
+        for st, ec in parsed:
+            if _is_slurm_nonterminal(st):
+                return st, ec, None
+        # All rows terminal: prefer any non-COMPLETED terminal row so failures aren't masked.
+        for st, ec in parsed:
+            if st.strip().split()[0].rstrip("+").upper() != "COMPLETED":
+                return st, ec, None
+        return parsed[0][0], parsed[0][1], None
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None, None, "sacct_error"
 
@@ -167,6 +237,33 @@ def _format_sacct_reason(state: str, exit_code: str | None) -> str:
     return f"sacct:{state}"
 
 
+def _parse_ps_line(line: str) -> tuple[int | None, list[str]]:
+    """Parse `(pid, command_tokens)` from one `ps aux` line."""
+    parts = line.split(None, 10)
+    if len(parts) >= 11 and parts[1].isdigit():
+        pid = int(parts[1])
+        cmd_str = parts[10]
+    elif len(parts) >= 2 and parts[0].isdigit():
+        pid = int(parts[0])
+        cmd_str = line.split(None, 1)[1]
+    else:
+        return None, []
+    try:
+        tokens = shlex.split(cmd_str)
+    except ValueError:
+        tokens = cmd_str.split()
+    return pid, tokens
+
+
+def _token_matches_cmd(tok: str, cmd_tokens: list[str], cmd_bases: list[str]) -> bool:
+    if tok in cmd_tokens:
+        return True
+    norm = tok.replace("\\", "/")
+    if "/" in norm:
+        return any(ct.replace("\\", "/").endswith("/" + norm) for ct in cmd_tokens)
+    return Path(norm).name in cmd_bases
+
+
 def _is_live_process_on_host(hostname: str, argv: list[str]) -> bool:
     """Check if a live process matching argv exists on this host.
 
@@ -184,7 +281,15 @@ def _is_live_process_on_host(hostname: str, argv: list[str]) -> bool:
     if not argv:
         return False
 
-    # Match by argv prefix (first element of command)
+    # Require at least one non-generic identifying token (script path, specific binary,
+    # or target argument) so bare launcher substrings like "python"/"uv" never match.
+    identifying = [
+        tok for tok in argv if tok and not tok.startswith("-") and not _is_generic_launcher(tok)
+    ]
+    if not identifying:
+        return False
+
+    my_pid = os.getpid()
     try:
         result = subprocess.run(
             ["ps", "aux"],
@@ -192,9 +297,14 @@ def _is_live_process_on_host(hostname: str, argv: list[str]) -> bool:
             text=True,
             timeout=5,
         )
-        for line in result.stdout.split("\n"):
-            if argv[0] in line and "ps aux" not in line:
-                # Avoid matching our own process
+        for line in result.stdout.splitlines():
+            if not line.strip() or "ps aux" in line:
+                continue
+            pid, cmd_tokens = _parse_ps_line(line)
+            if not cmd_tokens or pid == my_pid:
+                continue
+            cmd_bases = [Path(ct.replace("\\", "/")).name for ct in cmd_tokens]
+            if all(_token_matches_cmd(tok, cmd_tokens, cmd_bases) for tok in identifying):
                 return True
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
@@ -320,7 +430,8 @@ def _classify_reap_candidates(
     slurm_only: bool = False,
 ) -> tuple[list[Run], list[tuple[Run, str]], dict[str, str], dict[str, tuple[str, str | None]]]:
     """Classify running runs into reap candidates vs skipped, capturing sacct exit reasons."""
-    cutoff_time = now - timedelta(hours=older_than_h)
+    now_utc = _normalize_utc(now) or datetime.now(UTC)
+    cutoff_time = now_utc - timedelta(hours=older_than_h)
     candidates: list[Run] = []
     skipped: list[tuple[Run, str]] = []
     candidate_reasons: dict[str, str] = {}
@@ -331,7 +442,12 @@ def _classify_reap_candidates(
             skipped.append((run, "not_running"))
             continue
 
-        if run.timestamp >= cutoff_time:
+        run_ts = _normalize_utc(run.timestamp)
+        if run_ts is None:
+            skipped.append((run, "missing_timestamp"))
+            continue
+
+        if run_ts >= cutoff_time:
             skipped.append((run, "too_recent"))
             continue
 
@@ -349,13 +465,13 @@ def _classify_reap_candidates(
                     if slurm_only:
                         skipped.append((run, "auto_reap_requires_sacct_terminal"))
                     else:
-                        age_hours = (now - run.timestamp).total_seconds() / 3600
+                        age_hours = (now_utc - run_ts).total_seconds() / 3600
                         if age_hours >= SACCT_NO_RECORD_REAP_H:
                             candidates.append(run)
                             candidate_reasons[run.id] = "sacct_no_record"
                         else:
                             skipped.append((run, "sacct_no_record"))
-            elif state in ("RUNNING", "PENDING", "CONFIGURING", "RESIZING"):
+            elif _is_slurm_nonterminal(state):
                 skipped.append((run, "slurm_nonterminal"))
             else:
                 assert state is not None

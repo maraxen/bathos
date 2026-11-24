@@ -1613,8 +1613,9 @@ def reconcile_campaign_runs(
     for bad_cid in bad_cids:
         con.execute("DELETE FROM campaign_runs WHERE campaign_id = ?", [bad_cid])
         res = con.execute("DELETE FROM campaigns WHERE id = ? AND mode IS NULL", [bad_cid])
-        if res.rowcount and res.rowcount > 0:
-            deleted_phantoms += int(res.rowcount)
+        del_row = res.fetchone()
+        if del_row and del_row[0]:
+            deleted_phantoms += int(del_row[0])
 
     for run_id, raw_cid in bad_run_cids:
         resolved = lk.resolve_campaign_id(raw_cid)

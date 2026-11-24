@@ -1112,7 +1112,12 @@ def submit(
                 stage_name = parsed_sidecar.gate_stage
 
                 if requires_pass_stem and stage_name in ("validation", "production"):
-                    found = check_reproduction_prerequisite(requires_pass_stem, cat_dir)
+                    found = check_reproduction_prerequisite(
+                        requires_pass_stem,
+                        cat_dir,
+                        expected_sidecar_sha256=parsed_sidecar.reproduction.requires_pass_sidecar_sha256,
+                        expected_script_sha256=parsed_sidecar.reproduction.requires_pass_script_sha256,
+                    )
                     if not found:
                         print(
                             f"REPRODUCTION_PREREQUISITE_UNMET: no passing run of "
@@ -1121,7 +1126,12 @@ def submit(
                         )
                         raise SystemExit(1)
                 elif requires_pass_stem and stage_name in ("exploration", "calibration"):
-                    found = check_reproduction_prerequisite(requires_pass_stem, cat_dir)
+                    found = check_reproduction_prerequisite(
+                        requires_pass_stem,
+                        cat_dir,
+                        expected_sidecar_sha256=parsed_sidecar.reproduction.requires_pass_sidecar_sha256,
+                        expected_script_sha256=parsed_sidecar.reproduction.requires_pass_script_sha256,
+                    )
                     if not found:
                         print(
                             f"WARNING: no passing run of '{requires_pass_stem}' found "

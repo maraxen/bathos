@@ -296,3 +296,95 @@ def test_bth_submit_cli_missing_sidecar_fails_before_push_or_submit(tmp_path, mo
     assert res.exit_code != 0
     mock_push.assert_not_called()
     mock_submit.assert_not_called()
+
+
+def test_bth_submit_enforces_requires_pass_sha256_pins(tmp_path, monkeypatch):
+    """bth submit forwards requires_pass_sidecar_sha256 and requires_pass_script_sha256 pins."""
+    from bathos.catalog import init_catalog, write_run
+    from bathos.cli_cyclopts import app
+    from bathos.schema import Run
+    from tests._cyclopts_runner import CyclopticRunner
+
+    monkeypatch.chdir(tmp_path)
+    cat = tmp_path / "catalog"
+    init_catalog(cat)
+    monkeypatch.setenv("BTH_CATALOG_DIR", str(cat))
+    (tmp_path / ".bth.toml").write_text(
+        f'[project]\nslug = "myproj"\nroot = "{tmp_path}"\n\n'
+        '[slurm]\nremote = "engaging"\npreset = "gpu"\n'
+    )
+
+    good_sc_sha = "a" * 64
+    good_sr_sha = "b" * 64
+    wrong_sha = "c" * 64
+
+    write_run(
+        Run(
+            project_slug="myproj",
+            command="python scripts/experiments/baseline.py",
+            argv=["python", "scripts/experiments/baseline.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            outcome="pass",
+            sidecar_sha256=good_sc_sha,
+            script_sha256=good_sr_sha,
+        ),
+        cat,
+    )
+
+    scripts_dir = tmp_path / "scripts" / "experiments"
+    scripts_dir.mkdir(parents=True)
+    (scripts_dir / "exp.py").write_text("print(1)\n")
+    sc = scripts_dir / "exp.bth.toml"
+
+    def _sidecar_text(sc_sha: str, sr_sha: str) -> str:
+        return (
+            '[experiment]\nhypothesis = "h"\nstage_name = "validation"\n\n'
+            f'[reproduction]\nrequires_pass_stem = "baseline"\n'
+            f'requires_pass_sidecar_sha256 = "{sc_sha}"\n'
+            f'requires_pass_script_sha256 = "{sr_sha}"\n\n'
+            '[outcomes.pass]\ncondition = "x > 0"\ndecision = "go"\nreasoning = "r"\n'
+            '[outcomes.fail]\ncondition = "x <= 0"\ndecision = "stop"\nreasoning = "r"\nis_residual = true\n'
+            '[result_schema]\nx = "float"\n'
+        )
+
+    submit_ret = {"slurm_job_id": "556", "script_path": "/tmp/j.sh", "preset_used": {}, "job_name": "j"}
+
+    # Wrong sidecar SHA -> blocked (exit 1)
+    sc.write_text(_sidecar_text(wrong_sha, good_sr_sha))
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=submit_ret) as mock_submit,
+    ):
+        res_bad_sc = CyclopticRunner().invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/exp.py"]
+        )
+    assert res_bad_sc.exit_code == 1
+    assert "REPRODUCTION_PREREQUISITE_UNMET" in res_bad_sc.output
+    mock_submit.assert_not_called()
+
+    # Wrong script SHA -> blocked (exit 1)
+    sc.write_text(_sidecar_text(good_sc_sha, wrong_sha))
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=submit_ret) as mock_submit,
+    ):
+        res_bad_sr = CyclopticRunner().invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/exp.py"]
+        )
+    assert res_bad_sr.exit_code == 1
+    assert "REPRODUCTION_PREREQUISITE_UNMET" in res_bad_sr.output
+    mock_submit.assert_not_called()
+
+    # Matching both pins -> allowed (exit 0)
+    sc.write_text(_sidecar_text(good_sc_sha, good_sr_sha))
+    with (
+        patch("bathos.cluster.push_project"),
+        patch("bathos.cluster.submit_job", return_value=submit_ret) as mock_submit,
+    ):
+        res_ok = CyclopticRunner().invoke(
+            app, ["submit", "--no-wait", "python", "scripts/experiments/exp.py"]
+        )
+    assert res_ok.exit_code == 0, res_ok.output
+    mock_submit.assert_called_once()

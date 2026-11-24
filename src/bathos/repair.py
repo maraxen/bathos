@@ -1032,6 +1032,10 @@ def _collect_campaign_backfill_candidates(catalog_dir: Path) -> list[dict]:
             continue
 
         creation_evs = [e for e in evs if e.get("kind") in _CAMPAIGN_CREATION_KINDS]
+        has_uningested_creation = any(
+            e.get("source") == "disk" and e.get("eid") not in db_eids
+            for e in creation_evs
+        )
         target_cid = cid
         has_uningested = any(
             e.get("source") == "disk" and e.get("eid") not in db_eids for e in evs
@@ -1068,7 +1072,7 @@ def _collect_campaign_backfill_candidates(catalog_dir: Path) -> list[dict]:
                     and (e.get("data") or {}).get("evalue") is not None
                 )
                 or (
-                    e.get("kind") in ("run.started", "run.imported")
+                    e.get("kind") in ("run.started", "run.imported", "campaign.run_added")
                     and isinstance((e.get("data") or {}).get("sidecar"), dict)
                     and (e.get("data") or {})["sidecar"].get("popper_stopping_threshold")
                     is not None
@@ -1117,6 +1121,7 @@ def _collect_campaign_backfill_candidates(catalog_dir: Path) -> list[dict]:
                 "payload": payload,
                 "cwd": _resolve_backfill_cwd(catalog_dir, evs, str(payload["project_slug"])),
                 "has_uningested": has_uningested,
+                "has_uningested_creation": has_uningested_creation,
             }
         )
 
@@ -1133,20 +1138,14 @@ def _backfill_phantom_campaigns_from_logs(catalog_dir: Path) -> int:
         return 0
 
     backfilled = 0
-    if any(c["has_uningested"] for c in initial):
-        run_ingest(catalog_dir)
-        remaining = _collect_campaign_backfill_candidates(catalog_dir)
-        resolved_by_ingest = len({c["phantom_cid"] for c in initial}) - len(
-            {c["phantom_cid"] for c in remaining}
-        )
-        if resolved_by_ingest > 0:
-            backfilled += resolved_by_ingest
-    else:
-        remaining = initial
+    needs_emit = [c for c in initial if not c.get("has_uningested_creation")]
+    wait_for_ingest = [c for c in initial if c.get("has_uningested_creation")]
 
-    if remaining:
+    # Emit reconstructed campaign.created BEFORE run_ingest so reconcile_campaign_runs
+    # never deletes reconstructible phantom campaigns before they are backfilled.
+    if needs_emit:
         with unit_of_work(catalog_dir):
-            for cand in remaining:
+            for cand in needs_emit:
                 emit_event(
                     kind="campaign.created",
                     entity=[cand["target_cid"]],
@@ -1155,7 +1154,30 @@ def _backfill_phantom_campaigns_from_logs(catalog_dir: Path) -> int:
                     hard_fail=True,
                 )
                 backfilled += 1
+
+    if wait_for_ingest or needs_emit:
         run_ingest(catalog_dir)
+
+    if wait_for_ingest:
+        wait_cids = {c["phantom_cid"] for c in wait_for_ingest}
+        remaining = [
+            c for c in _collect_campaign_backfill_candidates(catalog_dir) if c["phantom_cid"] in wait_cids
+        ]
+        resolved_by_ingest = len(wait_cids) - len({c["phantom_cid"] for c in remaining})
+        if resolved_by_ingest > 0:
+            backfilled += resolved_by_ingest
+        if remaining:
+            with unit_of_work(catalog_dir):
+                for cand in remaining:
+                    emit_event(
+                        kind="campaign.created",
+                        entity=[cand["target_cid"]],
+                        data=cand["payload"],
+                        cwd=cand["cwd"],
+                        hard_fail=True,
+                    )
+                    backfilled += 1
+            run_ingest(catalog_dir)
 
     return backfilled
 

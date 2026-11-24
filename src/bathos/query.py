@@ -220,8 +220,11 @@ def _run_from_index_row(row: dict) -> Run:
         return []
 
     timestamp = row.get("timestamp")
-    if isinstance(timestamp, str) and timestamp:
-        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    if isinstance(timestamp, str):
+        ts_clean = timestamp.strip()
+        timestamp = (
+            datetime.fromisoformat(ts_clean.replace("Z", "+00:00")) if ts_clean else None
+        )
 
     kwargs: dict = {}
     for f in fields(Run):

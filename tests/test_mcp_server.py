@@ -863,3 +863,24 @@ def test_get_run_tool_exposes_postmortem_verdict_override(tmp_catalog, sample_ru
     compact(tmp_catalog)
     out = get_run_tool(catalog_dir=str(tmp_catalog), run_id="run_pm_override")
     assert out["postmortem_verdict_override"] == "fail"
+
+
+def test_claim_register_sync_catches_campaign_error(tmp_catalog, tmp_path):
+    """_claim_register_sync catches CampaignError cleanly with error_code='campaign_error'."""
+    from bathos.campaigns import CampaignError
+    from bathos.catalog import init_catalog
+    from bathos.compact import compact
+    from bathos.mcp import _claim_register_sync
+
+    init_catalog(tmp_catalog)
+    compact(tmp_catalog)
+    with patch("bathos.claim.register_claim", side_effect=CampaignError("Campaign not found")):
+        result = _claim_register_sync(
+            "missing.claim.toml",
+            "nonexistent-camp",
+            tmp_catalog,
+            tmp_path,
+        )
+    assert result["ok"] is False
+    assert result["error_code"] == "campaign_error"
+    assert "Campaign not found" in result["error"]

@@ -5307,6 +5307,12 @@ def _claim_register_sync(
             }
         except BreakdownRefused as e:
             return _breakdown_refusal_result(e)
+        except CampaignError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
+            }
         except BathosError as e:
             raw_code = getattr(e, "code", None)
             return {
@@ -8180,7 +8186,9 @@ def add_campaign_edge_tool(
             "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
         }
 
-    from bathos.campaign_edges import CycleRejectedError, add_campaign_edge
+    import duckdb
+
+    from bathos.campaign_edges import CampaignEdgeError, CycleRejectedError, add_campaign_edge
     from bathos.campaigns import connect_catalog_db
     from bathos.runlog.emit import unit_of_work
 
@@ -8194,6 +8202,8 @@ def add_campaign_edge_tool(
                 return {
                     "ok": False,
                     "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+                    "error_code": BathosErrorCode.CATALOG_ERROR.value,
+                    "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
                 }
         try:
             add_campaign_edge(
@@ -8209,12 +8219,26 @@ def add_campaign_edge_tool(
                 "parent_campaign_id": parent_campaign_id,
                 "message": f"Recorded campaign edge {child_campaign_id} -> {parent_campaign_id}",
             }
-        except CycleRejectedError as e:
+        except (CycleRejectedError, CampaignEdgeError, CampaignError) as e:
             return {
                 "ok": False,
                 "error": str(e),
                 "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
                 "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+            }
+        except duckdb.CatalogException as e:
+            return {
+                "ok": False,
+                "error": f"Catalog edge table error: {e}",
+                "error_code": BathosErrorCode.CATALOG_ERROR.value,
+                "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
+            }
+        except ValueError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_code": BathosErrorCode.INVALID_PARAM.value,
+                "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
             }
         finally:
             if db is not None:
@@ -8235,7 +8259,9 @@ def get_campaign_parents_tool(
             "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
         }
 
-    from bathos.campaign_edges import get_campaign_parents
+    import duckdb
+
+    from bathos.campaign_edges import CampaignEdgeError, get_campaign_parents
     from bathos.campaigns import connect_catalog_db
 
     cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
@@ -8244,6 +8270,8 @@ def get_campaign_parents_tool(
         return {
             "ok": False,
             "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+            "error_code": BathosErrorCode.CATALOG_ERROR.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
         }
     try:
         parents = get_campaign_parents(db, campaign_id, catalog_dir=cat_dir)
@@ -8252,6 +8280,27 @@ def get_campaign_parents_tool(
             "campaign_id": campaign_id,
             "parents": parents,
             "count": len(parents),
+        }
+    except duckdb.CatalogException:
+        return {
+            "ok": True,
+            "campaign_id": campaign_id,
+            "parents": [],
+            "count": 0,
+        }
+    except (CampaignEdgeError, CampaignError) as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+        }
+    except ValueError as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
         }
     finally:
         db.close()
@@ -8279,7 +8328,9 @@ def add_run_edge_tool(
             "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
         }
 
-    from bathos.campaign_edges import CycleRejectedError, add_run_edge
+    import duckdb
+
+    from bathos.campaign_edges import CampaignEdgeError, CycleRejectedError, add_run_edge
     from bathos.campaigns import connect_catalog_db
     from bathos.runlog.emit import unit_of_work
 
@@ -8293,6 +8344,8 @@ def add_run_edge_tool(
                 return {
                     "ok": False,
                     "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+                    "error_code": BathosErrorCode.CATALOG_ERROR.value,
+                    "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
                 }
         try:
             add_run_edge(
@@ -8308,12 +8361,26 @@ def add_run_edge_tool(
                 "parent_run_id": parent_run_id,
                 "message": f"Recorded run edge {child_run_id} -> {parent_run_id}",
             }
-        except CycleRejectedError as e:
+        except (CycleRejectedError, CampaignEdgeError, CampaignError) as e:
             return {
                 "ok": False,
                 "error": str(e),
                 "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
                 "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+            }
+        except duckdb.CatalogException as e:
+            return {
+                "ok": False,
+                "error": f"Catalog edge table error: {e}",
+                "error_code": BathosErrorCode.CATALOG_ERROR.value,
+                "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
+            }
+        except ValueError as e:
+            return {
+                "ok": False,
+                "error": str(e),
+                "error_code": BathosErrorCode.INVALID_PARAM.value,
+                "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
             }
         finally:
             if db is not None:
@@ -8334,7 +8401,9 @@ def get_run_parents_tool(
             "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
         }
 
-    from bathos.campaign_edges import get_run_parents
+    import duckdb
+
+    from bathos.campaign_edges import CampaignEdgeError, get_run_parents
     from bathos.campaigns import connect_catalog_db
 
     cat_dir = _get_catalog_dir(catalog_dir or None, project_root=project_root or None)
@@ -8343,6 +8412,8 @@ def get_run_parents_tool(
         return {
             "ok": False,
             "error": f"Catalog database not found at {cat_dir / 'bathos.db'}; run `bth compact` first",
+            "error_code": BathosErrorCode.CATALOG_ERROR.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CATALOG_ERROR],
         }
     try:
         parents = get_run_parents(db, run_id, catalog_dir=cat_dir)
@@ -8351,6 +8422,27 @@ def get_run_parents_tool(
             "run_id": run_id,
             "parents": parents,
             "count": len(parents),
+        }
+    except duckdb.CatalogException:
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "parents": [],
+            "count": 0,
+        }
+    except (CampaignEdgeError, CampaignError) as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": BathosErrorCode.CAMPAIGN_ERROR.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.CAMPAIGN_ERROR],
+        }
+    except ValueError as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "error_code": BathosErrorCode.INVALID_PARAM.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.INVALID_PARAM],
         }
     finally:
         db.close()

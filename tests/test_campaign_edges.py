@@ -400,3 +400,111 @@ class TestCampaignAndRunEdgeMcpTools:
             )
         )["parents"] == ["lr-parent"]
         reset_writers_for_test()
+
+
+class TestCampaignAndRunEdgesHardening:
+    def test_prefix_resolution_and_ambiguity_for_campaign_and_run_edges(self, warm_db):
+        from bathos.campaigns import CampaignError, create_campaign
+
+        c1 = create_campaign(warm_db, name="camp-1", project_slug="test", mode="exploration")
+        c2 = create_campaign(warm_db, name="camp-2", project_slug="test", mode="exploration")
+        # Record edge using unambiguous prefixes -> canonicalized to full UUIDs.
+        add_campaign_edge(warm_db, c1.id[:8], c2.id[:8])
+        assert get_campaign_parents(warm_db, c1.id) == [c2.id]
+        assert get_campaign_parents(warm_db, c1.id[:8]) == [c2.id]
+        # Reverse edge using prefix vs full UUID is caught as a cycle.
+        with pytest.raises(CycleRejectedError):
+            add_campaign_edge(warm_db, c2.id[:8], c1.id)
+
+        # Insert two runs sharing a prefix to verify ambiguity rejection and unique prefix canonicalization.
+        r_a = "aaaa1111-0000-0000-0000-000000000001"
+        r_b = "aaaa2222-0000-0000-0000-000000000002"
+        r_c = "bbbb1111-0000-0000-0000-000000000003"
+        for rid in (r_a, r_b, r_c):
+            warm_db.execute(
+                "INSERT INTO runs (id, project_slug, command, argv, git_hash, git_branch, git_dirty, "
+                "timestamp, duration_s, exit_code, status, output_paths, tags, schema_version) "
+                "VALUES (?, 'test', 'python x.py', ['python', 'x.py'], 'abc', 'main', false, "
+                "current_timestamp, 1.0, 0, 'completed', [], [], '20')",
+                [rid],
+            )
+        add_run_edge(warm_db, "aaaa1111", "bbbb1111")
+        assert get_run_parents(warm_db, r_a) == [r_c]
+        assert get_run_parents(warm_db, "aaaa1111") == [r_c]
+        with pytest.raises(CycleRejectedError):
+            add_run_edge(warm_db, "bbbb1111", r_a)
+        with pytest.raises(CampaignError, match="Ambiguous"):
+            add_run_edge(warm_db, "aaaa", r_c)
+
+    def test_log_mode_intra_unit_of_work_detects_cycle_without_ingest(
+        self, tmp_catalog: Path, monkeypatch
+    ):
+        from bathos.runlog.emit import unit_of_work
+        from bathos.runlog.mode import cutover_marker_path
+        from bathos.runlog.writer import reset_writers_for_test
+
+        tmp_catalog.mkdir(parents=True, exist_ok=True)
+        cutover_marker_path(tmp_catalog).write_text('{"at":"2026-01-01T00:00:00Z","segments":[]}')
+        monkeypatch.setenv("BTH_LOG_MODE", "1")
+        monkeypatch.setenv("BTH_CATALOG_DIR", str(tmp_catalog))
+        cwd = tmp_catalog.parent
+
+        with unit_of_work(tmp_catalog):
+            add_campaign_edge(None, "A", "B", tmp_catalog, cwd=cwd)
+            add_campaign_edge(None, "B", "C", tmp_catalog, cwd=cwd)
+            assert get_campaign_parents(None, "A", tmp_catalog) == ["B"]
+            with pytest.raises(CycleRejectedError):
+                add_campaign_edge(None, "C", "A", tmp_catalog, cwd=cwd)
+
+            add_run_edge(None, "rA", "rB", tmp_catalog, cwd=cwd)
+            assert get_run_parents(None, "rA", tmp_catalog) == ["rB"]
+            with pytest.raises(CycleRejectedError):
+                add_run_edge(None, "rB", "rA", tmp_catalog, cwd=cwd)
+        reset_writers_for_test()
+
+    def test_mcp_edge_tools_missing_catalog_and_missing_tables_envelopes(
+        self, tmp_catalog: Path
+    ):
+        from bathos.mcp import (
+            add_campaign_edge_tool,
+            add_run_edge_tool,
+            get_campaign_parents_tool,
+            get_run_parents_tool,
+        )
+
+        # Missing bathos.db -> explicit catalog_error + resolution_hint on all 4 tools.
+        tmp_catalog.mkdir(parents=True, exist_ok=True)
+        for fn, kwargs in (
+            (add_campaign_edge_tool, {"child_campaign_id": "a", "parent_campaign_id": "b"}),
+            (get_campaign_parents_tool, {"campaign_id": "a"}),
+            (add_run_edge_tool, {"child_run_id": "a", "parent_run_id": "b"}),
+            (get_run_parents_tool, {"run_id": "a"}),
+        ):
+            res = fn(catalog_dir=str(tmp_catalog), **kwargs)
+            assert res["ok"] is False
+            assert res["error_code"] == "catalog_error"
+            assert res["resolution_hint"]
+
+        # Existing bathos.db lacking campaign_edges / run_edges tables -> CatalogException handled cleanly.
+        con = duckdb.connect(str(tmp_catalog / "bathos.db"))
+        con.execute("CREATE TABLE dummy (id VARCHAR)")
+        con.close()
+
+        g_c = get_campaign_parents_tool(campaign_id="a", catalog_dir=str(tmp_catalog))
+        assert g_c == {"ok": True, "campaign_id": "a", "parents": [], "count": 0}
+        g_r = get_run_parents_tool(run_id="a", catalog_dir=str(tmp_catalog))
+        assert g_r == {"ok": True, "run_id": "a", "parents": [], "count": 0}
+
+        a_c = add_campaign_edge_tool(
+            child_campaign_id="a", parent_campaign_id="b", catalog_dir=str(tmp_catalog)
+        )
+        assert a_c["ok"] is False
+        assert a_c["error_code"] == "catalog_error"
+        assert a_c["resolution_hint"]
+
+        a_r = add_run_edge_tool(
+            child_run_id="a", parent_run_id="b", catalog_dir=str(tmp_catalog)
+        )
+        assert a_r["ok"] is False
+        assert a_r["error_code"] == "catalog_error"
+        assert a_r["resolution_hint"]

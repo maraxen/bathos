@@ -34,7 +34,15 @@ race between the check and the insert within one connection's session.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+
+import duckdb
 
 
 class CampaignEdgeError(Exception):
@@ -45,7 +53,137 @@ class CycleRejectedError(CampaignEdgeError):
     """Adding this edge would create a cycle in the campaign or run DAG."""
 
 
-def _ancestors(db, table: str, child_col: str, parent_col: str, start_id: str) -> set[str]:
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _resolve_edge_node_id(db, table: str, raw_id: str) -> str:
+    """Resolve an unambiguous prefix against `table` (`campaigns` or `runs`), else keep `raw_id`."""
+    if db is None or not raw_id:
+        return raw_id
+    try:
+        exact = db.execute(
+            f"SELECT id FROM {table} WHERE id = ? LIMIT 1",  # noqa: S608 — internal constant
+            [raw_id],
+        ).fetchall()
+        if exact:
+            return exact[0][0]
+        matches = [
+            r[0]
+            for r in db.execute(
+                f"SELECT DISTINCT id FROM {table} WHERE id LIKE ? || '%' ESCAPE '\\'",  # noqa: S608
+                [_escape_like(raw_id)],
+            ).fetchall()
+            if r[0]
+        ]
+    except duckdb.Error:
+        return raw_id
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        from bathos.campaigns import CampaignError
+
+        entity_label = "campaign" if table == "campaigns" else "run"
+        preview = ", ".join(m[:8] for m in sorted(matches))
+        raise CampaignError(f"Ambiguous {entity_label} ID prefix {raw_id!r} matches: {preview}")
+    return raw_id
+
+
+@contextmanager
+def _edge_write_lock(catalog_dir: Path) -> Iterator[None]:
+    """Serialize log-mode cycle checks + `edge.added` emissions across processes."""
+    lock_path = catalog_dir / "edges.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _uningested_edges(
+    read_db,
+    catalog_dir: Path | None,
+    edge_type: str,
+    resolve_table: str,
+    cwd: Path | None = None,
+) -> dict[str, set[str]]:
+    """Read un-ingested `edge.added` / `edge.imported` events past `index.db` watermarks."""
+    if catalog_dir is None:
+        return {}
+    from bathos.runlog.ingest import _read_new_lines, discover_roots
+    from bathos.runlog.resolve import resolve_log_root
+
+    watermarks: dict[tuple[str, str, str], int] = {}
+    if read_db is not None:
+        with contextlib.suppress(duckdb.Error):
+            for rk, rid, fname, off in read_db.execute(
+                "SELECT root_kind, root_id, path, byte_offset FROM ingest_watermarks"
+            ).fetchall():
+                watermarks[(rk, rid, fname)] = int(off or 0)
+
+    roots = list(discover_roots(catalog_dir))
+    seen_dirs = {log_dir.resolve() for _rk, _rid, log_dir in roots if log_dir.exists()}
+    if cwd is not None:
+        with contextlib.suppress(Exception):
+            lr = resolve_log_root(cwd)
+            if not lr.unaffiliated:
+                proj_log_dir = lr.main_root / ".bth" / "log"
+                if proj_log_dir.is_dir() and proj_log_dir.resolve() not in seen_dirs:
+                    roots.append(("project", str(lr.main_root.resolve()), proj_log_dir))
+
+    extra: dict[str, set[str]] = {}
+    for root_kind, root_id, log_dir in roots:
+        if not log_dir.is_dir():
+            continue
+        for seg in sorted(log_dir.glob("*.jsonl")):
+            prev_offset = watermarks.get((root_kind, root_id, seg.name), 0)
+            try:
+                lines, _ = _read_new_lines(seg, prev_offset)
+            except OSError:
+                continue
+            for _off, raw in lines:
+                if not raw.strip():
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict) or obj.get("kind") not in ("edge.added", "edge.imported"):
+                    continue
+                data = obj.get("data") or {}
+                entity = obj.get("entity") or []
+                etype = data.get("type") or (entity[2] if len(entity) > 2 else None)
+                if etype != edge_type:
+                    continue
+                raw_src = data.get("src") or (entity[0] if len(entity) >= 1 else None)
+                raw_dst = data.get("dst") or (entity[1] if len(entity) >= 2 else None)
+                if not isinstance(raw_src, str) or not isinstance(raw_dst, str) or not raw_src or not raw_dst:
+                    continue
+                try:
+                    src = _resolve_edge_node_id(read_db, resolve_table, raw_src)
+                except Exception:
+                    src = raw_src
+                try:
+                    dst = _resolve_edge_node_id(read_db, resolve_table, raw_dst)
+                except Exception:
+                    dst = raw_dst
+                extra.setdefault(src, set()).add(dst)
+    return extra
+
+
+def _ancestors(
+    db,
+    table: str,
+    child_col: str,
+    parent_col: str,
+    start_id: str,
+    extra_edges: dict[str, set[str]] | None = None,
+) -> set[str]:
     """All ancestors of `start_id` (its parents, their parents, ...) via `table`'s
     child->parent edges, by breadth-first traversal."""
     visited: set[str] = set()
@@ -56,7 +194,10 @@ def _ancestors(db, table: str, child_col: str, parent_col: str, start_id: str) -
             f"SELECT {parent_col} FROM {table} WHERE {child_col} = ?",  # noqa: S608 — table/col names are internal constants, never user input
             [current],
         ).fetchall()
-        for (p,) in rows:
+        parents = [p for (p,) in rows]
+        if extra_edges:
+            parents.extend(extra_edges.get(current, ()))
+        for p in parents:
             if p not in visited:
                 visited.add(p)
                 frontier.append(p)
@@ -64,11 +205,19 @@ def _ancestors(db, table: str, child_col: str, parent_col: str, start_id: str) -
 
 
 def _would_create_cycle(
-    db, table: str, child_col: str, parent_col: str, child_id: str, parent_id: str
+    db,
+    table: str,
+    child_col: str,
+    parent_col: str,
+    child_id: str,
+    parent_id: str,
+    extra_edges: dict[str, set[str]] | None = None,
 ) -> bool:
     if child_id == parent_id:
         return True
-    return child_id in _ancestors(db, table, child_col, parent_col, parent_id)
+    return child_id in _ancestors(
+        db, table, child_col, parent_col, parent_id, extra_edges=extra_edges
+    )
 
 
 def _open_read_db(catalog_dir: Path | None):
@@ -104,43 +253,57 @@ def add_campaign_edge(
     """
     from bathos.runlog.emit import emit_or_legacy, unit_of_work
 
-    owns_db = db is None
-    read_db = _open_read_db(catalog_dir) if owns_db else db
-    try:
-        if _would_create_cycle(
-            read_db,
-            "campaign_edges",
-            "child_campaign_id",
-            "parent_campaign_id",
-            child_campaign_id,
-            parent_campaign_id,
-        ):
-            msg = (
-                f"adding edge {child_campaign_id!r} -> {parent_campaign_id!r} would create a "
-                "cycle in the campaign DAG"
+    with unit_of_work(catalog_dir) as log_mode:
+        lock_ctx = (
+            _edge_write_lock(catalog_dir)
+            if log_mode and catalog_dir is not None
+            else contextlib.nullcontext()
+        )
+        with lock_ctx:
+            owns_db = db is None
+            read_db = _open_read_db(catalog_dir) if owns_db else db
+            try:
+                child_id = _resolve_edge_node_id(read_db, "campaigns", child_campaign_id)
+                parent_id = _resolve_edge_node_id(read_db, "campaigns", parent_campaign_id)
+                extra_edges = (
+                    _uningested_edges(read_db, catalog_dir, "campaign", "campaigns", cwd=cwd)
+                    if log_mode and catalog_dir is not None
+                    else None
+                )
+                if _would_create_cycle(
+                    read_db,
+                    "campaign_edges",
+                    "child_campaign_id",
+                    "parent_campaign_id",
+                    child_id,
+                    parent_id,
+                    extra_edges=extra_edges,
+                ):
+                    msg = (
+                        f"adding edge {child_id!r} -> {parent_id!r} would create a "
+                        "cycle in the campaign DAG"
+                    )
+                    raise CycleRejectedError(msg)
+            finally:
+                if owns_db:
+                    read_db.close()
+
+            def _legacy_write() -> None:
+                if db is None:
+                    raise ValueError("Legacy edge insert requires an open writable db connection")
+                db.execute(
+                    "INSERT INTO campaign_edges (child_campaign_id, parent_campaign_id) VALUES (?, ?) "
+                    "ON CONFLICT DO NOTHING",
+                    [child_id, parent_id],
+                )
+
+            emit_or_legacy(
+                kind="edge.added",
+                entity=[child_id, parent_id, "campaign"],
+                data={"src": child_id, "dst": parent_id, "type": "campaign"},
+                legacy_write=_legacy_write,
+                cwd=cwd,
             )
-            raise CycleRejectedError(msg)
-    finally:
-        if owns_db:
-            read_db.close()
-
-    def _legacy_write() -> None:
-        if db is None:
-            raise ValueError("Legacy edge insert requires an open writable db connection")
-        db.execute(
-            "INSERT INTO campaign_edges (child_campaign_id, parent_campaign_id) VALUES (?, ?) "
-            "ON CONFLICT DO NOTHING",
-            [child_campaign_id, parent_campaign_id],
-        )
-
-    with unit_of_work(catalog_dir):
-        emit_or_legacy(
-            kind="edge.added",
-            entity=[child_campaign_id, parent_campaign_id, "campaign"],
-            data={"src": child_campaign_id, "dst": parent_campaign_id, "type": "campaign"},
-            legacy_write=_legacy_write,
-            cwd=cwd,
-        )
 
 
 def get_campaign_parents(
@@ -148,15 +311,22 @@ def get_campaign_parents(
 ) -> list[str]:
     """All recorded parent campaign IDs for `campaign_id`, sorted for a deterministic
     round-trip (insertion order is not preserved by this query)."""
+    from bathos.runlog.mode import is_log_mode
+
     owns_db = db is None
     read_db = _open_read_db(catalog_dir) if owns_db else db
     try:
+        resolved_id = _resolve_edge_node_id(read_db, "campaigns", campaign_id)
         rows = read_db.execute(
             "SELECT parent_campaign_id FROM campaign_edges WHERE child_campaign_id = ? "
             "ORDER BY parent_campaign_id",
-            [campaign_id],
+            [resolved_id],
         ).fetchall()
-        return [r[0] for r in rows]
+        parents = {r[0] for r in rows}
+        if catalog_dir is not None and is_log_mode(catalog_dir):
+            extra = _uningested_edges(read_db, catalog_dir, "campaign", "campaigns")
+            parents |= extra.get(resolved_id, set())
+        return sorted(parents)
     finally:
         if owns_db:
             read_db.close()
@@ -183,48 +353,74 @@ def add_run_edge(
     """
     from bathos.runlog.emit import emit_or_legacy, unit_of_work
 
-    owns_db = db is None
-    read_db = _open_read_db(catalog_dir) if owns_db else db
-    try:
-        if _would_create_cycle(
-            read_db, "run_edges", "child_run_id", "parent_run_id", child_run_id, parent_run_id
-        ):
-            msg = (
-                f"adding edge {child_run_id!r} -> {parent_run_id!r} would create a cycle in the run DAG"
+    with unit_of_work(catalog_dir) as log_mode:
+        lock_ctx = (
+            _edge_write_lock(catalog_dir)
+            if log_mode and catalog_dir is not None
+            else contextlib.nullcontext()
+        )
+        with lock_ctx:
+            owns_db = db is None
+            read_db = _open_read_db(catalog_dir) if owns_db else db
+            try:
+                child_id = _resolve_edge_node_id(read_db, "runs", child_run_id)
+                parent_id = _resolve_edge_node_id(read_db, "runs", parent_run_id)
+                extra_edges = (
+                    _uningested_edges(read_db, catalog_dir, "run", "runs", cwd=cwd)
+                    if log_mode and catalog_dir is not None
+                    else None
+                )
+                if _would_create_cycle(
+                    read_db,
+                    "run_edges",
+                    "child_run_id",
+                    "parent_run_id",
+                    child_id,
+                    parent_id,
+                    extra_edges=extra_edges,
+                ):
+                    msg = (
+                        f"adding edge {child_id!r} -> {parent_id!r} would create a cycle in the run DAG"
+                    )
+                    raise CycleRejectedError(msg)
+            finally:
+                if owns_db:
+                    read_db.close()
+
+            def _legacy_write() -> None:
+                if db is None:
+                    raise ValueError("Legacy edge insert requires an open writable db connection")
+                db.execute(
+                    "INSERT INTO run_edges (child_run_id, parent_run_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                    [child_id, parent_id],
+                )
+
+            emit_or_legacy(
+                kind="edge.added",
+                entity=[child_id, parent_id, "run"],
+                data={"src": child_id, "dst": parent_id, "type": "run"},
+                legacy_write=_legacy_write,
+                cwd=cwd,
             )
-            raise CycleRejectedError(msg)
-    finally:
-        if owns_db:
-            read_db.close()
-
-    def _legacy_write() -> None:
-        if db is None:
-            raise ValueError("Legacy edge insert requires an open writable db connection")
-        db.execute(
-            "INSERT INTO run_edges (child_run_id, parent_run_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-            [child_run_id, parent_run_id],
-        )
-
-    with unit_of_work(catalog_dir):
-        emit_or_legacy(
-            kind="edge.added",
-            entity=[child_run_id, parent_run_id, "run"],
-            data={"src": child_run_id, "dst": parent_run_id, "type": "run"},
-            legacy_write=_legacy_write,
-            cwd=cwd,
-        )
 
 
 def get_run_parents(db, run_id: str, catalog_dir: Path | None = None) -> list[str]:
     """All recorded parent run IDs for `run_id`, sorted for a deterministic round-trip."""
+    from bathos.runlog.mode import is_log_mode
+
     owns_db = db is None
     read_db = _open_read_db(catalog_dir) if owns_db else db
     try:
+        resolved_id = _resolve_edge_node_id(read_db, "runs", run_id)
         rows = read_db.execute(
             "SELECT parent_run_id FROM run_edges WHERE child_run_id = ? ORDER BY parent_run_id",
-            [run_id],
+            [resolved_id],
         ).fetchall()
-        return [r[0] for r in rows]
+        parents = {r[0] for r in rows}
+        if catalog_dir is not None and is_log_mode(catalog_dir):
+            extra = _uningested_edges(read_db, catalog_dir, "run", "runs")
+            parents |= extra.get(resolved_id, set())
+        return sorted(parents)
     finally:
         if owns_db:
             read_db.close()

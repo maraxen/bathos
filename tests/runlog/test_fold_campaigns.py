@@ -667,3 +667,66 @@ def test_import_snapshot_chain_only_highest_ordinal_folds():
 
     # Sanity: the naive (no-dedup) merge really would pick the OTHER value.
     assert sorted([original, updated], key=lambda e: (e["ts"], e["eid"]))[0] is original
+
+
+def test_continuous_popper_extracts_result_values_from_run_finished_and_imported():
+    """Log-mode campaign fold passes numeric result_values from run.finished/run.imported metadata."""
+    import json
+    import math
+
+    cont_sidecar = sidecar_decl(null_rate=0.25, alt_rate=0.75, threshold=20.0)
+    cont_sidecar["popper_continuous"] = {
+        "metric": "score",
+        "null_mean": 0.5,
+        "alt_mean": 0.7,
+        "std": 0.1,
+        "method": "gaussian",
+    }
+    nested_sidecar = sidecar_decl(null_rate=0.25, alt_rate=0.75, threshold=20.0)
+    nested_sidecar["popper_continuous"] = {
+        "metric": "metrics.score",
+        "null_mean": 0.5,
+        "alt_mean": 0.7,
+        "std": 0.1,
+        "method": "gaussian",
+    }
+
+    member_events = {
+        "r-live": [
+            run_started("r-live", T1, "e1", campaign_id="c1", sidecar=cont_sidecar),
+            run_finished("r-live", T2, "e2", outcome="pass", metadata=json.dumps({"score": 0.7})),
+        ],
+        "r-imported": [
+            ev(
+                "run.imported",
+                ["r-imported"],
+                {
+                    "id": "r-imported",
+                    "status": "completed",
+                    "outcome": "pass",
+                    "timestamp": T2,
+                    "campaign_id": "c1",
+                    "sidecar": nested_sidecar,
+                    "metadata": json.dumps({"metrics": {"score": 0.7}}),
+                },
+                T2,
+                "e3",
+                origin="migration",
+            ),
+        ],
+        "r-err": [
+            run_started("r-err", T3, "e4", campaign_id="c1", sidecar=cont_sidecar),
+            run_finished("r-err", T4, "e5", outcome="error", metadata=json.dumps({"score": 0.7})),
+        ],
+    }
+
+    _, campaign_runs = _fold(
+        "c1",
+        [created(mode="sequential")],
+        linked_run_ids={"r-live", "r-imported", "r-err"},
+        member_run_events=member_events,
+    )
+    by_id = {cr["run_id"]: cr["evalue"] for cr in campaign_runs}
+    assert math.isclose(by_id["r-live"], math.exp(2.0), rel_tol=1e-6)
+    assert math.isclose(by_id["r-imported"], math.exp(2.0), rel_tol=1e-6)
+    assert by_id["r-err"] == 1.0

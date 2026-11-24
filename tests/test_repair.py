@@ -1647,3 +1647,91 @@ class TestCampaignEventLogBackfill:
         assert row == ("45babe92", "sequential", "concluded", "repo")
         assert bogus is None
         assert cr_rows == [("45babe92", "run-seq")]
+
+    def test_backfills_phantom_before_ingest_with_uningested_run_added_and_counts_deleted(
+        self, tmp_path: Path
+    ):
+        """Regression: un-ingested campaign.run_added must not trigger reconcile_campaign_runs
+        deletion before emitting reconstructed campaign.created, and deleted_phantom_campaigns is accurate."""
+        from bathos.index import connect_read, index_db_path
+        from bathos.runlog.envelope import build_envelope
+        from bathos.runlog.ingest import reconcile_index_campaign_runs, run_ingest
+
+        repo, pid, catalog = self._setup_log_repo(tmp_path)
+        common = {
+            "main_root": repo,
+            "worktree_root": repo,
+            "project": "repo",
+            "project_id": pid,
+            "writer": "w1",
+        }
+        log_dir = repo / ".bth" / "log"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "seg1.jsonl").write_text(
+            json.dumps(
+                build_envelope(
+                    kind="run.started",
+                    entity=["run-added-only"],
+                    data={"project_slug": "repo", "timestamp": "2026-01-01T00:01:00Z"},
+                    seq=1,
+                    ts="2026-01-01T00:01:00Z",
+                    eid="e-run-1",
+                    **common,
+                )
+            )
+            + "\n"
+        )
+        run_ingest(catalog)
+
+        # Plant phantom `camp-ra` with NO campaign.created, plus an un-ingested campaign.run_added on disk.
+        con = duckdb.connect(str(index_db_path(catalog)))
+        con.execute("INSERT INTO campaigns (id, mode) VALUES ('camp-ra', NULL)")
+        con.execute("INSERT INTO campaign_runs VALUES ('camp-ra', 'run-added-only', NULL, NULL)")
+        con.execute("CHECKPOINT")
+        con.close()
+
+        (log_dir / "seg2.jsonl").write_text(
+            json.dumps(
+                build_envelope(
+                    kind="campaign.run_added",
+                    entity=["camp-ra", "run-added-only"],
+                    data={
+                        "campaign_id": "camp-ra",
+                        "run_id": "run-added-only",
+                        "sidecar": {
+                            "kind": "experiment",
+                            "result_schema": {},
+                            "outcomes": {},
+                            "popper_stopping_threshold": 20.0,
+                        },
+                    },
+                    seq=2,
+                    ts="2026-01-01T00:02:00Z",
+                    eid="e-ra-1",
+                    **common,
+                )
+            )
+            + "\n"
+        )
+
+        applied = repair(catalog, tier="warm", dry_run=False)
+        assert any("1 backfilled from event logs" in a.detail for a in applied.actions)
+
+        con = connect_read(catalog)
+        try:
+            row = con.execute("SELECT id, mode FROM campaigns WHERE id = 'camp-ra'").fetchone()
+            cr_rows = con.execute(
+                "SELECT campaign_id, run_id FROM campaign_runs WHERE campaign_id = 'camp-ra'"
+            ).fetchall()
+        finally:
+            con.close()
+        assert row == ("camp-ra", "sequential")
+        assert cr_rows == [("camp-ra", "run-added-only")]
+
+        # Direct check on DuckDB DELETE rowcount fix for unbacked phantoms.
+        con = duckdb.connect(str(index_db_path(catalog)))
+        con.execute("INSERT INTO campaigns (id, mode) VALUES ('unbacked-1', NULL)")
+        con.execute("CHECKPOINT")
+        con.close()
+        counts = reconcile_index_campaign_runs(catalog)
+        assert counts["deleted_phantom_campaigns"] == 1

@@ -992,3 +992,39 @@ def test_reproduction_prerequisite_exact_stem_and_hashpin_warm_and_cool(tmp_path
     assert check_reproduction_prerequisite(f"baseline@sha256:{other_sha}", warm_only) is False
     assert check_reproduction_prerequisite("baseline", warm_only, expected_script_sha256=good_sr_sha) is True
     assert check_reproduction_prerequisite("baseline", warm_only, expected_script_sha256=other_sha) is False
+
+
+def test_extract_script_token_wrappers_and_sidecar_stem_bypass():
+    """Wrapper value args resolve properly and --sidecar cannot bypass a mismatched script stem."""
+    from bathos.prereg import _extract_script_token, _matches_exact_stem
+
+    assert _extract_script_token("timeout 60 python scripts/experiments/baseline.py") == "scripts/experiments/baseline.py"
+    assert _extract_script_token("timeout -k 5 60s python baseline.py") == "baseline.py"
+    assert _extract_script_token("nice -n 10 python baseline.py") == "baseline.py"
+    assert _extract_script_token("env -u FOO BAR=/tmp/x python baseline.py") == "baseline.py"
+    assert _extract_script_token("python -u baseline.py") == "baseline.py"
+
+    # Wrapper commands match target stem cleanly.
+    assert _matches_exact_stem("baseline", command="timeout 60 python baseline.py") is True
+    assert _matches_exact_stem("baseline", command="nice -n 10 python baseline.py") is True
+    assert _matches_exact_stem("baseline", command="env -u FOO python baseline.py") is True
+
+    # --sidecar baseline.bth.toml with a different script token must NOT pass stem gate.
+    assert (
+        _matches_exact_stem(
+            "baseline",
+            command="bth run --sidecar scripts/experiments/baseline.bth.toml -- python scripts/experiments/rogue.py",
+            argv=["python", "scripts/experiments/rogue.py"],
+            sidecar_path="scripts/experiments/baseline.bth.toml",
+        )
+        is False
+    )
+    # Sidecar-only fallback still matches when no script token exists (e.g. python -c / empty argv).
+    assert (
+        _matches_exact_stem(
+            "baseline",
+            command="python -c 'print(1)'",
+            sidecar_path="scripts/experiments/baseline.bth.toml",
+        )
+        is True
+    )

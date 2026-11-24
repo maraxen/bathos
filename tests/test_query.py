@@ -783,3 +783,24 @@ def test_outcome_provenance_and_index_row_override_normalization():
     )
     assert hydrated.postmortem_verdict_override == "none"
     assert hydrated.postmortem_status == "unassigned"
+
+
+def test_run_from_index_row_treats_empty_timestamp_as_missing():
+    from datetime import datetime
+
+    from bathos.query import _run_from_index_row
+
+    hydrated = _run_from_index_row(
+        {
+            "id": "idx-empty-ts",
+            "project_slug": "p",
+            "command": "python x.py",
+            "argv": '["python", "x.py"]',
+            "git_hash": "abc",
+            "git_branch": "main",
+            "git_dirty": False,
+            "timestamp": "",
+        }
+    )
+    assert isinstance(hydrated.timestamp, datetime)
+    assert hydrated.timestamp.tzinfo is not None

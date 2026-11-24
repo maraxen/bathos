@@ -915,3 +915,69 @@ def test_auto_reap_stale_runs_safe_defaults_and_slurm_only(temp_catalog, monkeyp
     assert by_id["run_local"].status == "running"
     ledger = read_reap_ledger(temp_catalog)
     assert ledger["run_term"]["reason"] == "sacct:OUT_OF_MEMORY (exit=0:125)"
+
+
+def test_reap_array_job_multiline_sacct_and_transient_states_not_reaped(temp_catalog, monkeypatch):
+    """Array jobs with any active task row and COMPLETING/SUSPENDED/REQUEUED/STAGE_OUT must not reap."""
+    from bathos.reap import auto_reap_stale_runs, reap_runs
+
+    array_run = create_run("run_array", age_hours=30, status="running", slurm_job_id="9001")
+    transient_states = ["COMPLETING", "SUSPENDED", "REQUEUED", "STAGE_OUT"]
+    transient_runs = [
+        create_run(f"run_{st.lower()}", age_hours=30, status="running", slurm_job_id=f"910{i}")
+        for i, st in enumerate(transient_states)
+    ]
+    write_run(array_run, temp_catalog)
+    for r in transient_runs:
+        write_run(r, temp_catalog)
+
+    def mock_run(cmd, *_args, **_kwargs):
+        if "9001" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "COMPLETED|0:0\nRUNNING|0:0\n", "")
+        for i, st in enumerate(transient_states):
+            if f"910{i}" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, f"{st}|0:0\n", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr("subprocess.run", mock_run)
+
+    candidates, skipped = reap_runs(temp_catalog, older_than_h=24, dry_run=True, apply=False)
+    assert candidates == []
+    assert {r.id: reason for r, reason in skipped} == {
+        "run_array": "slurm_nonterminal",
+        **{f"run_{st.lower()}": "slurm_nonterminal" for st in transient_states},
+    }
+    auto_cands, _ = auto_reap_stale_runs(temp_catalog)
+    assert auto_cands == []
+
+
+def test_reap_naive_timestamp_and_tightened_live_process_check(temp_catalog, monkeypatch):
+    """Naive timestamps do not raise TypeError, and generic launchers/self-PID do not block local reaping."""
+    import os
+    import socket
+
+    from bathos.reap import _is_live_process_on_host, reap_runs
+
+    this_host = socket.gethostname()
+    naive_old = create_run("run_naive", age_hours=30, status="running", hostname=this_host)
+    naive_old.timestamp = (datetime.now(UTC) - timedelta(hours=30)).replace(tzinfo=None)
+    naive_old.argv = ["python3", "scripts/experiments/missing_orphan_job.py"]
+    write_run(naive_old, temp_catalog)
+
+    # Simulate ps aux containing an unrelated python3 process and our own PID with the same argv.
+    my_pid = os.getpid()
+    ps_stdout = (
+        "USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND\n"
+        f"u {my_pid} 0.0 0.0 100 100 ? S 00:00 0:00 python3 scripts/experiments/missing_orphan_job.py\n"
+        "u 999999 0.0 0.0 100 100 ? S 00:00 0:00 python3 -m pytest\n"
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_a, **_kw: subprocess.CompletedProcess(["ps", "aux"], 0, ps_stdout, ""),
+    )
+
+    assert _is_live_process_on_host(this_host, ["python3"]) is False
+    assert _is_live_process_on_host(this_host, naive_old.argv) is False
+
+    candidates, _ = reap_runs(temp_catalog, older_than_h=24, dry_run=True, apply=False)
+    assert [c.id for c in candidates] == ["run_naive"]

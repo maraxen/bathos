@@ -32,10 +32,89 @@ holds) and play no role in this module's own `stopping_threshold` output.
 
 from __future__ import annotations
 
+import json
+import math
 from typing import Any
 
 from bathos.runlog.fold_merge import dedup_import_snapshots, import_precedence_key, is_empty
 from bathos.runlog.fold_runs import fold_run
+
+_INTERNAL_METADATA_KEYS = frozenset(
+    {
+        "requires_waiver",
+        "derived_from_observation",
+        "holdout",
+        "holdout_verified",
+        "sanity_check",
+        "outcome_values",
+        "run_label",
+        "metadata",
+    }
+)
+
+
+def _parse_metadata_dict(raw_meta: object) -> dict[str, Any]:
+    if isinstance(raw_meta, dict):
+        return raw_meta
+    if isinstance(raw_meta, str) and raw_meta.strip():
+        try:
+            parsed = json.loads(raw_meta)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {}
+
+
+def _extract_numeric_outcome_values(result: object) -> dict[str, int | float]:
+    """Mirror `runner.extract_numeric_outcome_values` without importing `runner`."""
+    if not isinstance(result, dict):
+        return {}
+    extracted: dict[str, int | float] = {}
+
+    def _walk(obj: dict[str, Any], prefix: str = "") -> None:
+        for key, val in obj.items():
+            if not prefix and key in _INTERNAL_METADATA_KEYS:
+                continue
+            dotted = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(val, dict):
+                _walk(val, dotted)
+            elif isinstance(val, bool):
+                continue
+            elif isinstance(val, int) or (isinstance(val, float) and math.isfinite(val)):
+                extracted[dotted] = val
+
+    _walk(result)
+    return extracted
+
+
+def _extract_run_result_values(run_events: list[dict]) -> dict[str, int | float] | None:
+    """Extract numeric result_values from a run's `run.finished` / `run.imported` metadata."""
+    if not run_events:
+        return None
+    events = dedup_import_snapshots(run_events)
+    finished = sorted(
+        (ev for ev in events if ev.get("kind") == "run.finished"),
+        key=lambda ev: (1 if ev.get("origin", "live") == "live" else 0, ev.get("ts", ""), ev.get("eid", "")),
+        reverse=True,
+    )
+    imported = sorted(
+        (ev for ev in events if ev.get("kind") == "run.imported"),
+        key=import_precedence_key,
+    )
+    for ev in (*finished, *imported):
+        raw_meta = (ev.get("data") or {}).get("metadata")
+        parsed = _parse_metadata_dict(raw_meta)
+        if not parsed:
+            continue
+        extracted = _extract_numeric_outcome_values(parsed)
+        if not extracted and isinstance(parsed.get("outcome_values"), dict):
+            nested_vals = parsed["outcome_values"].get("values")
+            if isinstance(nested_vals, dict):
+                extracted = _extract_numeric_outcome_values(nested_vals)
+        if extracted:
+            return extracted
+    return None
 
 NEUTRAL_OUTCOMES = frozenset({"error", "unknown", None, ""})
 
@@ -335,7 +414,16 @@ def fold_campaign(
                 decl = ra_decl
         sidecar_obj = _sidecar_from_declaration(decl)
         if sidecar_obj is not None:
-            evalue = compute_evalue(sidecar_obj, outcome or "unknown")
+            result_values = (
+                _extract_run_result_values(member_run_events.get(run_id, []))
+                if sidecar_obj.popper_continuous is not None
+                else None
+            )
+            evalue = compute_evalue(
+                sidecar_obj,
+                outcome or "unknown",
+                result_values=result_values,
+            )
             threshold_candidate = sidecar_obj.popper_stopping_threshold
         else:
             evalue = imported_evalue.get(run_id)

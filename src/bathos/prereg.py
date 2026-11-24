@@ -384,6 +384,42 @@ def check_component_sidecar_drift(
 _STEM_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUNNER_WRAPPER_EXECUTABLES = frozenset({"env", "timeout", "nice", "taskset", "stdbuf", "ionice", "numactl", "nohup", "setsid"})
 _RUNNER_INTERPRETERS = frozenset({"python", "python3", "uv", "run", "bash", "sh"})
+_WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "timeout": frozenset({"-k", "--kill-after", "-s", "--signal"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "env": frozenset(
+        {
+            "-u",
+            "--unset",
+            "-C",
+            "--chdir",
+            "-S",
+            "--split-string",
+            "-a",
+            "--argv0",
+            "--block-signal",
+            "--default-signal",
+            "--ignore-signal",
+        }
+    ),
+    "taskset": frozenset({"-c", "--cpu-list", "-p", "--pid"}),
+    "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"}),
+    "numactl": frozenset(
+        {
+            "-C",
+            "--physcpubind",
+            "-N",
+            "--cpunodebind",
+            "-m",
+            "--membind",
+            "-p",
+            "--preferred",
+            "-i",
+            "--interleave",
+        }
+    ),
+}
 _RUNNER_VALUE_FLAGS = frozenset(
     {
         "-c",
@@ -443,6 +479,46 @@ def _parse_requires_pass_spec(requires_pass_stem: str) -> tuple[str, str | None,
     return stem_part.strip(), pin, malformed
 
 
+def _is_env_assignment(tok: str) -> bool:
+    if "=" not in tok or tok.endswith(".py"):
+        return False
+    name, _, _ = tok.partition("=")
+    return bool(name) and "/" not in name and "\\" not in name and not name.startswith(".")
+
+
+def _advance_wrapper_args(base: str, tokens: list[str], i: int) -> int:
+    """Advance index past wrapper executable `tokens[i]` and its wrapper-specific args."""
+    value_flags = _WRAPPER_VALUE_FLAGS.get(base, frozenset())
+    i += 1
+    saw_taskset_mask = False
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in value_flags:
+            if base == "taskset" and tok in ("-c", "--cpu-list", "-p", "--pid"):
+                saw_taskset_mask = True
+            i += 2
+            continue
+        if base == "env" and (tok == "-" or _is_env_assignment(tok)):
+            i += 1
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        if base == "timeout":
+            # Consume timeout's positional DURATION argument, then hand off to command.
+            i += 1
+            break
+        if base == "taskset" and not saw_taskset_mask:
+            # Consume taskset's positional hex/int CPU mask when -c/-p was not passed.
+            i += 1
+            break
+        break
+    return i
+
+
 def _extract_script_token(command: str, argv: object = None) -> str | None:
     """Return the executed script token from ``argv`` or ``command`` (skipping flags/wrappers)."""
     tokens: list[str] = []
@@ -472,7 +548,7 @@ def _extract_script_token(command: str, argv: object = None) -> str | None:
             i += 1
             continue
         if base in _RUNNER_WRAPPER_EXECUTABLES:
-            i += 1
+            i = _advance_wrapper_args(base, tokens, i)
             continue
         if base in _RUNNER_INTERPRETERS or base.startswith("python3."):
             i += 1
@@ -483,7 +559,7 @@ def _extract_script_token(command: str, argv: object = None) -> str | None:
         if tok.startswith("-"):
             i += 1
             continue
-        if "=" in tok and not tok.endswith(".py") and "/" not in tok and "\\" not in tok:
+        if _is_env_assignment(tok):
             i += 1
             continue
         return tok
@@ -504,6 +580,17 @@ def _matches_exact_stem(
     has_sep = "/" in norm_stem
     target_stem = norm_stem[:-3] if norm_stem.endswith(".py") else norm_stem
 
+    script_tok = _extract_script_token(command, argv)
+    if script_tok:
+        tok_norm = script_tok.replace("\\", "/").strip()
+        if has_sep:
+            tok_no_ext = tok_norm[:-3] if tok_norm.endswith(".py") else tok_norm
+            return tok_no_ext == target_stem or tok_no_ext.endswith("/" + target_stem)
+
+        tok_name = tok_norm.rsplit("/", 1)[-1]
+        tok_stem = Path(tok_name).stem
+        return tok_stem == target_stem
+
     if sidecar_path:
         sp_norm = sidecar_path.replace("\\", "/").strip()
         sp_name = sp_norm.rsplit("/", 1)[-1]
@@ -517,17 +604,7 @@ def _matches_exact_stem(
         elif sp_stem == target_stem:
             return True
 
-    script_tok = _extract_script_token(command, argv)
-    if not script_tok:
-        return False
-    tok_norm = script_tok.replace("\\", "/").strip()
-    if has_sep:
-        tok_no_ext = tok_norm[:-3] if tok_norm.endswith(".py") else tok_norm
-        return tok_no_ext == target_stem or tok_no_ext.endswith("/" + target_stem)
-
-    tok_name = tok_norm.rsplit("/", 1)[-1]
-    tok_stem = Path(tok_name).stem
-    return tok_stem == target_stem
+    return False
 
 
 def _matches_hash_pins(
