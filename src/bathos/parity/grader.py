@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 
 from bathos.archived_items import read_archived_item_fragments
-from bathos.catalog import read_runs, write_run
+from bathos.catalog import write_run
 from bathos.config import default_catalog_dir
 from bathos.git import capture_git_state
 from bathos.parity.axes import RING0_ACTIVE_G_CODES, compute_axes_and_clauses
@@ -57,6 +57,7 @@ from bathos.parity.store import (
     require_parity_store,
     resolve_start_dir,
 )
+from bathos.query import AmbiguousRunId, _fold_once, _resolve_backend, get_run
 from bathos.schema import Run
 from bathos.validity import ValidityResult, resolve_validity
 from bathos.workspace import resolve_workspace
@@ -119,12 +120,24 @@ def _hook_identity(hook: CellOverlayHook) -> str:
     return f"{mod}:{qual}" if mod else str(qual)
 
 
-def _load_runs_by_id(catalog_dir: Path | None) -> dict[str, Run]:
-    if catalog_dir is None or not catalog_dir.exists():
+def _load_runs_by_id(catalog_dir: Path | None, run_ids: Sequence[str]) -> dict[str, Run]:
+    if catalog_dir is None or not catalog_dir.exists() or not run_ids:
         return {}
     by_id: dict[str, Run] = {}
-    for run in read_runs(catalog_dir):
-        by_id[run.id] = run
+    ingest_state: dict[str, Any] = {}
+    backend = _resolve_backend(catalog_dir)
+    for rid in dict.fromkeys(str(r) for r in run_ids if r):
+        try:
+            run = get_run(rid, catalog_dir, allow_cool_fallback=True, include_superseded=True)
+        except AmbiguousRunId:
+            run = None
+        if run is None and backend == "index" and _fold_once(catalog_dir, ingest_state):
+            try:
+                run = get_run(rid, catalog_dir, allow_cool_fallback=True, include_superseded=True)
+            except AmbiguousRunId:
+                run = None
+        if run is not None and run.id == rid:
+            by_id[rid] = run
     return by_id
 
 
@@ -878,7 +891,7 @@ def _build_result_payload(
             if rid not in referenced_run_ids:
                 referenced_run_ids.append(rid)
 
-    runs_by_id = _load_runs_by_id(catalog_dir)
+    runs_by_id = _load_runs_by_id(catalog_dir, referenced_run_ids)
     known_run_ids = [rid for rid in referenced_run_ids if rid in runs_by_id]
     validity_by_id: dict[str, ValidityResult] = {}
     if known_run_ids and catalog_dir is not None:

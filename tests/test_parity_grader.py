@@ -1280,3 +1280,59 @@ class TestMinimalGraderAndNCs:
         monkeypatch.setattr("bathos.parity.grader.read_archived_item_fragments", _boom)
         with pytest.raises(RuntimeError, match="corrupt archived_items ledger"):
             grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cool_cat, evidence_run_ids=["r-s4"], track_run=False)
+
+    def test_exact_run_lookup_skips_mixed_timestamp_cool_fragments_and_rejects_prefixes(self, tmp_path: Path) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        _repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+
+        full_rid = "run-exact-1234567890"
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id=full_rid, exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        compact(cat)
+
+        # Drop an unrelated legacy fragment whose `timestamp` column is string instead of timestamp[us, tz=UTC]
+        legacy_dir = cat / "runs" / "legacy-other"
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table({"id": ["old-run"], "timestamp": ["2025-01-01T00:00:00Z"]}),
+            legacy_dir / "run_old.parquet",
+        )
+
+        # Prefix of an existing run_id must NOT match (treated as unknown -> not_run)
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="run-exact",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_prefix = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["run-exact"], track_run=False
+        )
+        assert g_prefix.result["cells"][0]["verdict"] == "not_run"
+
+        # Exact run_id resolves cleanly from warm/index catalog despite incompatible cool fragment
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id=full_rid,
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_ok = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=[full_rid], as_of="2026-11-24T12:00:00Z", track_run=False
+        )
+        assert g_ok.result["cells"][0]["verdict"] == "pass"
+        assert grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=[full_rid], verify=True
+        ).verified is True
