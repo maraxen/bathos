@@ -180,6 +180,7 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     BEARINGS_AC9_LABEL_INVALID = "bearings_ac9_label_invalid"
     BEARINGS_SHADOW_CONFIG_INVALID = "bearings_shadow_config_invalid"
     CITATION_INVALID = "citation_invalid"
+    GATE_LADDER_CONFIG_INVALID = "gate_ladder_config_invalid"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -306,6 +307,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.BEARINGS_AC9_LABEL_INVALID: "A sidecar label names no charter purpose or cannot be read; fix the label or the charter before scoring AC-9",
     BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID: "Fix shadow_log_dir (BTH_SHADOW_LOG_DIR, [bearings] in .bth.toml, [tool.bathos.bearings] in pyproject.toml, or [bearings] in ~/.config/bathos/config.toml); the file must parse, the key must be a string, and the path must be outside the project work tree",
     BathosErrorCode.CITATION_INVALID: "Verify that <sources_dir>/manifest.json digests, .numbered.txt coordinates, and blockquote text match the source extracts.",
+    BathosErrorCode.GATE_LADDER_CONFIG_INVALID: "Fix the WP17 gate mode-state TOML or family corpus config: ensure min_labels, min_precision_lower_bound, min_recall_lower_bound, threshold_basis, writes_isolated=true, and writes_isolated_enforced_by are present.",
 }
 
 
@@ -527,6 +529,8 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "SealedDumpError": BathosErrorCode.CATALOG_ERROR,
     "ParityStoreConfigError": BathosErrorCode.INVALID_PARAM,
     "ParityStoreUnavailableError": BathosErrorCode.CATALOG_ERROR,
+    # Parity Ring 1 WP17 gate ladder kit
+    "GateLadderConfigError": BathosErrorCode.GATE_LADDER_CONFIG_INVALID,
 }
 
 

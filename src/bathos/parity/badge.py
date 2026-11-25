@@ -253,6 +253,14 @@ def _pairing_summary(report_body: Mapping[str, Any]) -> str:
     return "mixed"
 
 
+def _evidence_token(ev_level: str) -> str:
+    if ev_level == "reexecuted":
+        return "reexecuted"
+    if ev_level == "none":
+        return "no evidence"
+    return "self-reported"
+
+
 def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
     quals: list[str] = []
     parity_meta = report_body.get("parity_metadata", {})
@@ -301,13 +309,19 @@ def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
     if parity_meta.get("weights_attested_only"):
         quals.append("weights attested-only")
 
+    sup_cnt = int(parity_meta.get("superseded_runs_count") or 0)
+    if sup_cnt > 0:
+        quals.append(f"superseded runs ({sup_cnt})")
+
     if tool.get("third_party"):
         quals.append("kinds declared by us")
     if parity_meta.get("control"):
         quals.append("control")
+    if parity_meta.get("legacy"):
+        quals.append("legacy")
 
     ev_level = str(report_body.get("evidence_level", "self_reported"))
-    quals.append("reexecuted" if ev_level == "reexecuted" else "self-reported")
+    quals.append(_evidence_token(ev_level))
     if parity_meta.get("reference_self_reported"):
         quals.append("reference self-reported")
 
@@ -405,7 +419,7 @@ def render_t0(report_body: Mapping[str, Any], h1_full: str) -> str:
         parts.append("owner-stated tolerance")
 
     ev_level = str(report_body.get("evidence_level", "self_reported"))
-    parts.append("reexecuted" if ev_level == "reexecuted" else "self-reported")
+    parts.append(_evidence_token(ev_level))
     if parity_meta.get("reference_self_reported"):
         parts.append("reference self-reported")
 
@@ -493,7 +507,7 @@ def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str
             errors.append("T1 missing 'owner-stated tolerance' qualifier")
 
     ev_level = str(report_body.get("evidence_level", "self_reported"))
-    expected_ev_tok = "reexecuted" if ev_level == "reexecuted" else "self-reported"
+    expected_ev_tok = _evidence_token(ev_level)
     if expected_ev_tok not in t0_segs:
         errors.append(f"T0 missing evidence level token {expected_ev_tok!r}")
     if expected_ev_tok not in t1_segs:
@@ -505,6 +519,15 @@ def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str
             errors.append("T1 missing 'reference self-reported' qualifier")
     if parity_meta.get("weights_attested_only") and "weights attested-only" not in t1_segs:
         errors.append("T1 missing 'weights attested-only' qualifier")
+    sup_cnt = int(parity_meta.get("superseded_runs_count") or 0)
+    if sup_cnt > 0:
+        expected_sup_tok = f"superseded runs ({sup_cnt})"
+        if expected_sup_tok not in t1_segs:
+            errors.append(f"T1 missing {expected_sup_tok!r} qualifier")
+        if any(s.startswith("superseded runs (") for s in t0_segs):
+            errors.append("T0 must not contain 'superseded runs (k)' qualifier")
+    if parity_meta.get("legacy") and "legacy" not in t1_segs:
+        errors.append("T1 missing 'legacy' qualifier")
 
     clauses = report_body.get("clauses", [])
     split_cov = _clauses_differ_in_cell_coverage(clauses)

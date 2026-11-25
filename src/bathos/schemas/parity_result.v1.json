@@ -146,6 +146,10 @@
     },
     "amendments": { "type": "array" },
     "dual_display_result": { "type": ["object", "null"] },
+    "superseded_run_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "prior_records_on_pair": { "type": "integer", "minimum": 0 },
     "bundle_sha256": { "type": ["string", "null"] },
     "badge": {

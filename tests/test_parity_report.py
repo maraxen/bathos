@@ -967,3 +967,150 @@ class TestReportCoreAndDisclosureTiers:
         assert rep_local["parity_metadata"]["weights_attested_only"] is False
         assert "weights attested-only" not in rep_local["badge"]["t1"].split(" · ")
         assert "weights attested-only" not in rep_local["badge"]["t0"].split(" · ")
+
+    def test_item_c_evidence_level_propagation_and_none_badge(self, tmp_path: Path) -> None:
+        # 1. Manifest carrying evidence_level="reexecuted" propagates without overlay hooks
+        (tmp_path / "reexec").mkdir()
+        decl_path, _res_path, store_dir, cat_dir = _build_graded_fixture(
+            tmp_path / "reexec", run_evidence=False
+        )
+        decl = tomllib.loads(decl_path.read_text(encoding="utf-8"))
+        cid = _cell_id(decl)
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-reexec-manifest",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat_dir,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-report-v1",
+            cell_id=cid,
+            run_id="r-reexec-manifest",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            evidence_level="reexecuted",
+        )
+        g_re = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False
+        )
+        assert g_re.result["cells"][0]["evidence_level"] == "reexecuted"
+        _, rep_re = build_parity_report(g_re.result_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir)
+        assert rep_re["evidence_level"] == "reexecuted"
+        assert "reexecuted" in rep_re["badge"]["t0"].split(" · ")
+        assert "reexecuted" in rep_re["badge"]["t1"].split(" · ")
+
+        # 2. All-not_run record (evidence_level == "none") prints 'no evidence', never 'self-reported'
+        (tmp_path / "none").mkdir()
+        d_none, r_none, st_none, cat_none = _build_graded_fixture(tmp_path / "none", run_evidence=False)
+        _, rep_none = build_parity_report(r_none, decl_path=d_none, parity_store=st_none, catalog_dir=cat_none)
+        assert rep_none["evidence_level"] == "none"
+        t0_none = rep_none["badge"]["t0"].split(" · ")
+        t1_none = rep_none["badge"]["t1"].split(" · ")
+        assert "no evidence" in t0_none
+        assert "no evidence" in t1_none
+        assert "self-reported" not in t0_none
+        assert "self-reported" not in t1_none
+        body_none = {k: v for k, v in rep_none.items() if k != "badge"}
+        bad_t0 = " · ".join("self-reported" if s == "no evidence" else s for s in t0_none)
+        errs = validate_badge(bad_t0, rep_none["badge"]["t1"], body_none)
+        assert any("no evidence" in e for e in errs)
+
+    def test_item_d_report_requires_grader_version(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        decl_path, res_path, store_dir, cat_dir = _build_graded_fixture(tmp_path)
+        monkeypatch.setattr("bathos.parity.report.grade_parity_record", lambda *_a, **_k: None)
+        res_obj = json.loads(res_path.read_text(encoding="utf-8"))
+        for bad_ver in (None, "", "   "):
+            mut = dict(res_obj)
+            if bad_ver is None:
+                mut.pop("grader_version", None)
+            else:
+                mut["grader_version"] = bad_ver
+            mut_path = tmp_path / "no_ver.parity.result.json"
+            mut_path.write_text(json.dumps(mut, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            with pytest.raises(ParityReportVerifyError, match="grader_version"):
+                build_parity_report(mut_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir)
+
+    def test_item_e_superseded_runs_t1_qualifier(self, tmp_path: Path) -> None:
+        from datetime import UTC, datetime
+
+        from bathos.compact import compact
+        from bathos.supersession import add_supersession_edge
+
+        decl_path, _res_path, store_dir, cat_dir = _build_graded_fixture(tmp_path, run_evidence=False)
+        decl = tomllib.loads(decl_path.read_text(encoding="utf-8"))
+        cid = _cell_id(decl)
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-fail-e",
+                timestamp=datetime(2026, 11, 25, 9, 0, tzinfo=UTC),
+                exit_code=1,
+                status="failed",
+                outcome="fail",
+            ),
+            cat_dir,
+        )
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-pass-e",
+                timestamp=datetime(2026, 11, 25, 10, 0, tzinfo=UTC),
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat_dir,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-report-v1",
+            cell_id=cid,
+            run_id="r-fail-e",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-report-v1",
+            cell_id=cid,
+            run_id="r-pass-e",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        compact(cat_dir)
+        add_supersession_edge("run", "r-fail-e", "run", "r-pass-e", "retried after transient failure", catalog_dir=cat_dir)
+        graded = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        _, rep = build_parity_report(graded.result_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir)
+        assert rep["parity_metadata"]["superseded_runs_count"] == 1
+        t0_segs = rep["badge"]["t0"].split(" · ")
+        t1_segs = rep["badge"]["t1"].split(" · ")
+        assert "superseded runs (1)" in t1_segs
+        assert not any(s.startswith("superseded runs (") for s in t0_segs)
+        body = {k: v for k, v in rep.items() if k != "badge"}
+        t1_missing = " · ".join(s for s in t1_segs if s != "superseded runs (1)")
+        assert any("superseded runs (1)" in e for e in validate_badge(rep["badge"]["t0"], t1_missing, body))

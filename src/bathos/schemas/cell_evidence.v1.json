@@ -80,6 +80,7 @@
     },
     "compared_calls": { "type": "array" },
     "witnesses": { "type": "object" },
+    "evidence_level": { "type": "string", "enum": ["self_reported", "reexecuted"] },
     "created_at": { "type": "string" }
   }
 }

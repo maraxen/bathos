@@ -48,7 +48,9 @@
       "type": "object",
       "properties": {
         "reference_self_reported": { "type": "boolean" },
-        "weights_attested_only": { "type": "boolean" }
+        "weights_attested_only": { "type": "boolean" },
+        "superseded_runs_count": { "type": "integer", "minimum": 0 },
+        "legacy": { "type": "boolean" }
       }
     },
     "tool": { "type": "object", "required": ["name", "repo", "revision", "licence"] },

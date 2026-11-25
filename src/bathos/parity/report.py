@@ -287,6 +287,7 @@ def build_parity_report(
     decl_path: Path | str | None = None,
     parity_store: Path | str | None = None,
     catalog_dir: Path | str | None = None,
+    mode_state_dir: Path | str | None = None,
     evidence_run_ids: Sequence[str] | None = None,
     cell_runs: Mapping[str, Sequence[str]] | None = None,
     overlay_hooks: Sequence[CellOverlayHook] = (),
@@ -318,6 +319,7 @@ def build_parity_report(
         dpath,
         parity_store=parity_store,
         catalog_dir=catalog_dir,
+        mode_state_dir=mode_state_dir,
         evidence_run_ids=evidence_run_ids,
         cell_runs=cell_runs,
         output_path=rpath,
@@ -338,6 +340,13 @@ def build_parity_report(
     weights_attested_only = isinstance(weights_sec, Mapping) and str(
         weights_sec.get("source_checkpoint_status", "")
     ).strip().startswith("attested_only")
+    superseded_ids = result.get("superseded_run_ids")
+    superseded_runs_count = (
+        len(superseded_ids)
+        if isinstance(superseded_ids, Sequence) and not isinstance(superseded_ids, (str, bytes))
+        else int(result.get("cell_counts", {}).get("superseded_runs") or 0)
+    )
+    is_legacy = bool(result.get("legacy") or parity_sec.get("legacy"))
     tolerances = declaration.get("tolerance", [])
     has_owner_stated_tol = any(t.get("basis") == "owner_stated" for t in tolerances)
     impl_rev = str(
@@ -377,6 +386,12 @@ def build_parity_report(
             "has_owner_stated_tolerance": has_owner_stated_tol,
             "reference_self_reported": reference_self_reported,
             "weights_attested_only": weights_attested_only,
+            **(
+                {"superseded_runs_count": superseded_runs_count}
+                if superseded_runs_count > 0
+                else {}
+            ),
+            **({"legacy": True} if is_legacy else {}),
         },
         "tool": {
             "name": impl_sec.get("name"),
@@ -566,6 +581,7 @@ def verify_parity_report(
     decl_path: Path | str | None = None,
     parity_store: Path | str | None = None,
     catalog_dir: Path | str | None = None,
+    mode_state_dir: Path | str | None = None,
     evidence_run_ids: Sequence[str] | None = None,
     cell_runs: Mapping[str, Sequence[str]] | None = None,
     overlay_hooks: Sequence[CellOverlayHook] = (),
@@ -666,6 +682,7 @@ def verify_parity_report(
             dpath,
             parity_store=parity_store,
             catalog_dir=catalog_dir,
+            mode_state_dir=mode_state_dir,
             evidence_run_ids=evidence_run_ids,
             cell_runs=cell_runs,
             output_path=res_p,

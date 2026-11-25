@@ -1583,3 +1583,228 @@ class TestMinimalGraderAndNCs:
         monkeypatch.delattr(bathos, "__version__")
         with pytest.raises(AttributeError):
             _package_version()
+
+    def test_item_a_strict_project_slug_resolution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BTH_PROJECT_SLUG", raising=False)
+        repo = tmp_path / "no_cfg_repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        store = tmp_path / "store"
+        cat = tmp_path / "catalog"
+        init_catalog(cat)
+        decl_path = repo / "demo.parity.bth.toml"
+        decl_path.write_text(render_declaration_scaffold("item-a-v1", impl_name="aminx"), encoding="utf-8")
+        declare_parity_record(decl_path, parity_store=store)
+
+        # Missing .bth.toml and unset BTH_PROJECT_SLUG MUST raise (never fall back to implementation.name)
+        with pytest.raises(ParityDeclareError, match="Cannot resolve project slug"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+        # Empty [project].slug MUST raise
+        (repo / ".bth.toml").write_text('[project]\nslug = ""\n', encoding="utf-8")
+        with pytest.raises(ParityDeclareError, match=r"missing non-empty \[project\]\.slug"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+        # Malformed .bth.toml MUST raise (never swallowed)
+        (repo / ".bth.toml").write_text("[project\nbroken\n", encoding="utf-8")
+        with pytest.raises(ParityDeclareError, match="Failed to read project config"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+    def test_item_b_prior_declaration_blob_failures(self, tmp_path: Path) -> None:
+        _repo, store_dir, cat, decl_path, _decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        store = ParityStore(store_dir)
+
+        # Missing referenced blob SHA -> raises ParityDeclareError
+        other_dir = store.root / "declarations" / "prior-missing-blob"
+        other_dir.mkdir(parents=True, exist_ok=True)
+        (other_dir / "first.json").write_text(
+            json.dumps({"declaration_sha256": "a" * 64}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ParityDeclareError, match="Failed to load prior declaration blob"):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+        # Invalid TOML bytes in referenced prior blob -> raises ParityDeclareError
+        bad_toml_sha = store.put_bytes(b"[not valid toml\n")
+        (other_dir / "first.json").write_text(
+            json.dumps({"declaration_sha256": bad_toml_sha}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ParityDeclareError, match="Failed to load prior declaration blob"):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+    def test_item_e_failed_and_nonterminal_supersession_rules(self, tmp_path: Path) -> None:
+        from bathos.supersession import add_supersession_edge
+
+        def _make_env(name: str):
+            sub = tmp_path / name
+            sub.mkdir()
+            repo, store_dir, cat_dir, decl_path, base_decl = self._setup_workspace(sub)
+            base_cell = base_decl["cell_plan"][0]
+            # Two cells so we can also test cross-cell supersession rejection
+            two_toml = decl_path.read_text(encoding="utf-8") + (
+                '\n[[cell_plan]]\n'
+                f'use_id = "{base_cell["use_id"]}"\n'
+                f'component_id = "{base_cell["component_id"]}"\n'
+                'knob_setting = { k = 2 }\n'
+                'axis_value = { target = "1ubq", arm = "alt" }\n'
+                'data_tier = "toy"\n'
+                'pairing = "fixture"\n'
+                'pooling_rule = "all_runs"\n'
+                f'tolerance_id = "{base_cell["tolerance_id"]}"\n'
+            )
+            decl_path.write_text(two_toml, encoding="utf-8")
+            decl = tomllib.loads(two_toml)
+            declare_parity_record(decl_path, parity_store=store_dir)
+            cid0 = _cell_id_from_decl(decl, 0)
+            cid1 = _cell_id_from_decl(decl, 1)
+            store = ParityStore(store_dir)
+            # Populate cell 1 with a passing run in every fixture
+            write_run(
+                Run(
+                    project_slug="demo",
+                    command="bth run ev.py",
+                    argv=[],
+                    git_hash="0" * 40,
+                    git_branch="main",
+                    git_dirty=False,
+                    id=f"r-c1-{name}",
+                    timestamp=datetime(2026, 11, 25, 10, 30, tzinfo=UTC),
+                    exit_code=0,
+                    status="completed",
+                    outcome="pass",
+                ),
+                cat_dir,
+            )
+            write_cell_evidence(
+                store=store,
+                record_id="demo-record-v1",
+                cell_id=cid1,
+                run_id=f"r-c1-{name}",
+                ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+            return repo, store_dir, cat_dir, decl_path, cid0, cid1
+
+        def _add_run(cat_dir: Path, run_id: str, hour: int, *, status: str = "completed", outcome: str = "pass", exit_code: int = 0) -> None:
+            write_run(
+                Run(
+                    project_slug="demo",
+                    command="bth run ev.py",
+                    argv=[],
+                    git_hash="0" * 40,
+                    git_branch="main",
+                    git_dirty=False,
+                    id=run_id,
+                    timestamp=datetime(2026, 11, 25, hour, 0, tzinfo=UTC),
+                    exit_code=exit_code,
+                    status=status,
+                    outcome=outcome,
+                ),
+                cat_dir,
+            )
+
+        def _write_ev(store_dir: Path, cid: str, run_id: str) -> None:
+            write_cell_evidence(
+                store=store_dir,
+                record_id="demo-record-v1",
+                cell_id=cid,
+                run_id=run_id,
+                ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+
+        # 1. Failed run + later passing run with NO supersession edge -> inconclusive (run_failed)
+        _r, store1, cat1, decl1, cid1_0, _ = _make_env("no_edge_fail")
+        _add_run(cat1, "r-fail-1", 9, status="failed", outcome="fail", exit_code=1)
+        _add_run(cat1, "r-pass-1", 10)
+        _write_ev(store1, cid1_0, "r-fail-1")
+        _write_ev(store1, cid1_0, "r-pass-1")
+        g1 = grade_parity_record(decl1, parity_store=store1, catalog_dir=cat1, track_run=False)
+        c1 = next(c for c in g1.result["cells"] if c["cell_id"] == cid1_0)
+        assert c1["verdict"] == "inconclusive"
+        assert "run_failed" in c1["flags"]
+        assert g1.result.get("superseded_run_ids", []) == []
+
+        # 2. Non-terminal run + later passing run with NO supersession edge -> not_run
+        _r, store2, cat2, decl2, cid2_0, _ = _make_env("no_edge_running")
+        _add_run(cat2, "r-run-2", 9, status="running", outcome="running", exit_code=0)
+        _add_run(cat2, "r-pass-2", 10)
+        _write_ev(store2, cid2_0, "r-run-2")
+        _write_ev(store2, cid2_0, "r-pass-2")
+        g2 = grade_parity_record(decl2, parity_store=store2, catalog_dir=cat2, track_run=False)
+        c2 = next(c for c in g2.result["cells"] if c["cell_id"] == cid2_0)
+        assert c2["verdict"] == "not_run"
+
+        # 3. Failed (t1) superseded by later passing (t2 > t1) on same cell with non-empty reason -> pass
+        _r, store3, cat3, decl3, cid3_0, _ = _make_env("sup_fail_ok")
+        _add_run(cat3, "r-fail-3", 9, status="failed", outcome="fail", exit_code=1)
+        _add_run(cat3, "r-pass-3", 10)
+        _write_ev(store3, cid3_0, "r-fail-3")
+        _write_ev(store3, cid3_0, "r-pass-3")
+        compact(cat3)
+        add_supersession_edge("run", "r-fail-3", "run", "r-pass-3", "OOM on node resolved on retry", catalog_dir=cat3)
+        g3 = grade_parity_record(decl3, parity_store=store3, catalog_dir=cat3, track_run=False)
+        c3 = next(c for c in g3.result["cells"] if c["cell_id"] == cid3_0)
+        assert c3["verdict"] == "pass"
+        assert c3["superseded_run_ids"] == ["r-fail-3"]
+        assert g3.result["superseded_run_ids"] == ["r-fail-3"]
+        assert g3.result["cell_counts"]["superseded_runs"] == 1
+
+        # 4. Non-terminal (t1) superseded by later passing (t2 > t1) on same cell with non-empty reason -> pass
+        _r, store4, cat4, decl4, cid4_0, _ = _make_env("sup_run_ok")
+        _add_run(cat4, "r-run-4", 9, status="running", outcome="running")
+        _add_run(cat4, "r-pass-4", 10)
+        _write_ev(store4, cid4_0, "r-run-4")
+        _write_ev(store4, cid4_0, "r-pass-4")
+        compact(cat4)
+        add_supersession_edge("run", "r-run-4", "run", "r-pass-4", "preempted SLURM job restarted", catalog_dir=cat4)
+        g4 = grade_parity_record(decl4, parity_store=store4, catalog_dir=cat4, track_run=False)
+        c4 = next(c for c in g4.result["cells"] if c["cell_id"] == cid4_0)
+        assert c4["verdict"] == "pass"
+        assert g4.result["superseded_run_ids"] == ["r-run-4"]
+
+        # 5. NC: empty reason does NOT supersede -> stays inconclusive (run_failed)
+        _r, store5, cat5, decl5, cid5_0, _ = _make_env("empty_reason")
+        _add_run(cat5, "r-fail-5", 9, status="failed", outcome="fail", exit_code=1)
+        _add_run(cat5, "r-pass-5", 10)
+        _write_ev(store5, cid5_0, "r-fail-5")
+        _write_ev(store5, cid5_0, "r-pass-5")
+        compact(cat5)
+        add_supersession_edge("run", "r-fail-5", "run", "r-pass-5", "   ", catalog_dir=cat5)
+        g5 = grade_parity_record(decl5, parity_store=store5, catalog_dir=cat5, track_run=False)
+        c5 = next(c for c in g5.result["cells"] if c["cell_id"] == cid5_0)
+        assert c5["verdict"] == "inconclusive"
+        assert "run_failed" in c5["flags"]
+        assert g5.result.get("superseded_run_ids", []) == []
+
+        # 6. NC (wrong direction): earlier passing (t1) listed as superseding later failed (t2 > t1) -> does NOT supersede
+        _r, store6, cat6, decl6, cid6_0, _ = _make_env("wrong_direction")
+        _add_run(cat6, "r-pass-6", 9)
+        _add_run(cat6, "r-fail-6", 10, status="failed", outcome="fail", exit_code=1)
+        _write_ev(store6, cid6_0, "r-pass-6")
+        _write_ev(store6, cid6_0, "r-fail-6")
+        compact(cat6)
+        add_supersession_edge("run", "r-fail-6", "run", "r-pass-6", "invalid backward edge", catalog_dir=cat6)
+        g6 = grade_parity_record(decl6, parity_store=store6, catalog_dir=cat6, track_run=False)
+        c6 = next(c for c in g6.result["cells"] if c["cell_id"] == cid6_0)
+        assert c6["verdict"] == "inconclusive"
+        assert "run_failed" in c6["flags"]
+        assert g6.result.get("superseded_run_ids", []) == []
+
+        # 7. NC (cross-cell): later passing run belongs to a different cell -> does NOT supersede
+        _r, store7, cat7, decl7, cid7_0, cid7_1 = _make_env("cross_cell")
+        _add_run(cat7, "r-fail-7", 9, status="failed", outcome="fail", exit_code=1)
+        _write_ev(store7, cid7_0, "r-fail-7")
+        compact(cat7)
+        add_supersession_edge("run", "r-fail-7", "run", "r-c1-cross_cell", "different cell run", catalog_dir=cat7)
+        g7 = grade_parity_record(decl7, parity_store=store7, catalog_dir=cat7, track_run=False)
+        c7 = next(c for c in g7.result["cells"] if c["cell_id"] == cid7_0)
+        assert c7["verdict"] == "inconclusive"
+        assert "run_failed" in c7["flags"]
+        assert g7.result.get("superseded_run_ids", []) == []

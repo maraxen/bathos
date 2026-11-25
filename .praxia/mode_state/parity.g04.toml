@@ -1,0 +1,27 @@
+# WP17 parity gate mode-state record for G04 (PF3 evidence run validity, terminal status, invariant_fail, supersession).
+
+[feature]
+name = "parity.g04"
+description = "G04: evidence runs are terminal, project-owned, catalog-known, non-invariant_fail, and not hidden by valid supersession"
+version = "0.1.0"
+
+[ladder]
+current_stage = "shadow"
+
+[shadow]
+traffic_fraction = 1.0
+writes_isolated = true
+writes_isolated_enforced_by = "tests/test_parity_gate_ladder.py::test_parity_gate_shadow_writes_isolated"
+
+[scoring]
+positive_label = true
+
+[promotion]
+target_stage = "advisory"
+min_verdicts = 60
+min_labels = 60
+allowed_label_sources = ["frozen_gold", "owner_confirmed", "at_work"]
+min_precision_lower_bound = 0.90
+min_recall_lower_bound = 0.90
+isolation_violations_max = 0
+threshold_basis = "Spec 261123 §7.7 D2: PF3 family pooled 95% Clopper-Pearson lower bound >= 0.90 on precision and recall over >= 30 positive + 30 negative labelled cases (with >= 3 positive and >= 1 negative exercising G04 with zero misses)."
