@@ -515,6 +515,18 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "AppraisalError": BathosErrorCode.INVALID_PARAM,
     "AppraisalValidationError": BathosErrorCode.DOCUMENT_INVALID,
     "AppraisalNotFoundError": BathosErrorCode.INVALID_PARAM,
+    # Parity Ring 0 (spec 261123)
+    "ParityValidationError": BathosErrorCode.DOCUMENT_INVALID,
+    "ParityDeclareError": BathosErrorCode.CATALOG_ERROR,
+    "ParityVerifyError": BathosErrorCode.CATALOG_ERROR,
+    "ParityReportVerifyError": BathosErrorCode.DOCUMENT_INVALID,
+    "CellEvidenceError": BathosErrorCode.DOCUMENT_INVALID,
+    "BadgeValidationError": BathosErrorCode.DOCUMENT_INVALID,
+    "ReportLintError": BathosErrorCode.DOCUMENT_INVALID,
+    "InputStoreError": BathosErrorCode.CATALOG_ERROR,
+    "SealedDumpError": BathosErrorCode.CATALOG_ERROR,
+    "ParityStoreConfigError": BathosErrorCode.INVALID_PARAM,
+    "ParityStoreUnavailableError": BathosErrorCode.CATALOG_ERROR,
 }
 
 

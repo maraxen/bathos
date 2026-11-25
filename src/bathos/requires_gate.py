@@ -325,8 +325,12 @@ def check_requires(
 
 def discover_sidecar(script_path: Path) -> Path | None:
     """The sidecar adjacent to a script (``<stem>.bth.toml``), or None."""
+    from bathos.sidecar import is_parity_or_discrepancy_toml
+
     candidate = script_path.parent / f"{script_path.stem}.bth.toml"
-    return candidate if candidate.exists() else None
+    if not candidate.exists() or is_parity_or_discrepancy_toml(candidate):
+        return None
+    return candidate
 
 
 def preflight(
