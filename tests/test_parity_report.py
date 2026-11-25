@@ -897,3 +897,73 @@ class TestReportCoreAndDisclosureTiers:
         assert rep_re["evidence_level"] == "reexecuted"
         assert "reexecuted" in rep_re["badge"]["t0"].split(" · ")
         assert "reexecuted" in rep_re["badge"]["t1"].split(" · ")
+
+    def test_a3_weights_attested_only_t1_qualifier(self, tmp_path: Path) -> None:
+        (tmp_path / "attested").mkdir()
+        decl_path, _res_path, store_dir, cat_dir = _build_graded_fixture(
+            tmp_path / "attested", run_evidence=False
+        )
+        decl_text = decl_path.read_text(encoding="utf-8") + (
+            '\n[implementation.weights]\n'
+            'artifact_path = "data/weights/example.eqx.zst"\n'
+            'source_checkpoint_status = "attested_only_source_deleted"\n'
+        )
+        decl_path.write_text(decl_text, encoding="utf-8")
+        declare_parity_record(decl_path, parity_store=store_dir)
+        graded = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat_dir,
+            as_of="2026-11-24T12:00:00Z",
+            track_run=False,
+        )
+        _, rep = build_parity_report(
+            graded.result_path,
+            decl_path=decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat_dir,
+        )
+        assert rep["parity_metadata"]["weights_attested_only"] is True
+        t0_segs = rep["badge"]["t0"].split(" · ")
+        t1_segs = rep["badge"]["t1"].split(" · ")
+        assert "weights attested-only" in t1_segs
+        assert "weights attested-only" not in t0_segs
+
+        report_body = {k: v for k, v in rep.items() if k != "badge"}
+        t1_missing = " · ".join(s for s in t1_segs if s != "weights attested-only")
+        errs = validate_badge(rep["badge"]["t0"], t1_missing, report_body)
+        assert any("weights attested-only" in e for e in errs)
+
+        md = render_report_markdown(rep)
+        html_doc = render_report_html(rep)
+        assert "attested-only" in md
+        assert "attested-only" in html_doc
+
+        # Negative control: non-attested_only status and missing [implementation.weights] omit the qualifier
+        (tmp_path / "local").mkdir()
+        decl_local, _res_local, store_local, cat_local = _build_graded_fixture(
+            tmp_path / "local", run_evidence=False
+        )
+        decl_local_text = decl_local.read_text(encoding="utf-8") + (
+            '\n[implementation.weights]\n'
+            'artifact_path = "data/weights/example.eqx.zst"\n'
+            'source_checkpoint_status = "verified_local"\n'
+        )
+        decl_local.write_text(decl_local_text, encoding="utf-8")
+        declare_parity_record(decl_local, parity_store=store_local)
+        g_local = grade_parity_record(
+            decl_local,
+            parity_store=store_local,
+            catalog_dir=cat_local,
+            as_of="2026-11-24T12:00:00Z",
+            track_run=False,
+        )
+        _, rep_local = build_parity_report(
+            g_local.result_path,
+            decl_path=decl_local,
+            parity_store=store_local,
+            catalog_dir=cat_local,
+        )
+        assert rep_local["parity_metadata"]["weights_attested_only"] is False
+        assert "weights attested-only" not in rep_local["badge"]["t1"].split(" · ")
+        assert "weights attested-only" not in rep_local["badge"]["t0"].split(" · ")

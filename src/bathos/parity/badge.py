@@ -298,6 +298,8 @@ def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
 
     if parity_meta.get("has_owner_stated_tolerance"):
         quals.append("owner-stated tolerance")
+    if parity_meta.get("weights_attested_only"):
+        quals.append("weights attested-only")
 
     if tool.get("third_party"):
         quals.append("kinds declared by us")
@@ -501,6 +503,8 @@ def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str
             errors.append("T0 missing 'reference self-reported' qualifier")
         if "reference self-reported" not in t1_segs:
             errors.append("T1 missing 'reference self-reported' qualifier")
+    if parity_meta.get("weights_attested_only") and "weights attested-only" not in t1_segs:
+        errors.append("T1 missing 'weights attested-only' qualifier")
 
     clauses = report_body.get("clauses", [])
     split_cov = _clauses_differ_in_cell_coverage(clauses)

@@ -334,6 +334,10 @@ def build_parity_report(
 
     parity_sec = declaration.get("parity", {})
     impl_sec = declaration.get("implementation", {})
+    weights_sec = impl_sec.get("weights")
+    weights_attested_only = isinstance(weights_sec, Mapping) and str(
+        weights_sec.get("source_checkpoint_status", "")
+    ).strip().startswith("attested_only")
     tolerances = declaration.get("tolerance", [])
     has_owner_stated_tol = any(t.get("basis") == "owner_stated" for t in tolerances)
     impl_rev = str(
@@ -372,6 +376,7 @@ def build_parity_report(
             "control": bool(parity_sec.get("control", False)),
             "has_owner_stated_tolerance": has_owner_stated_tol,
             "reference_self_reported": reference_self_reported,
+            "weights_attested_only": weights_attested_only,
         },
         "tool": {
             "name": impl_sec.get("name"),
@@ -749,6 +754,11 @@ def render_report_markdown(report: Mapping[str, Any]) -> str:
         f"- **Amendments:** {report['amendments']}",
         f"- **Audit:** {report['audit']}",
         f"- **Provenance:** {report['provenance']}",
+        *(
+            ["- **Weights provenance:** attested-only (source checkpoint not re-derived)"]
+            if report.get("parity_metadata", {}).get("weights_attested_only")
+            else []
+        ),
         "",
         "## Uses",
         "",
@@ -876,6 +886,7 @@ th {{ background: #f6f8fa; }}
   <li><strong>Amendments:</strong> {_e(report['amendments'])}</li>
   <li><strong>Audit:</strong> {_e(report['audit'])}</li>
   <li><strong>Provenance:</strong> {_e(report['provenance'])}</li>
+  {("<li><strong>Weights provenance:</strong> attested-only (source checkpoint not re-derived)</li>" if report.get("parity_metadata", {}).get("weights_attested_only") else "")}
 </ul>
 <h2>Cell Verdict Matrix</h2>
 <table>

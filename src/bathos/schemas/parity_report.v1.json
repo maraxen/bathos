@@ -47,7 +47,8 @@
     "parity_metadata": {
       "type": "object",
       "properties": {
-        "reference_self_reported": { "type": "boolean" }
+        "reference_self_reported": { "type": "boolean" },
+        "weights_attested_only": { "type": "boolean" }
       }
     },
     "tool": { "type": "object", "required": ["name", "repo", "revision", "licence"] },
