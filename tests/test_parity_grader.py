@@ -29,7 +29,7 @@ from bathos.compact import compact
 from bathos.parity import ParityEvidence, compute_grade, legacy_literature_grade
 from bathos.parity.axes import RING0_ACTIVE_G_CODES, compute_axes_and_clauses
 from bathos.parity.declare import ParityDeclareError, declare_parity_record
-from bathos.parity.evidence import write_cell_evidence
+from bathos.parity.evidence import CellEvidenceError, write_cell_evidence
 from bathos.parity.grader import ParityVerifyError, grade_parity_record, register_overlay_hook
 from bathos.parity.npy_stdlib import canonical_array_digest, encode_npz
 from bathos.parity.schema import (
@@ -189,6 +189,7 @@ class TestMinimalGraderAndNCs:
         repo = tmp_path / "repo"
         repo.mkdir()
         _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
         store = tmp_path / "store"
         cat = tmp_path / "catalog"
         init_catalog(cat)
@@ -310,6 +311,7 @@ class TestMinimalGraderAndNCs:
         repo = tmp_path / "repo"
         repo.mkdir()
         _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
         store_dir = tmp_path / "store"
         cat = tmp_path / "catalog"
         init_catalog(cat)
@@ -625,6 +627,7 @@ class TestMinimalGraderAndNCs:
         repo = tmp_path / "repo"
         repo.mkdir()
         _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
         store_dir = tmp_path / "store"
         cat = tmp_path / "catalog"
         init_catalog(cat)
@@ -771,9 +774,9 @@ class TestMinimalGraderAndNCs:
         declare_parity_record(decl_path, parity_store=store_dir)
         cid = _cell_id_from_decl(decl)
 
-        # 1. Non-invariant fail run with good arrays -> PASSES
+        # 1. Non-invariant fail run (status="completed", outcome="fail") with good arrays -> PASSES
         write_run(
-            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-fail-ok", exit_code=1, status="failed", outcome="fail"),
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-fail-ok", exit_code=1, status="completed", outcome="fail"),
             cat,
         )
         write_cell_evidence(
@@ -1179,10 +1182,8 @@ class TestMinimalGraderAndNCs:
         assert "pooled_run_failure" in c_pi["flags"]
         assert len(c_pi["run_verdicts"]) == 3
 
-    def test_s7_n2_nan_tol_cli_and_s4_s5_s6(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
-
-        # N2: atol = nan in TOML -> bth parity grade exits 1
+    def test_n2_nan_tolerance_cli_exits_cleanly(self, tmp_path: Path) -> None:
+        repo, store_dir, cat, decl_path, _decl = self._setup_workspace(tmp_path)
         nan_toml = decl_path.read_text(encoding="utf-8").replace("atol = 1e-4", "atol = nan")
         nan_path = repo / "nan.parity.bth.toml"
         nan_path.write_text(nan_toml, encoding="utf-8")
@@ -1192,13 +1193,13 @@ class TestMinimalGraderAndNCs:
         )
         assert proc_nan.returncode == 1
 
-        # S4: undeclared record_id raises ParityDeclareError
+    def test_s4_undeclared_record_raises_and_store_identity_recorded(self, tmp_path: Path) -> None:
+        repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
         undec_path = repo / "undeclared.parity.bth.toml"
         undec_path.write_text(decl_path.read_text(encoding="utf-8").replace("demo-record-v1", "undeclared-v1"), encoding="utf-8")
         with pytest.raises(ParityDeclareError, match="no declared baseline"):
             grade_parity_record(undec_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
 
-        # S4 + S6: parity_store, evidence_run_ids_filter, overlay_hooks recorded + Run.metadata + Run.tags
         declare_parity_record(decl_path, parity_store=store_dir)
         cid = _cell_id_from_decl(decl)
         write_run(
@@ -1214,6 +1215,40 @@ class TestMinimalGraderAndNCs:
             reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
             input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
         )
+        g = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat,
+            evidence_run_ids=["r-s4"],
+            as_of="2026-11-24T12:00:00Z",
+            track_run=True,
+        )
+        assert g.result["parity_store"] == {"path": str(Path(store_dir).resolve()), "layer": "cli_arg"}
+        assert g.result["grade_inputs"]["parity_store"] == g.result["parity_store"]
+
+        grade_run = next(r for r in read_runs(cat) if r.id == g.grade_run_id)
+        assert "parity_store_layer:cli_arg" in grade_run.tags
+        run_meta = json.loads(grade_run.metadata)
+        assert run_meta["parity_store"] == g.result["parity_store"]
+        assert run_meta["record_id"] == "demo-record-v1"
+
+    def test_s6_evidence_run_filter_overlay_hooks_and_no_head_fallback(self, tmp_path: Path) -> None:
+        _repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-s6", exit_code=0, status="completed", outcome="pass"),
+            cat,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-s6",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
 
         def _custom_hook(_cell: dict, _decl: dict) -> list[str]:
             return ["stale(code)"]
@@ -1222,30 +1257,22 @@ class TestMinimalGraderAndNCs:
             decl_path,
             parity_store=store_dir,
             catalog_dir=cat,
-            evidence_run_ids=["r-s4"],
+            evidence_run_ids=["r-s6"],
             as_of="2026-11-24T12:00:00Z",
-            track_run=True,
+            track_run=False,
             overlay_hooks=(_custom_hook,),
         )
-        assert g.result["parity_store"] == {"path": str(Path(store_dir).resolve()), "layer": "cli_arg"}
-        assert g.result["grade_inputs"]["parity_store"] == g.result["parity_store"]
-        assert g.result["grade_inputs"]["evidence_run_ids_filter"] == ["r-s4"]
+        assert g.result["grade_inputs"]["evidence_run_ids_filter"] == ["r-s6"]
         assert len(g.result["grade_inputs"]["overlay_hooks"]) == 1
 
-        grade_run = next(r for r in read_runs(cat) if r.id == g.grade_run_id)
-        assert "parity_store_layer:cli_arg" in grade_run.tags
-        run_meta = json.loads(grade_run.metadata)
-        assert run_meta["parity_store"] == g.result["parity_store"]
-        assert run_meta["record_id"] == "demo-record-v1"
-
-        # S6: --verify with mismatched evidence_run_ids or hooks fails ParityVerifyError
+        # --verify with matching args succeeds, mismatched evidence_run_ids or hooks fails ParityVerifyError
         assert grade_parity_record(
-            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-s4"], verify=True, overlay_hooks=(_custom_hook,)
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-s6"], verify=True, overlay_hooks=(_custom_hook,)
         ).verified is True
         with pytest.raises(ParityVerifyError):
             grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, verify=True, overlay_hooks=())
 
-        # S6: missing head_commit in store raises ParityDeclareError (no git rev-parse fallback)
+        # missing head_commit in store raises ParityDeclareError (no git rev-parse fallback)
         store = ParityStore(store_dir)
         first_json = store.root / "declarations" / "demo-record-v1" / "first.json"
         first_obj = json.loads(first_json.read_text(encoding="utf-8"))
@@ -1259,27 +1286,34 @@ class TestMinimalGraderAndNCs:
         with pytest.raises(ParityDeclareError, match="missing declared head_commit"):
             grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
 
-        # S5: error in cool archived_items reader raises instead of silently swallowing
+    def test_s5_corrupt_cool_archived_items_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _repo, store_dir, _cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
         cool_cat = tmp_path / "corrupt_cool_cat"
         cool_cat.mkdir()
         write_run(
-            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-s4", exit_code=0, status="completed", outcome="pass"),
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-s5", exit_code=0, status="completed", outcome="pass"),
             cool_cat,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-s5",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
         )
         arch_dir = cool_cat / "archived_items"
         arch_dir.mkdir(parents=True)
-        # Restore head_commit first so we reach archived_items check
-        first_obj["head_commit"] = "a" * 40
-        first_json.write_text(json.dumps(first_obj), encoding="utf-8")
-        ver_obj["head_commit"] = "a" * 40
-        ver_json.write_text(json.dumps(ver_obj), encoding="utf-8")
 
         def _boom(_cat: Path | str) -> list:
             raise RuntimeError("corrupt archived_items ledger")
 
         monkeypatch.setattr("bathos.parity.grader.read_archived_item_fragments", _boom)
         with pytest.raises(RuntimeError, match="corrupt archived_items ledger"):
-            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cool_cat, evidence_run_ids=["r-s4"], track_run=False)
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cool_cat, evidence_run_ids=["r-s5"], track_run=False)
 
     def test_exact_run_lookup_skips_mixed_timestamp_cool_fragments_and_rejects_prefixes(self, tmp_path: Path) -> None:
         import pyarrow as pa
@@ -1336,3 +1370,216 @@ class TestMinimalGraderAndNCs:
         assert grade_parity_record(
             decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=[full_rid], verify=True
         ).verified is True
+
+    def test_item3_run_project_ownership_failed_status_unknown_flag_and_explicit_cell_runs(
+        self, tmp_path: Path
+    ) -> None:
+        _repo, store_dir, cat, decl_path, decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id_from_decl(decl)
+        store = ParityStore(store_dir)
+
+        # Subcase A: run from another project_slug with passing arrays -> not_run + wrong_project_run
+        write_run(
+            Run(
+                project_slug="other-project",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-other-proj",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-other-proj",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_a = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-other-proj"], track_run=False
+        )
+        assert g_a.result["cells"][0]["verdict"] == "not_run"
+        assert "wrong_project_run" in g_a.result["cells"][0]["flags"]
+
+        # Subcase B: status="failed" with matching arrays -> inconclusive + run_failed (never pass)
+        # whereas status="completed", outcome="fail" still passes per G04
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-status-failed",
+                exit_code=1,
+                status="failed",
+                outcome="fail",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-status-failed",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_b1 = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat, evidence_run_ids=["r-status-failed"], track_run=False
+        )
+        assert g_b1.result["cells"][0]["verdict"] == "inconclusive"
+        assert "run_failed" in g_b1.result["cells"][0]["flags"]
+
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-completed-outcome-fail",
+                exit_code=1,
+                status="completed",
+                outcome="fail",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-completed-outcome-fail",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_b2 = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat,
+            evidence_run_ids=["r-completed-outcome-fail"],
+            track_run=False,
+        )
+        assert g_b2.result["cells"][0]["verdict"] == "pass"
+
+        # Subcase C: unknown manifest run beside a passing known run -> inconclusive + unknown_evidence_run
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-known-pass",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-known-pass",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id=cid,
+            run_id="r-unknown-beside",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_c = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat,
+            evidence_run_ids=["r-known-pass", "r-unknown-beside"],
+            track_run=False,
+        )
+        assert g_c.result["cells"][0]["verdict"] == "inconclusive"
+        assert "unknown_evidence_run" in g_c.result["cells"][0]["flags"]
+
+        # Subcase D: explicit cell_runs={cid: ["unknown-explicit-run"]} not in catalog -> flags unknown_evidence_run
+        g_d = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat,
+            evidence_run_ids=[],
+            cell_runs={cid: ["unknown-explicit-run"]},
+            track_run=False,
+        )
+        assert "unknown_evidence_run" in g_d.result["cells"][0]["flags"]
+
+    def test_item4_reject_foreign_record_or_unplanned_cell_manifest(self, tmp_path: Path) -> None:
+        _repo, store_dir, cat, decl_path, _decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        store = ParityStore(store_dir)
+
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-unplanned",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-record-v1",
+            cell_id="deadbeefcafebabe",
+            run_id="r-unplanned",
+            ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        with pytest.raises(CellEvidenceError, match="cell_id"):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+    def test_item6_prior_records_read_error_fails_loudly_and_no_version_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import bathos
+        from bathos.parity.grader import _package_version
+
+        _repo, store_dir, cat, decl_path, _decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        store = ParityStore(store_dir)
+
+        corrupt_dir = store.root / "declarations" / "other-rec"
+        corrupt_dir.mkdir(parents=True, exist_ok=True)
+        (corrupt_dir / "first.json").write_text("{corrupt json", encoding="utf-8")
+
+        with pytest.raises(ParityDeclareError):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+        assert _package_version() == str(bathos.__version__)
+        monkeypatch.delattr(bathos, "__version__")
+        with pytest.raises(AttributeError):
+            _package_version()

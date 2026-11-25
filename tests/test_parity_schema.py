@@ -423,3 +423,72 @@ class TestDeclareCommand:
         assert res2.is_first_declaration is False
         assert res2.declaration_sha256 != res1["declaration_sha256"]
         assert res2.first_declaration_sha256 == res1["declaration_sha256"]
+
+
+class TestParityDeclarationSchema:
+    def test_item7_schema_rejects_nan_and_inf_tolerances(self) -> None:
+        # 1. [[tolerance]] atol/rtol with nan, +inf, -inf
+        for field, bad_val in (
+            ("atol", float("nan")),
+            ("rtol", float("inf")),
+            ("atol", float("-inf")),
+        ):
+            decl = _minimal_valid_decl()
+            decl["tolerance"][0][field] = bad_val
+            issues = validate_declaration(decl)
+            assert any(i.code == "G01_VALUE" and f"tolerance[0].{field}" in i.path for i in issues), (field, bad_val, issues)
+
+        # 2. floor_multiple = inf on [[tolerance]] and [[use]]
+        decl_fm_tol = _minimal_valid_decl()
+        decl_fm_tol["tolerance"][0]["basis"] = "decomposition_floor"
+        decl_fm_tol["tolerance"][0]["floor_multiple"] = float("inf")
+        decl_fm_tol["tolerance"][0]["basis_evidence"] = {
+            "run_id": "r1",
+            "data_tier": "toy",
+            "shapes": [1],
+            "dtypes": ["float32"],
+        }
+        assert any(
+            i.code == "G01_VALUE" and "tolerance[0].floor_multiple" in i.path
+            for i in validate_declaration(decl_fm_tol)
+        )
+
+        decl_fm_use = _minimal_valid_decl()
+        decl_fm_use["use"][0]["floor_multiple"] = float("inf")
+        assert any(
+            i.code == "G01_VALUE" and "use[0].floor_multiple" in i.path
+            for i in validate_declaration(decl_fm_use)
+        )
+
+        # 3. precision_amplification.max_useful_tolerance.<dtype>.{atol,rtol} = nan/inf
+        for field, bad_val in (
+            ("atol", float("nan")),
+            ("rtol", float("inf")),
+            ("atol", float("-inf")),
+            ("rtol", -1.0),
+        ):
+            decl_pa = _minimal_valid_decl()
+            fb = copy.deepcopy(decl_pa["use"][0])
+            fb["id"] = "fb-dist"
+            fb["parity_kind"] = "distributional"
+            fb.update(
+                {
+                    "delta": 0.1,
+                    "independent_unit": "sample",
+                    "procedure": "tost",
+                    "alpha": 0.05,
+                    "multiplicity": "none",
+                }
+            )
+            mut_entry = {"atol": 1e-3, "rtol": 1e-3}
+            mut_entry[field] = bad_val
+            decl_pa["use"][0]["precision_amplification"] = {
+                "fallback_use": fb,
+                "max_useful_tolerance": {"float32": mut_entry},
+            }
+            issues_pa = validate_declaration(decl_pa)
+            assert any(
+                i.code == "G01_VALUE"
+                and f"use[0].precision_amplification.max_useful_tolerance.float32.{field}" in i.path
+                for i in issues_pa
+            ), (field, bad_val, issues_pa)

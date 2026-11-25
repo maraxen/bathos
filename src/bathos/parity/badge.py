@@ -306,6 +306,8 @@ def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
 
     ev_level = str(report_body.get("evidence_level", "self_reported"))
     quals.append("reexecuted" if ev_level == "reexecuted" else "self-reported")
+    if parity_meta.get("reference_self_reported"):
+        quals.append("reference self-reported")
 
     return quals
 
@@ -402,6 +404,8 @@ def render_t0(report_body: Mapping[str, Any], h1_full: str) -> str:
 
     ev_level = str(report_body.get("evidence_level", "self_reported"))
     parts.append("reexecuted" if ev_level == "reexecuted" else "self-reported")
+    if parity_meta.get("reference_self_reported"):
+        parts.append("reference self-reported")
 
     std_ver = str(report_body.get("standard_version", STANDARD_VERSION))
     parts.append(f"std {std_ver}")
@@ -492,6 +496,11 @@ def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str
         errors.append(f"T0 missing evidence level token {expected_ev_tok!r}")
     if expected_ev_tok not in t1_segs:
         errors.append(f"T1 missing evidence level token {expected_ev_tok!r}")
+    if parity_meta.get("reference_self_reported"):
+        if "reference self-reported" not in t0_segs:
+            errors.append("T0 missing 'reference self-reported' qualifier")
+        if "reference self-reported" not in t1_segs:
+            errors.append("T1 missing 'reference self-reported' qualifier")
 
     clauses = report_body.get("clauses", [])
     split_cov = _clauses_differ_in_cell_coverage(clauses)

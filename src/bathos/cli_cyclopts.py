@@ -3071,12 +3071,19 @@ def parity_report_verify_cmd(
     ) as exc:
         _emit_parity_cli_error(exc, json_out=json_out)
 
+    if not info.get("result_verified"):
+        _emit_parity_cli_error(
+            ParityReportVerifyError("Report verification did not complete result/declaration replay"),
+            json_out=json_out,
+        )
+
     if json_out:
         print(json.dumps(info, indent=2, sort_keys=True))
     else:
         print(
             f"VERIFIED: {info['report_path']} "
-            f"(bundle={info['bundle_sha256'][:12]}, present={info['present_members']}, absent={info['absent_members']})"
+            f"(bundle={info['bundle_sha256'][:12]}, present={info['present_members']}, "
+            f"absent={info['absent_members']}, result_verified={info['result_verified']})"
         )
 
 

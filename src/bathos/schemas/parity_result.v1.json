@@ -100,7 +100,9 @@
           "verdict": {
             "type": "string",
             "enum": ["pass", "fail", "not_run", "not_covered", "waived", "inconclusive", "contested", "declared_deviation"]
-          }
+          },
+          "evidence_level": { "type": "string", "minLength": 1 },
+          "reference_source": { "type": ["string", "null"] }
         }
       }
     },

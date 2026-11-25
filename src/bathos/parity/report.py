@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -341,11 +342,17 @@ def build_parity_report(
 
     opt = dict(optional_sections or {})
     cells_sorted = sorted(result.get("cells", []), key=lambda c: str(c["cell_id"]))
-    evidence_level = (
-        "reexecuted"
-        if cells_sorted and all(c.get("evidence_level") == "reexecuted" for c in cells_sorted)
-        else "self_reported"
-    )
+    evaluated_cells = [c for c in cells_sorted if c.get("evidence_level") not in (None, "none")]
+    if evaluated_cells and all(c.get("evidence_level") == "reexecuted" for c in evaluated_cells):
+        evidence_level = "reexecuted"
+    elif evaluated_cells:
+        evidence_level = "self_reported"
+    else:
+        evidence_level = "none"
+    reference_self_reported = any(c.get("reference_source") == "evidence_bundle" for c in cells_sorted)
+    grader_ver = result.get("grader_version")
+    if not isinstance(grader_ver, str) or not grader_ver.strip():
+        raise ParityReportVerifyError("Result JSON missing required grader_version")
 
     # Report body WITHOUT badge (§9.3.3 no hash cycle)
     report_body: dict[str, Any] = {
@@ -364,6 +371,7 @@ def build_parity_report(
             "badge_min_tier": parity_sec.get("badge_min_tier"),
             "control": bool(parity_sec.get("control", False)),
             "has_owner_stated_tolerance": has_owner_stated_tol,
+            "reference_self_reported": reference_self_reported,
         },
         "tool": {
             "name": impl_sec.get("name"),
@@ -403,7 +411,7 @@ def build_parity_report(
         "bundle_sha256": bundle_sha,
         "generator": {
             "name": "bathos",
-            "version": result.get("grader_version", "0.18.0"),
+            "version": grader_ver,
             "schema": REPORT_SCHEMA_VERSION,
         },
     }
@@ -475,6 +483,77 @@ def verify_report_tier_chain_in_memory(report: Mapping[str, Any]) -> None:
         raise ParityReportVerifyError(f"TIER_LINK_BROKEN:T0 {'; '.join(badge_errs)}")
 
 
+def _discover_companion_result_path(rpath: Path, report: Mapping[str, Any]) -> Path | None:
+    if rpath.name.endswith(".parity.report.json"):
+        stem = rpath.name[: -len(".parity.report.json")]
+        cand_res = rpath.parent / f"{stem}.parity.result.json"
+        if cand_res.is_file():
+            return cand_res
+    expected_sha = str(report.get("result_sha256", ""))
+    expected_rid = str(report.get("record_id", ""))
+    id_matches: list[Path] = []
+    for cand in sorted(rpath.parent.glob("*.parity.result.json")):
+        try:
+            raw = cand.read_bytes()
+        except OSError:
+            continue
+        if expected_sha and hashlib.sha256(raw).hexdigest() == expected_sha:
+            return cand
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(obj, Mapping) and str(obj.get("record_id", "")) == expected_rid:
+            id_matches.append(cand)
+    if len(id_matches) == 1:
+        return id_matches[0]
+    if len(id_matches) > 1:
+        raise ParityReportVerifyError(
+            f"Multiple *.parity.result.json files in {rpath.parent} match record_id {expected_rid!r}; pass --result-path"
+        )
+    return None
+
+
+def _discover_companion_decl_path(rpath: Path, res_p: Path | None, report: Mapping[str, Any]) -> Path | None:
+    if rpath.name.endswith(".parity.report.json"):
+        stem = rpath.name[: -len(".parity.report.json")]
+        cand_decl = rpath.parent / f"{stem}.parity.bth.toml"
+        if cand_decl.is_file():
+            return cand_decl
+    if res_p is not None and res_p.name.endswith(".parity.result.json"):
+        res_stem = res_p.name[: -len(".parity.result.json")]
+        cand_decl = res_p.parent / f"{res_stem}.parity.bth.toml"
+        if cand_decl.is_file():
+            return cand_decl
+    expected_sha = str(report.get("record_sha256", ""))
+    expected_rid = str(report.get("record_id", ""))
+    search_dirs: list[Path] = [rpath.parent]
+    if res_p is not None and res_p.parent != rpath.parent:
+        search_dirs.append(res_p.parent)
+    id_matches: list[Path] = []
+    for sdir in search_dirs:
+        for cand in sorted(sdir.glob("*.parity.bth.toml")):
+            try:
+                raw = cand.read_bytes()
+            except OSError:
+                continue
+            if expected_sha and hashlib.sha256(raw).hexdigest() == expected_sha:
+                return cand
+            try:
+                obj = tomllib.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+                continue
+            if isinstance(obj, Mapping) and str(obj.get("parity", {}).get("record_id", "")) == expected_rid:
+                id_matches.append(cand)
+    if len(id_matches) == 1:
+        return id_matches[0]
+    if len(id_matches) > 1:
+        raise ParityReportVerifyError(
+            f"Multiple *.parity.bth.toml files match record_id {expected_rid!r}; pass --decl-path"
+        )
+    return None
+
+
 def verify_parity_report(
     report_path: Path | str,
     *,
@@ -486,7 +565,7 @@ def verify_parity_report(
     cell_runs: Mapping[str, Sequence[str]] | None = None,
     overlay_hooks: Sequence[CellOverlayHook] = (),
 ) -> dict[str, Any]:
-    """Verify full T0 -> T1 -> T2 -> T3 disclosure chain and optional result/declaration replay."""
+    """Verify full T0 -> T1 -> T2 -> T3 disclosure chain and result/declaration replay."""
     rpath = Path(report_path).resolve()
     if not rpath.is_file():
         raise ParityReportVerifyError(f"Report file not found: {rpath}")
@@ -504,31 +583,16 @@ def verify_parity_report(
         )
     verify_report_tier_chain_in_memory(report)
 
-    res_p: Path | None = Path(result_path).resolve() if result_path is not None else None
-    dpath: Path | None = Path(decl_path).resolve() if decl_path is not None else None
-    if rpath.name.endswith(".parity.report.json"):
-        stem = rpath.name[: -len(".parity.report.json")]
-        if res_p is None:
-            cand_res = rpath.parent / f"{stem}.parity.result.json"
-            if cand_res.is_file():
-                res_p = cand_res
-        if dpath is None:
-            cand_decl = rpath.parent / f"{stem}.parity.bth.toml"
-            if cand_decl.is_file():
-                dpath = cand_decl
-    if dpath is None and res_p is not None and res_p.name.endswith(".parity.result.json"):
-        res_stem = res_p.name[: -len(".parity.result.json")]
-        cand_decl = res_p.parent / f"{res_stem}.parity.bth.toml"
-        if cand_decl.is_file():
-            dpath = cand_decl
+    res_p: Path | None = Path(result_path).resolve() if result_path is not None else _discover_companion_result_path(rpath, report)
+    dpath: Path | None = Path(decl_path).resolve() if decl_path is not None else _discover_companion_decl_path(rpath, res_p, report)
 
-    if result_path is not None and dpath is None:
+    if res_p is None:
         raise ParityReportVerifyError(
-            f"result_path {res_p} given but companion declaration *.parity.bth.toml not found; pass decl_path"
+            f"Cannot verify report {rpath}: companion *.parity.result.json not found; pass --result-path"
         )
-    if decl_path is not None and res_p is None:
+    if dpath is None:
         raise ParityReportVerifyError(
-            f"decl_path {dpath} given but companion result *.parity.result.json not found; pass result_path"
+            f"Cannot verify report {rpath}: companion *.parity.bth.toml not found; pass --decl-path"
         )
 
     store_anchor = resolve_start_dir(dpath if dpath is not None else rpath)

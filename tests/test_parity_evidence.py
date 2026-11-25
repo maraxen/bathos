@@ -270,3 +270,59 @@ print(manifest["ours_bundle_sha256"])
     def test_numpy_in_pyproject_dependencies(self) -> None:
         pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
         assert '"numpy>=' in pyproject
+
+
+class TestCellEvidenceV1:
+    def test_item4_reject_manifest_with_wrong_record_id_or_cell_id(self, tmp_path: Path) -> None:
+        store = ParityStore(tmp_path / "store")
+        arr = np.array([1.0, 2.0], dtype=np.float32)
+
+        # Case 1: manifest carrying another record_id placed inside evidence/<record_id>/<run_id>/<cell_id>.json
+        _sha, foreign_manifest = write_cell_evidence(
+            store=store,
+            record_id="other-record-v1",
+            cell_id="cell-a",
+            run_id="r1",
+            ours_arrays={"scores": arr},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        foreign_idx = store.root / "evidence" / "other-record-v1" / "r1" / "cell-a.json"
+        dest_dir = store.root / "evidence" / "target-record-v1" / "r1"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / "cell-a.json").write_text(foreign_idx.read_text(encoding="utf-8"), encoding="utf-8")
+        with pytest.raises(CellEvidenceError, match="record_id"):
+            load_cell_evidence_for_record(store, "target-record-v1")
+
+        # Case 2: filename cell_id differs from JSON cell_id
+        store2 = ParityStore(tmp_path / "store2")
+        write_cell_evidence(
+            store=store2,
+            record_id="rec-mismatch",
+            cell_id="real-cell",
+            run_id="r1",
+            ours_arrays={"scores": arr},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        real_idx = store2.root / "evidence" / "rec-mismatch" / "r1" / "real-cell.json"
+        (store2.root / "evidence" / "rec-mismatch" / "r1" / "other-cell.json").write_text(
+            real_idx.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        with pytest.raises(CellEvidenceError, match="cell_id"):
+            load_cell_evidence_for_record(store2, "rec-mismatch")
+
+        # Case 3: filename run_id differs from JSON run_id
+        store3 = ParityStore(tmp_path / "store3")
+        write_cell_evidence(
+            store=store3,
+            record_id="rec-run-mm",
+            cell_id="c1",
+            run_id="r-real",
+            ours_arrays={"scores": arr},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        r_idx = store3.root / "evidence" / "rec-run-mm" / "r-real" / "c1.json"
+        wrong_run_dir = store3.root / "evidence" / "rec-run-mm" / "r-other"
+        wrong_run_dir.mkdir(parents=True, exist_ok=True)
+        (wrong_run_dir / "c1.json").write_text(r_idx.read_text(encoding="utf-8"), encoding="utf-8")
+        with pytest.raises(CellEvidenceError, match="run_id"):
+            load_cell_evidence_for_record(store3, "rec-run-mm")

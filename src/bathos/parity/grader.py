@@ -39,7 +39,11 @@ from bathos.parity.declare import (
     load_declaration_version_meta,
     load_parsed_declaration,
 )
-from bathos.parity.evidence import load_cell_evidence_for_record, validate_cell_evidence
+from bathos.parity.evidence import (
+    CellEvidenceError,
+    load_cell_evidence_for_record,
+    validate_cell_evidence,
+)
 from bathos.parity.metrics import compare_bitwise, compare_within_tolerance, get_backend_identity
 from bathos.parity.schema import (
     PARITY_KINDS_ORDER,
@@ -89,12 +93,46 @@ class GradeResult:
 
 
 def _package_version() -> str:
-    try:
-        from bathos import __version__
+    import bathos
 
-        return str(__version__)
-    except Exception:
-        return "0.18.0"
+    ver = str(bathos.__version__).strip()
+    if not ver:
+        raise RuntimeError("bathos.__version__ is empty")
+    return ver
+
+
+def _resolve_record_project_slug(dpath: Path, declaration: Mapping[str, Any]) -> str:
+    from bathos.config import find_project_config
+
+    cfg_path = find_project_config(dpath.parent)
+    if cfg_path is not None and cfg_path.is_file():
+        try:
+            cfg = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+            slug = str(cfg.get("project", {}).get("slug", "")).strip()
+            if slug:
+                return slug
+        except Exception:
+            pass
+    return str(declaration.get("implementation", {}).get("name", "")).strip()
+
+
+def _derive_cell_evidence_level(
+    per_run_evals: Sequence[Mapping[str, Any]],
+    *,
+    overlays: Sequence[str] = (),
+    flags: Sequence[str] = (),
+    reexecuted: bool = False,
+) -> str:
+    if not per_run_evals:
+        return "none"
+    if (
+        reexecuted
+        or "reexecuted" in overlays
+        or "reexecuted" in flags
+        or all(ev.get("evidence_level") == "reexecuted" for ev in per_run_evals)
+    ):
+        return "reexecuted"
+    return "self_reported"
 
 
 def _resolve_decl_revision(
@@ -265,15 +303,22 @@ def _count_prior_records_on_pair(
         for mf in meta_files:
             try:
                 meta = json.loads(mf.read_text(encoding="utf-8"))
-                decl_sha = meta.get("declaration_sha256")
-                if not isinstance(decl_sha, str):
-                    continue
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ParityDeclareError(f"Failed to read prior declaration metadata {mf}: {exc}") from exc
+            if not isinstance(meta, Mapping):
+                raise ParityDeclareError(f"Prior declaration metadata {mf} must be a JSON object")
+            decl_sha = meta.get("declaration_sha256")
+            if not isinstance(decl_sha, str) or not decl_sha.strip():
+                raise ParityDeclareError(f"Prior declaration metadata {mf} missing valid declaration_sha256")
+            try:
                 other_decl = tomllib.loads(store.get_bytes(decl_sha).decode("utf-8"))
-                if _pair_identity_key(other_decl) == target_key:
-                    matched = True
-                    break
-            except Exception:
-                continue
+            except (FileNotFoundError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+                raise ParityDeclareError(
+                    f"Failed to load prior declaration blob {decl_sha} referenced by {mf}: {exc}"
+                ) from exc
+            if _pair_identity_key(other_decl) == target_key:
+                matched = True
+                break
         if matched:
             count += 1
     return count
@@ -311,6 +356,12 @@ def _evaluate_single_manifest(
         tuple(sorted(str(x) for x in inp.get("ours", []))),
         tuple(sorted(str(x) for x in inp.get("reference", []))),
     )
+    if ref_kind == "sealed_dump":
+        ref_source: str | None = "sealed_dump"
+    elif manifest.get("reference_bundle_sha256"):
+        ref_source = "evidence_bundle"
+    else:
+        ref_source = None
     ingest_errors = validate_cell_evidence(manifest, store=store)
     if ingest_errors:
         return {
@@ -329,6 +380,7 @@ def _evaluate_single_manifest(
             "nondegeneracy": {"status": "not_checked_ring0"},
             "input_key": input_key,
             "input_sha256": inp,
+            "reference_source": ref_source,
         }
 
     ours_arrays: dict[str, np.ndarray] = {}
@@ -424,6 +476,7 @@ def _evaluate_single_manifest(
             "nondegeneracy": {"status": "not_checked_ring0"},
             "input_key": input_key,
             "input_sha256": inp,
+            "reference_source": ref_source,
         }
 
     missing_ref = [k for k in ours_arrays if k not in ref_arrays]
@@ -444,6 +497,7 @@ def _evaluate_single_manifest(
             "nondegeneracy": {"status": "not_checked_ring0"},
             "input_key": input_key,
             "input_sha256": inp,
+            "reference_source": ref_source,
         }
 
     if declared_kind not in ("bitwise", "within_tolerance"):
@@ -463,6 +517,7 @@ def _evaluate_single_manifest(
             "nondegeneracy": {"status": "not_checked_ring0"},
             "input_key": input_key,
             "input_sha256": inp,
+            "reference_source": ref_source,
         }
 
     all_bitwise = True
@@ -591,6 +646,7 @@ def _evaluate_single_manifest(
         "nondegeneracy": nondeg,
         "input_key": input_key,
         "input_sha256": inp,
+        "reference_source": ref_source,
     }
 
 
@@ -654,6 +710,7 @@ def _evaluate_cell(
     runs_by_id: Mapping[str, Run],
     validity_by_id: Mapping[str, ValidityResult],
     declared_cell_runs: Mapping[str, Sequence[str]],
+    expected_project_slug: str,
     sealed_dump_cache: dict[str, dict[str, np.ndarray]],
     hooks: Sequence[CellOverlayHook],
 ) -> dict[str, Any]:
@@ -689,13 +746,17 @@ def _evaluate_cell(
     cell_manifests = list(manifests_by_cell.get(cell_id, []))
     explicit_runs = list(declared_cell_runs.get(cell_id, ()))
 
-    # Filter/inspect runs via G04: catalog existence (B1), validity, terminal status, invariant_fail
+    # Filter/inspect runs via G04: catalog existence (B1), project ownership, validity, terminal status, invariant_fail
     usable_manifests: list[dict[str, Any]] = []
     saw_non_terminal = False
     saw_invariant_fail = False
+    saw_failed_run_status = False
     saw_terminal_without_evidence = False
+    saw_unknown_run = False
+    saw_wrong_project = False
     evidence_run_ids: list[str] = []
 
+    expected_slug_norm = expected_project_slug.strip().lower()
     manifest_run_ids = [str(m["run_id"]) for m in cell_manifests]
     for m in cell_manifests:
         rid = str(m["run_id"])
@@ -705,12 +766,21 @@ def _evaluate_cell(
         if val is not None and val.is_hidden:
             continue
         if run is None:
+            saw_unknown_run = True
             continue
-        if run.status not in ("completed", "failed"):
-            saw_non_terminal = True
+        if expected_slug_norm and run.project_slug.strip().lower() != expected_slug_norm:
+            saw_wrong_project = True
             continue
         if run.outcome == "invariant_fail":
             saw_invariant_fail = True
+            usable_manifests.append(m)
+            continue
+        if run.status == "failed":
+            saw_failed_run_status = True
+            continue
+        if run.status != "completed":
+            saw_non_terminal = True
+            continue
         usable_manifests.append(m)
 
     for rid in explicit_runs:
@@ -721,14 +791,28 @@ def _evaluate_cell(
             continue
         run = runs_by_id.get(rid)
         if run is None:
+            saw_unknown_run = True
             continue
-        if run.status not in ("completed", "failed"):
+        if expected_slug_norm and run.project_slug.strip().lower() != expected_slug_norm:
+            saw_wrong_project = True
+            continue
+        if run.outcome == "invariant_fail":
+            saw_invariant_fail = True
+            continue
+        if run.status == "failed":
+            saw_failed_run_status = True
+            continue
+        if run.status != "completed":
             saw_non_terminal = True
-        else:
-            if run.outcome == "invariant_fail":
-                saw_invariant_fail = True
-            if rid not in manifest_run_ids:
-                saw_terminal_without_evidence = True
+            continue
+        if rid not in manifest_run_ids:
+            saw_terminal_without_evidence = True
+
+    extra_flags: list[str] = []
+    if saw_unknown_run:
+        extra_flags.append("unknown_evidence_run")
+    if saw_wrong_project:
+        extra_flags.append("wrong_project_run")
 
     base_row: dict[str, Any] = {
         "cell_id": cell_id,
@@ -754,23 +838,30 @@ def _evaluate_cell(
         "input_sha256": {"ours": [], "reference": []},
         "pin_set": {},
         "nondegeneracy": {"status": "not_checked_ring0"},
-        "evidence_level": "self_reported",
+        "evidence_level": _derive_cell_evidence_level(()),
+        "reference_source": "sealed_dump" if ref_kind == "sealed_dump" else None,
         "overlays": [],
         "flags": [],
         "verdict": "not_run",
     }
 
+    per_run_evals: list[dict[str, Any]] = []
     # G04 evidence-absence, terminal-status, and invariant rules take precedence before G10
     if saw_invariant_fail:
         base_row["verdict"] = "fail"
-        base_row["flags"] = ["invariant_fail"]
+        base_row["flags"] = ["invariant_fail", *extra_flags]
+    elif saw_failed_run_status:
+        base_row["verdict"] = "inconclusive"
+        base_row["flags"] = ["run_failed", *extra_flags]
     elif saw_non_terminal:
         base_row["verdict"] = "not_run"
+        base_row["flags"] = list(extra_flags)
     elif saw_terminal_without_evidence:
         base_row["verdict"] = "inconclusive"
-        base_row["flags"] = ["run_failed"]
+        base_row["flags"] = ["run_failed", *extra_flags]
     elif not usable_manifests:
         base_row["verdict"] = "not_run"
+        base_row["flags"] = list(extra_flags)
     else:
         # Sort deterministically by catalog run order (never writer-set created_at) (S2)
         usable_manifests.sort(
@@ -819,6 +910,19 @@ def _evaluate_cell(
                     break
             if (saw_mixed or saw_fail_then_pass) and "pooled_run_failure" not in flags:
                 flags.append("pooled_run_failure")
+        for ef in extra_flags:
+            if ef not in flags:
+                flags.append(ef)
+
+        verdict = str(agg["verdict"])
+        if (saw_unknown_run or saw_wrong_project) and verdict == "pass":
+            verdict = "inconclusive"
+
+        ref_sources = [ev.get("reference_source") for ev in per_run_evals if ev.get("reference_source")]
+        if "evidence_bundle" in ref_sources:
+            base_row["reference_source"] = "evidence_bundle"
+        elif ref_sources:
+            base_row["reference_source"] = ref_sources[-1]
 
         base_row["cell_evidence_sha256"] = latest_manifest.get("manifest_sha256")
         base_row["cell_evidence_sha256s"] = [m.get("manifest_sha256") for m in usable_manifests]
@@ -842,7 +946,7 @@ def _evaluate_cell(
             "max_rel_diff": agg["max_rel_diff"],
             "arrays": latest_eval["per_array_metrics"],
         }
-        base_row["verdict"] = agg["verdict"]
+        base_row["verdict"] = verdict
         base_row["flags"] = flags
 
     for hook in hooks:
@@ -851,6 +955,11 @@ def _evaluate_cell(
             if ov not in base_row["overlays"]:
                 base_row["overlays"].append(ov)
 
+    base_row["evidence_level"] = _derive_cell_evidence_level(
+        per_run_evals,
+        overlays=base_row["overlays"],
+        flags=base_row["flags"],
+    )
     return base_row
 
 
@@ -866,6 +975,7 @@ def _build_result_payload(
     catalog_dir: Path | None,
     evidence_run_ids: Sequence[str] | None,
     declared_cell_runs: Mapping[str, Sequence[str]],
+    expected_project_slug: str,
     as_of: str,
     gate_stages: Mapping[str, str],
     comparison_backend: Mapping[str, Any],
@@ -873,7 +983,39 @@ def _build_result_payload(
 ) -> dict[str, Any]:
     record_id = str(declaration["parity"]["record_id"])
     uses_by_id = {str(u["id"]): u for u in declaration.get("use", [])}
+    allowed_cell_ids = {
+        compute_cell_id(
+            str(pc["component_id"]),
+            str(pc["use_id"]),
+            pc["knob_setting"],
+            pc["axis_value"],
+            str(pc["data_tier"]),
+            str(pc["pairing"]),
+        )
+        for pc in declaration.get("cell_plan", [])
+    }
+    if first_decl is not None:
+        for pc in first_decl.get("cell_plan", []):
+            allowed_cell_ids.add(
+                compute_cell_id(
+                    str(pc["component_id"]),
+                    str(pc["use_id"]),
+                    pc["knob_setting"],
+                    pc["axis_value"],
+                    str(pc["data_tier"]),
+                    str(pc["pairing"]),
+                )
+            )
     manifests = load_cell_evidence_for_record(store, record_id)
+    for m in manifests:
+        if m.get("record_id") != record_id:
+            raise CellEvidenceError(
+                f"Evidence manifest record_id {m.get('record_id')!r} does not match {record_id!r}"
+            )
+        if str(m.get("cell_id", "")) not in allowed_cell_ids:
+            raise CellEvidenceError(
+                f"Evidence manifest cell_id {m.get('cell_id')!r} is not in declared cell_plan for {record_id!r}"
+            )
     if evidence_run_ids is not None:
         allowed_runs = set(evidence_run_ids)
         manifests = [m for m in manifests if m.get("run_id") in allowed_runs]
@@ -958,6 +1100,7 @@ def _build_result_payload(
                 runs_by_id=runs_by_id,
                 validity_by_id=validity_by_id,
                 declared_cell_runs=declared_cell_runs,
+                expected_project_slug=expected_project_slug,
                 sealed_dump_cache=sealed_dump_cache,
                 hooks=all_hooks,
             )
@@ -997,6 +1140,7 @@ def _build_result_payload(
                     runs_by_id=runs_by_id,
                     validity_by_id=validity_by_id,
                     declared_cell_runs=declared_cell_runs,
+                    expected_project_slug=expected_project_slug,
                     sealed_dump_cache=sealed_dump_cache,
                     hooks=all_hooks,
                 )
@@ -1123,6 +1267,7 @@ def grade_parity_record(
         )
     baseline_sha = str(first_meta["declaration_sha256"])
     impl_rev = _resolve_decl_revision(store, record_id, decl_sha, first_meta)
+    expected_project_slug = _resolve_record_project_slug(dpath, declaration)
 
     if verify:
         if not out_p.is_file():
@@ -1165,6 +1310,7 @@ def grade_parity_record(
             catalog_dir=cat_dir,
             evidence_run_ids=replay_ev_runs,
             declared_cell_runs=replay_cell_runs,
+            expected_project_slug=expected_project_slug,
             as_of=replay_as_of,
             gate_stages=replay_gate_stages,
             comparison_backend=replay_backend,
@@ -1195,6 +1341,7 @@ def grade_parity_record(
         catalog_dir=cat_dir,
         evidence_run_ids=evidence_run_ids,
         declared_cell_runs=cell_runs or {},
+        expected_project_slug=expected_project_slug,
         as_of=effective_as_of,
         gate_stages={code: "shadow" for code in RING0_ACTIVE_G_CODES},
         comparison_backend=get_backend_identity(),

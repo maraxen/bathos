@@ -241,6 +241,7 @@ def _build_graded_fixture(tmp_path: Path, *, run_evidence: bool = True) -> tuple
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo(repo)
+    (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
     store_dir = tmp_path / "store"
     cat_dir = tmp_path / "catalog"
     init_catalog(cat_dir)
@@ -411,6 +412,7 @@ class TestReportGenerationAndNegativeControls:
         decl_path.write_text(strict_toml, encoding="utf-8")
         res_dir = tmp_path / "ex20"
         res_dir.mkdir()
+        (res_dir / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
         d20 = res_dir / "ex20.parity.bth.toml"
         d20.write_text(strict_toml.replace("demo-report-v1", "aminx-parity-v1"), encoding="utf-8")
         first_decl_res = declare_parity_record(d20, parity_store=store_dir, repo_root=decl_path.parent)
@@ -684,3 +686,214 @@ class TestReportCoreAndDisclosureTiers:
         assert "tier smoke" in t1
         assert "knobs 3/5" in t1
         assert validate_badge(t0, t1, body) == []
+
+    def test_item1_report_verify_refuses_unreplayed_or_forged_result_with_default_names(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
+        store_dir = tmp_path / "store"
+        cat_dir = tmp_path / "catalog"
+        init_catalog(cat_dir)
+
+        decl_path = repo / "frustra_demo.parity.bth.toml"
+        raw_toml = render_declaration_scaffold("aminx-demo-v1", impl_name="aminx").replace(
+            'kind = "sealed_dump"\n'
+            'identity = { dump_sha256 = "0000000000000000000000000000000000000000000000000000000000000000", producer_run_id = "run_0000", upstream_commit = "0000000000000000000000000000000000000000" }',
+            'kind = "upstream_live"\n'
+            f'identity = {{ repo = "https://github.com/example/upstream", commit = "{"a" * 40}" }}',
+        )
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id(decl)
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-fail",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat_dir,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="aminx-demo-v1",
+            cell_id=cid,
+            run_id="r-fail",
+            ours_arrays={"scores": np.array([2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        graded = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat_dir,
+            as_of="2026-11-24T12:00:00Z",
+            track_run=False,
+        )
+        assert graded.result_path.name == "frustra_demo.parity.result.json"
+        assert graded.result["clauses"][0]["axes"]["result"]["value"] == "FAILS"
+
+        rep_path, _rep = build_parity_report(
+            graded.result_path,
+            parity_store=store_dir,
+            catalog_dir=cat_dir,
+        )
+        assert rep_path.name == "aminx-demo-v1.parity.report.json"
+
+        # (a) Missing result file -> ParityReportVerifyError and CLI exit 1 (never VERIFIED)
+        orig_res_bytes = graded.result_path.read_bytes()
+        graded.result_path.unlink()
+        with pytest.raises(ParityReportVerifyError):
+            verify_parity_report(rep_path, parity_store=store_dir, catalog_dir=cat_dir)
+        proc_missing = _run_bth_cli(
+            "parity",
+            "report",
+            "verify",
+            str(rep_path),
+            "--parity-store",
+            str(store_dir),
+            "--catalog-dir",
+            str(cat_dir),
+            cwd=repo,
+        )
+        assert proc_missing.returncode == 1
+        assert "VERIFIED" not in proc_missing.stdout
+
+        # (b) Forged result + recomputed report_body/T2/T1/T0 -> verify_parity_report refuses without --result-path
+        forged_res = json.loads(orig_res_bytes.decode("utf-8"))
+        forged_res["clauses"][0]["axes"]["result"]["value"] = "PASSES"
+        forged_res_bytes = (json.dumps(forged_res, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        graded.result_path.write_bytes(forged_res_bytes)
+
+        forged_rep = json.loads(rep_path.read_text(encoding="utf-8"))
+        forged_rep["result_sha256"] = hashlib.sha256(forged_res_bytes).hexdigest()
+        forged_rep["clauses"] = forged_res["clauses"]
+        forged_rep = _recompute_badge(forged_rep)
+        rep_path.write_bytes(canonical_report_bytes(forged_rep))
+
+        with pytest.raises((ParityVerifyError, ParityReportVerifyError)):
+            verify_parity_report(rep_path, parity_store=store_dir, catalog_dir=cat_dir)
+        proc_forged = _run_bth_cli(
+            "parity",
+            "report",
+            "verify",
+            str(rep_path),
+            "--parity-store",
+            str(store_dir),
+            "--catalog-dir",
+            str(cat_dir),
+            cwd=repo,
+        )
+        assert proc_forged.returncode == 1
+        assert "VERIFIED" not in proc_forged.stdout
+
+    def test_item5_non_sealed_reference_disclosed_on_badge_and_evidence_level_derived(
+        self, tmp_path: Path
+    ) -> None:
+        from bathos.parity.npy_stdlib import encode_npz
+        from bathos.parity.sealed_dump import ingest_sealed_dump
+
+        # 1. upstream_live with reference_arrays in manifest -> reference_source=="evidence_bundle", reference_self_reported==True
+        (tmp_path / "live").mkdir()
+        decl_path, res_path, store_dir, cat_dir = _build_graded_fixture(tmp_path / "live", run_evidence=True)
+        res_obj = json.loads(res_path.read_text(encoding="utf-8"))
+        assert res_obj["cells"][0]["reference_source"] == "evidence_bundle"
+        assert res_obj["cells"][0]["evidence_level"] == "self_reported"
+        _, rep_live = build_parity_report(
+            res_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir
+        )
+        assert rep_live["parity_metadata"]["reference_self_reported"] is True
+        assert "reference self-reported" in rep_live["badge"]["t0"]
+        assert "reference self-reported" in rep_live["badge"]["t1"]
+        live_body = {k: v for k, v in rep_live.items() if k != "badge"}
+        assert validate_badge(rep_live["badge"]["t0"], rep_live["badge"]["t1"], live_body) == []
+
+        # 2. sealed_dump -> reference_source=="sealed_dump", reference_self_reported==False, NOT in T0 or T1
+        s_root = tmp_path / "sealed"
+        s_repo = s_root / "repo"
+        s_repo.mkdir(parents=True)
+        _init_git_repo(s_repo)
+        (s_repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
+        s_store_dir = s_root / "store"
+        s_cat_dir = s_root / "catalog"
+        init_catalog(s_cat_dir)
+        s_store = ParityStore(s_store_dir)
+        dump_bytes = encode_npz({"scores": np.array([1.0, 2.0], dtype=np.float32)})
+        dump_sha = hashlib.sha256(dump_bytes).hexdigest()
+        dump_p = s_root / "dump.npz"
+        dump_p.write_bytes(dump_bytes)
+        ingest_sealed_dump(dump_p, expected_sha256=dump_sha, store=s_store, stem="dump")
+
+        s_decl_path = s_repo / "sealed.parity.bth.toml"
+        s_toml = render_declaration_scaffold("sealed-badge-v1", impl_name="aminx").replace(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            dump_sha,
+            1,
+        )
+        s_decl_path.write_text(s_toml, encoding="utf-8")
+        s_decl = tomllib.loads(s_toml)
+        declare_parity_record(s_decl_path, parity_store=s_store_dir)
+        s_cid = _cell_id(s_decl)
+        write_run(
+            Run(project_slug="demo", command="bth run ev.py", argv=[], git_hash="0" * 40, git_branch="main", git_dirty=False, id="r-sealed", exit_code=0, status="completed", outcome="pass"),
+            s_cat_dir,
+        )
+        write_cell_evidence(
+            store=s_store,
+            record_id="sealed-badge-v1",
+            cell_id=s_cid,
+            run_id="r-sealed",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_dump_sha256=dump_sha,
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        g_sealed = grade_parity_record(
+            s_decl_path, parity_store=s_store_dir, catalog_dir=s_cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False
+        )
+        assert g_sealed.result["cells"][0]["reference_source"] == "sealed_dump"
+        assert g_sealed.result["cells"][0]["evidence_level"] == "self_reported"
+        _, rep_sealed = build_parity_report(
+            g_sealed.result_path, decl_path=s_decl_path, parity_store=s_store_dir, catalog_dir=s_cat_dir
+        )
+        assert rep_sealed["parity_metadata"]["reference_self_reported"] is False
+        assert "reference self-reported" not in rep_sealed["badge"]["t0"]
+        assert "reference self-reported" not in rep_sealed["badge"]["t1"]
+
+        # 3. Derived evidence_level: "none" when not_run; "reexecuted" when reexecuted hook propagates
+        (tmp_path / "nr").mkdir()
+        nr_decl_path, nr_res_path, nr_store, nr_cat = _build_graded_fixture(tmp_path / "nr", run_evidence=False)
+        nr_res = json.loads(nr_res_path.read_text(encoding="utf-8"))
+        assert nr_res["cells"][0]["evidence_level"] == "none"
+
+        def _reexec_hook(_cell: dict, _decl: dict) -> list[str]:
+            return ["reexecuted"]
+
+        g_re = grade_parity_record(
+            s_decl_path,
+            parity_store=s_store_dir,
+            catalog_dir=s_cat_dir,
+            as_of="2026-11-24T12:00:00Z",
+            track_run=False,
+            overlay_hooks=(_reexec_hook,),
+        )
+        assert g_re.result["cells"][0]["evidence_level"] == "reexecuted"
+        _, rep_re = build_parity_report(
+            g_re.result_path,
+            decl_path=s_decl_path,
+            parity_store=s_store_dir,
+            catalog_dir=s_cat_dir,
+            overlay_hooks=(_reexec_hook,),
+        )
+        assert rep_re["evidence_level"] == "reexecuted"
+        assert "reexecuted" in rep_re["badge"]["t0"].split(" · ")
+        assert "reexecuted" in rep_re["badge"]["t1"].split(" · ")

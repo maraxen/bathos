@@ -44,7 +44,12 @@
     "record_id": { "type": "string", "minLength": 1 },
     "record_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "result_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "parity_metadata": { "type": "object" },
+    "parity_metadata": {
+      "type": "object",
+      "properties": {
+        "reference_self_reported": { "type": "boolean" }
+      }
+    },
     "tool": { "type": "object", "required": ["name", "repo", "revision", "licence"] },
     "references": { "type": "array" },
     "environment": { "type": "object" },

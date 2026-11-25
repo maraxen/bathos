@@ -511,6 +511,21 @@ def _validate_use_entry(
                             ("atol", "rtol"),
                             issues,
                         )
+                        for num_f in ("atol", "rtol"):
+                            val = band.get(num_f)
+                            if val is not None and (
+                                isinstance(val, bool)
+                                or not isinstance(val, (int, float))
+                                or not math.isfinite(float(val))
+                                or val < 0
+                            ):
+                                issues.append(
+                                    ValidationIssue(
+                                        f"{prefix}.precision_amplification.max_useful_tolerance.{dtype_name}.{num_f}",
+                                        "G01_VALUE",
+                                        f"{num_f} must be finite and >= 0",
+                                    )
+                                )
             elif mut is not None:
                 issues.append(
                     ValidationIssue(
@@ -1210,6 +1225,18 @@ def validate_result_structure(result: Mapping[str, Any]) -> list[ValidationIssue
                         f"result.cells[{idx}].verdict",
                         "RESULT_VERDICT",
                         f"invalid verdict {cell.get('verdict')!r}",
+                    )
+                )
+            if (
+                "reference_source" in cell
+                and cell["reference_source"] is not None
+                and not isinstance(cell["reference_source"], str)
+            ):
+                issues.append(
+                    ValidationIssue(
+                        f"result.cells[{idx}].reference_source",
+                        "RESULT_TYPE",
+                        "reference_source must be a string or null",
                     )
                 )
 

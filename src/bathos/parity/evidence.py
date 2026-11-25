@@ -333,7 +333,8 @@ def validate_cell_evidence(
 
 def load_cell_evidence_for_record(store: ParityStore, record_id: str) -> list[dict[str, Any]]:
     """Load and verify all indexed ``cell_evidence.v1`` manifests for *record_id*."""
-    ev_dir = _safe_evidence_dir(store, record_id)
+    safe_record_id = validate_safe_store_segment(record_id, "record_id")
+    ev_dir = _safe_evidence_dir(store, safe_record_id)
     if not ev_dir.is_dir():
         return []
     manifests: list[dict[str, Any]] = []
@@ -363,6 +364,20 @@ def load_cell_evidence_for_record(store: ParityStore, record_id: str) -> list[di
         if blob_obj != idx_body:
             raise CellEvidenceError(
                 f"Evidence index {json_file} does not match content-addressed manifest {m_sha}"
+            )
+        expected_run_id = json_file.parent.name
+        expected_cell_id = json_file.stem
+        if idx_obj.get("record_id") != safe_record_id:
+            raise CellEvidenceError(
+                f"Evidence index {json_file} record_id {idx_obj.get('record_id')!r} does not match {safe_record_id!r}"
+            )
+        if idx_obj.get("run_id") != expected_run_id:
+            raise CellEvidenceError(
+                f"Evidence index {json_file} run_id {idx_obj.get('run_id')!r} does not match directory {expected_run_id!r}"
+            )
+        if idx_obj.get("cell_id") != expected_cell_id:
+            raise CellEvidenceError(
+                f"Evidence index {json_file} cell_id {idx_obj.get('cell_id')!r} does not match filename {expected_cell_id!r}"
             )
         manifests.append(idx_obj)
     manifests.sort(key=lambda m: (str(m.get("created_at", "")), str(m.get("run_id", "")), str(m.get("cell_id", ""))))
