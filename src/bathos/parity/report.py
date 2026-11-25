@@ -16,6 +16,7 @@ from typing import Any
 from bathos.parity.badge import (
     BadgeValidationError,
     ReportLintError,
+    format_impl_revision,
     format_kind_set,
     lint_rendered_text,
     render_t0,
@@ -25,7 +26,7 @@ from bathos.parity.badge import (
 from bathos.parity.declare import load_parsed_declaration
 from bathos.parity.evidence import load_cell_evidence_for_record
 from bathos.parity.grader import CellOverlayHook, grade_parity_record
-from bathos.parity.schema import ValidationIssue, canonical_json
+from bathos.parity.schema import WEIGHTS_CHECKPOINT_STATUSES, ValidationIssue, canonical_json
 from bathos.parity.store import (
     ParityStore,
     atomic_write_bytes,
@@ -293,6 +294,7 @@ def build_parity_report(
     overlay_hooks: Sequence[CellOverlayHook] = (),
     output_path: Path | str | None = None,
     optional_sections: Mapping[str, Any] | None = None,
+    write: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     """Build T2 report JSON (`parity_report.v1`), T3 manifest, and T0/T1 badge."""
     rpath = Path(result_path).resolve()
@@ -331,15 +333,53 @@ def build_parity_report(
     store, store_res = require_parity_store(explicit=parity_store, start_dir=resolve_start_dir(dpath))
     store_meta = {"path": str(store.root), "layer": store_res.source}
     bundle_sha, _t3_manifest = build_t3_bundle_manifest(
-        result=result, declaration=declaration, store=store, store_meta=store_meta
+        result=result, declaration=declaration, store=store, store_meta=store_meta, write=write
     )
 
     parity_sec = declaration.get("parity", {})
     impl_sec = declaration.get("implementation", {})
     weights_sec = impl_sec.get("weights")
-    weights_attested_only = isinstance(weights_sec, Mapping) and str(
-        weights_sec.get("source_checkpoint_status", "")
-    ).strip().startswith("attested_only")
+    weights_attested_only = False
+    weights_status: str | None = None
+    implementation_weights: dict[str, Any] | None = None
+    if "weights" in impl_sec and weights_sec is not None:
+        if not isinstance(weights_sec, Mapping):
+            raise ParityReportVerifyError("[implementation.weights] must be a table")
+        raw_status = weights_sec.get("source_checkpoint_status")
+        if not isinstance(raw_status, str) or raw_status not in WEIGHTS_CHECKPOINT_STATUSES:
+            raise ParityReportVerifyError(
+                f"[implementation.weights].source_checkpoint_status invalid: {raw_status!r} "
+                f"(expected one of {sorted(WEIGHTS_CHECKPOINT_STATUSES)})"
+            )
+        weights_status = raw_status
+        weights_attested_only = raw_status.startswith("attested_only")
+        res_weights = result.get("implementation_weights")
+        if isinstance(res_weights, Mapping):
+            implementation_weights = dict(res_weights)
+        else:
+            implementation_weights = {
+                "artifact_path": str(weights_sec.get("artifact_path", "")),
+                "artifact_sha256": str(weights_sec.get("artifact_sha256", "")),
+                "source_checkpoint_status": raw_status,
+            }
+            if weights_sec.get("hf_repo") is not None:
+                implementation_weights["hf_repo"] = str(weights_sec["hf_repo"])
+            if weights_sec.get("hf_revision") is not None:
+                implementation_weights["hf_revision"] = str(weights_sec["hf_revision"])
+
+    ev_runs = list(result.get("evidence_runs", []))
+    dirty_run_ids = sorted(
+        {
+            *(
+                str(r["run_id"])
+                for r in ev_runs
+                if isinstance(r, Mapping) and r.get("git_dirty") and r.get("run_id")
+            ),
+            *(str(rid) for rid in result.get("dirty_evidence_run_ids", []) if rid),
+        }
+    )
+    has_dirty_evidence_run = bool(result.get("has_dirty_evidence_run")) or bool(dirty_run_ids)
+
     superseded_ids = result.get("superseded_run_ids")
     superseded_runs_count = (
         len(superseded_ids)
@@ -349,8 +389,13 @@ def build_parity_report(
     is_legacy = bool(result.get("legacy") or parity_sec.get("legacy"))
     tolerances = declaration.get("tolerance", [])
     has_owner_stated_tol = any(t.get("basis") == "owner_stated" for t in tolerances)
-    impl_rev = str(
+    raw_impl_rev = str(
         result.get("grade_inputs", {}).get("target_revisions", {}).get("implementation", "0" * 40)
+    )
+    impl_rev = (
+        raw_impl_rev
+        if raw_impl_rev.endswith("+dirty") or not has_dirty_evidence_run
+        else f"{raw_impl_rev}+dirty"
     )
 
     opt = dict(optional_sections or {})
@@ -386,6 +431,9 @@ def build_parity_report(
             "has_owner_stated_tolerance": has_owner_stated_tol,
             "reference_self_reported": reference_self_reported,
             "weights_attested_only": weights_attested_only,
+            **({"weights_status": weights_status} if weights_status is not None else {}),
+            "has_dirty_evidence_run": has_dirty_evidence_run,
+            "dirty_evidence_run_ids": dirty_run_ids,
             **(
                 {"superseded_runs_count": superseded_runs_count}
                 if superseded_runs_count > 0
@@ -393,6 +441,7 @@ def build_parity_report(
             ),
             **({"legacy": True} if is_legacy else {}),
         },
+        **({"implementation_weights": implementation_weights} if implementation_weights is not None else {}),
         "tool": {
             "name": impl_sec.get("name"),
             "repo": impl_sec.get("repo"),
@@ -404,7 +453,7 @@ def build_parity_report(
         "environment": {
             "pool_critical": list(declaration.get("environment", {}).get("pool_critical", [])),
             "frameworks": dict(declaration.get("environment", {}).get("frameworks", {})),
-            "evidence_runs": list(result.get("evidence_runs", [])),
+            "evidence_runs": ev_runs,
         },
         "uses": list(declaration.get("use", [])),
         "tolerances": list(tolerances),
@@ -468,7 +517,8 @@ def build_parity_report(
         if output_path is not None
         else _default_report_path(rpath, str(result["record_id"]))
     )
-    atomic_write_bytes(out_p, canonical_report_bytes(full_report))
+    if write:
+        atomic_write_bytes(out_p, canonical_report_bytes(full_report))
     return out_p, full_report
 
 
@@ -703,6 +753,33 @@ def verify_parity_report(
             raise ParityReportVerifyError(
                 f"TIER_LINK_BROKEN:T3 bundle_sha256 mismatch: stored={bundle_sha!r}, recomputed={recomputed_bundle_sha!r}"
             )
+
+        try:
+            _rebuilt_path, rebuilt_report = build_parity_report(
+                res_p,
+                decl_path=dpath,
+                parity_store=parity_store,
+                catalog_dir=catalog_dir,
+                mode_state_dir=mode_state_dir,
+                evidence_run_ids=evidence_run_ids,
+                cell_runs=cell_runs,
+                overlay_hooks=overlay_hooks,
+                write=False,
+            )
+        except (BadgeValidationError, ReportLintError, ValueError) as exc:
+            raise ParityReportVerifyError(
+                f"TIER_LINK_BROKEN:T2 failed to rebuild report for verification: {exc}"
+            ) from exc
+
+        if canonical_report_bytes(report) != canonical_report_bytes(rebuilt_report):
+            diff_keys = sorted(
+                k
+                for k in set(report.keys()) | set(rebuilt_report.keys())
+                if report.get(k) != rebuilt_report.get(k)
+            )
+            raise ParityReportVerifyError(
+                f"TIER_LINK_BROKEN:T2 report body mismatch against rebuilt report (differing keys: {diff_keys})"
+            )
         result_verified = True
 
     return {
@@ -741,6 +818,27 @@ def _render_gates_summary(gates: list[Mapping[str, Any]]) -> str:
     return f"{enf} enforce, {adv} advisory, {shd} shadow, {na} not active"
 
 
+def _weights_provenance_text(report: Mapping[str, Any]) -> str | None:
+    pmeta = report.get("parity_metadata", {})
+    w_obj = report.get("implementation_weights")
+    status = pmeta.get("weights_status")
+    if status is None and isinstance(w_obj, Mapping):
+        status = w_obj.get("source_checkpoint_status")
+    attested_only = pmeta.get("weights_attested_only")
+    if status is None and not attested_only:
+        return None
+    if status is not None:
+        if not isinstance(status, str) or status not in WEIGHTS_CHECKPOINT_STATUSES:
+            raise ParityReportVerifyError(f"Invalid weights source_checkpoint_status {status!r}")
+        sha_suffix = ""
+        if isinstance(w_obj, Mapping) and w_obj.get("artifact_sha256"):
+            sha_suffix = f", artifact sha256 {str(w_obj['artifact_sha256'])[:12]}"
+        if status.startswith("attested_only"):
+            return f"attested-only ({status}{sha_suffix}; source checkpoint not re-derived)"
+        return f"rederived ({status}{sha_suffix})"
+    return "attested-only (source checkpoint not re-derived)"
+
+
 def render_report_markdown(report: Mapping[str, Any]) -> str:
     """Render deterministic Markdown summary + matrix strictly from report JSON (§9.2)."""
     verify_report_tier_chain_in_memory(report)
@@ -752,6 +850,11 @@ def render_report_markdown(report: Mapping[str, Any]) -> str:
     checks_pending = (not clauses_list) or any(
         cl["axes"]["assurance"]["value"] == "PROVISIONAL" for cl in clauses_list
     )
+    impl_rev_disp = format_impl_revision(
+        str(tool["revision"]),
+        dirty=bool(report.get("parity_metadata", {}).get("has_dirty_evidence_run")),
+    )
+    weights_prov = _weights_provenance_text(report)
 
     lines: list[str] = [
         f"# Comparison Report: `{report['record_id']}`",
@@ -761,7 +864,7 @@ def render_report_markdown(report: Mapping[str, Any]) -> str:
         f"- **T2 Hash:** `{badge['t2_sha256']}`",
         f"- **T3 Bundle Hash:** `{report['bundle_sha256']}`",
         f"- **Evidence level:** {report.get('evidence_level', 'self_reported')}",
-        f"- **Implementation:** `{tool['name']}@{str(tool['revision'])[:12]}` ({tool['licence']})",
+        f"- **Implementation:** `{tool['name']}@{impl_rev_disp}` ({tool['licence']})",
         f"- **Coverage:** {counts['passing']}/{counts['required']} passing "
         f"(not_run={counts['not_run']}, not_covered={counts['not_covered']}, waived={counts['waived']})",
         f"- **Gates:** {_render_gates_summary(report['gates'])}",
@@ -771,11 +874,7 @@ def render_report_markdown(report: Mapping[str, Any]) -> str:
         f"- **Amendments:** {report['amendments']}",
         f"- **Audit:** {report['audit']}",
         f"- **Provenance:** {report['provenance']}",
-        *(
-            ["- **Weights provenance:** attested-only (source checkpoint not re-derived)"]
-            if report.get("parity_metadata", {}).get("weights_attested_only")
-            else []
-        ),
+        *([f"- **Weights provenance:** {weights_prov}"] if weights_prov is not None else []),
         "",
         "## Uses",
         "",
@@ -841,6 +940,17 @@ def render_report_html(report: Mapping[str, Any]) -> str:
     def _e(v: Any) -> str:
         return html.escape(str(v), quote=True)
 
+    impl_rev_disp = format_impl_revision(
+        str(tool["revision"]),
+        dirty=bool(report.get("parity_metadata", {}).get("has_dirty_evidence_run")),
+    )
+    weights_prov = _weights_provenance_text(report)
+    weights_prov_html = (
+        f"<li><strong>Weights provenance:</strong> {_e(weights_prov)}</li>"
+        if weights_prov is not None
+        else ""
+    )
+
     rows_html: list[str] = []
     for c in cells:
         bg = _VERDICT_COLORS.get(str(c["verdict"]), "#ffffff")
@@ -894,7 +1004,7 @@ th {{ background: #f6f8fa; }}
   <li><strong>T2 Body SHA-256:</strong> <code>{_e(badge['t2_sha256'])}</code></li>
   <li><strong>T3 Bundle SHA-256:</strong> <code>{_e(report['bundle_sha256'])}</code></li>
   <li><strong>Evidence level:</strong> {_e(report.get('evidence_level', 'self_reported'))}</li>
-  <li><strong>Implementation:</strong> <code>{_e(tool['name'])}@{_e(str(tool['revision'])[:12])}</code></li>
+  <li><strong>Implementation:</strong> <code>{_e(tool['name'])}@{_e(impl_rev_disp)}</code></li>
   <li><strong>Coverage:</strong> {_e(counts['passing'])}/{_e(counts['required'])} passing (not_run={_e(counts['not_run'])}, not_covered={_e(counts['not_covered'])}, waived={_e(counts['waived'])})</li>
   <li><strong>Gates:</strong> {_e(_render_gates_summary(report['gates']))}</li>
   <li><strong>Prior records on pair:</strong> {_e(report['prior_records_on_pair'])}</li>
@@ -903,7 +1013,7 @@ th {{ background: #f6f8fa; }}
   <li><strong>Amendments:</strong> {_e(report['amendments'])}</li>
   <li><strong>Audit:</strong> {_e(report['audit'])}</li>
   <li><strong>Provenance:</strong> {_e(report['provenance'])}</li>
-  {("<li><strong>Weights provenance:</strong> attested-only (source checkpoint not re-derived)</li>" if report.get("parity_metadata", {}).get("weights_attested_only") else "")}
+  {weights_prov_html}
 </ul>
 <h2>Cell Verdict Matrix</h2>
 <table>
@@ -1002,4 +1112,29 @@ def validate_report_structure(report: Mapping[str, Any]) -> list[ValidationIssue
         or not str(ps.get("layer")).strip()
     ):
         issues.append(ValidationIssue("report.parity_store", "REPORT_STORE", "parity_store must have non-empty path and layer"))
+    pmeta = report.get("parity_metadata")
+    if isinstance(pmeta, Mapping):
+        for bool_k in ("weights_attested_only", "has_dirty_evidence_run"):
+            if bool_k in pmeta and pmeta[bool_k] is not None and not isinstance(pmeta[bool_k], bool):
+                issues.append(
+                    ValidationIssue(f"report.parity_metadata.{bool_k}", "REPORT_TYPE", f"{bool_k} must be boolean")
+                )
+        w_st = pmeta.get("weights_status")
+        if w_st is not None and (not isinstance(w_st, str) or w_st not in WEIGHTS_CHECKPOINT_STATUSES):
+            issues.append(
+                ValidationIssue(
+                    "report.parity_metadata.weights_status",
+                    "REPORT_ENUM",
+                    f"invalid weights_status {w_st!r}",
+                )
+            )
+        drids = pmeta.get("dirty_evidence_run_ids")
+        if drids is not None and (not isinstance(drids, list) or any(not isinstance(x, str) for x in drids)):
+            issues.append(
+                ValidationIssue(
+                    "report.parity_metadata.dirty_evidence_run_ids",
+                    "REPORT_TYPE",
+                    "dirty_evidence_run_ids must be list of strings",
+                )
+            )
     return issues

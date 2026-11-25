@@ -1808,3 +1808,236 @@ class TestMinimalGraderAndNCs:
         assert c7["verdict"] == "inconclusive"
         assert "run_failed" in c7["flags"]
         assert g7.result.get("superseded_run_ids", []) == []
+
+
+class TestRing1FindingsWeightsAndDirtyRuns:
+    def _setup_repo_with_run(self, tmp_path: Path, *, git_dirty: bool = False) -> tuple[Path, Path, Path, Path, dict]:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
+        store = tmp_path / "store"
+        cat = tmp_path / "catalog"
+        init_catalog(cat)
+        decl_path = repo / "demo.parity.bth.toml"
+        raw_toml = render_declaration_scaffold("demo-weights-v1", impl_name="aminx").replace(
+            'kind = "sealed_dump"\n'
+            'identity = { dump_sha256 = "0000000000000000000000000000000000000000000000000000000000000000", producer_run_id = "run_0000", upstream_commit = "0000000000000000000000000000000000000000" }',
+            'kind = "upstream_live"\n'
+            f'identity = {{ repo = "https://github.com/example/upstream", commit = "{"a" * 40}" }}',
+        )
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=git_dirty,
+                id="r-ev-1",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-weights-v1",
+            cell_id=cid,
+            run_id="r-ev-1",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        return repo, store, cat, decl_path, decl
+
+    def test_finding1_weights_artifact_hash_verified_and_tamper_refused(self, tmp_path: Path) -> None:
+        from bathos.parity.grader import ParityGradeError
+
+        repo, store, cat, decl_path, _decl = self._setup_repo_with_run(tmp_path)
+        weights_file = repo / "data" / "weights" / "model.eqx.zst"
+        weights_file.parent.mkdir(parents=True)
+        weights_bytes = b"trained-weights-payload-v1"
+        weights_file.write_bytes(weights_bytes)
+        weights_sha = hashlib.sha256(weights_bytes).hexdigest()
+
+        base_toml = decl_path.read_text(encoding="utf-8")
+        decl_path.write_text(
+            base_toml
+            + (
+                '\n[implementation.weights]\n'
+                'artifact_path = "data/weights/model.eqx.zst"\n'
+                f'artifact_sha256 = "{weights_sha}"\n'
+                'source_checkpoint_status = "rederived"\n'
+                'hf_repo = "example/aminx-weights"\n'
+                f'hf_revision = "{"c" * 40}"\n'
+            ),
+            encoding="utf-8",
+        )
+        declare_parity_record(decl_path, parity_store=store)
+
+        graded = grade_parity_record(
+            decl_path, parity_store=store, catalog_dir=cat, as_of="2026-11-24T12:00:00Z", track_run=False
+        )
+        assert graded.result["implementation_weights"] == {
+            "artifact_path": "data/weights/model.eqx.zst",
+            "artifact_sha256": weights_sha,
+            "source_checkpoint_status": "rederived",
+            "hf_repo": "example/aminx-weights",
+            "hf_revision": "c" * 40,
+        }
+        res_schema = json.loads(
+            importlib.resources.files("bathos").joinpath("schemas", "parity_result.v1.json").read_text(encoding="utf-8")
+        )
+        jsonschema.validate(instance=graded.result, schema=res_schema)
+
+        # (a) Mutate bytes on disk so hash != artifact_sha256 -> grader refuses with ParityGradeError
+        weights_file.write_bytes(b"corrupted-weights-bytes")
+        with pytest.raises(ParityGradeError, match="artifact_sha256 mismatch"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+        with pytest.raises(ParityGradeError, match="artifact_sha256 mismatch"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, verify=True)
+
+        # (b) Remove weights file on disk -> grader refuses with ParityGradeError
+        weights_file.unlink()
+        with pytest.raises(ParityGradeError, match="does not exist"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+    def test_finding3_loads_trained_params_and_invalid_status_fail_closed_in_grader(self, tmp_path: Path) -> None:
+        from bathos.parity.grader import ParityGradeError, _verify_implementation_weights
+
+        repo, store, cat, decl_path, _decl = self._setup_repo_with_run(tmp_path)
+        base_toml = decl_path.read_text(encoding="utf-8")
+
+        # loads_trained_parameters = true without [implementation.weights] refused
+        decl_path.write_text(
+            base_toml.replace("third_party = false", "third_party = false\nloads_trained_parameters = true"),
+            encoding="utf-8",
+        )
+        with pytest.raises(ParityValidationError):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+        with pytest.raises(ParityGradeError, match="loads_trained_parameters"):
+            _verify_implementation_weights(
+                declaration=tomllib.loads(decl_path.read_text(encoding="utf-8")),
+                decl_path=decl_path,
+                manifests=[],
+            )
+
+        # Invalid source_checkpoint_status refused both by validate_declaration and grader fail-closed helper
+        wfile = repo / "data" / "weights" / "model.eqx.zst"
+        wfile.parent.mkdir(parents=True)
+        wbytes = b"bytes"
+        wfile.write_bytes(wbytes)
+        wsha = hashlib.sha256(wbytes).hexdigest()
+        for bad_st in ("verified_local", "Attested_Only", "attested-only"):
+            decl_path.write_text(
+                base_toml
+                + (
+                    '\n[implementation.weights]\n'
+                    'artifact_path = "data/weights/model.eqx.zst"\n'
+                    f'artifact_sha256 = "{wsha}"\n'
+                    f'source_checkpoint_status = "{bad_st}"\n'
+                ),
+                encoding="utf-8",
+            )
+            with pytest.raises(ParityValidationError):
+                grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+            with pytest.raises(ParityGradeError, match="source_checkpoint_status"):
+                _verify_implementation_weights(
+                    declaration=tomllib.loads(decl_path.read_text(encoding="utf-8")),
+                    decl_path=decl_path,
+                    manifests=[],
+                )
+
+    def test_finding3_manifest_weights_requires_declaration_weights(self, tmp_path: Path) -> None:
+        from bathos.parity.grader import ParityGradeError
+
+        (tmp_path / "no_weights_needed").mkdir()
+        _r0, store0, cat0, decl0, _d0 = self._setup_repo_with_run(tmp_path / "no_weights_needed")
+        declare_parity_record(decl0, parity_store=store0)
+        g0 = grade_parity_record(decl0, parity_store=store0, catalog_dir=cat0, track_run=False)
+        assert "implementation_weights" not in g0.result
+
+        # Manifest declaring weights_path or weights_sha256 without [implementation.weights] -> ParityGradeError
+        for extra_key, extra_val in (("weights_path", "data/w.bin"), ("weights_sha256", "d" * 64)):
+            sub = tmp_path / f"manifest_{extra_key}"
+            sub.mkdir()
+            repo, store, cat, decl_path, decl = self._setup_repo_with_run(sub)
+            declare_parity_record(decl_path, parity_store=store)
+            cid = _cell_id_from_decl(decl)
+            ev_index_path = store / "evidence" / "demo-weights-v1" / "r-ev-1" / f"{cid}.json"
+            idx_obj = json.loads(ev_index_path.read_text(encoding="utf-8"))
+            idx_body = {k: v for k, v in idx_obj.items() if k != "manifest_sha256"}
+            idx_body[extra_key] = extra_val
+            m_bytes = (json.dumps(idx_body, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+            m_sha = ParityStore(store).put_bytes(m_bytes)
+            atomic_write_json(ev_index_path, {"manifest_sha256": m_sha, **idx_body})
+
+            with pytest.raises(ParityGradeError, match="implementation.weights"):
+                grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+    def test_finding4_dirty_evidence_runs_recorded_and_mock_defaults_cleanly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Clean run
+        (tmp_path / "clean").mkdir()
+        _rc, store_c, cat_c, decl_c, _dc = self._setup_repo_with_run(tmp_path / "clean", git_dirty=False)
+        declare_parity_record(decl_c, parity_store=store_c)
+        gc = grade_parity_record(decl_c, parity_store=store_c, catalog_dir=cat_c, track_run=False)
+        assert gc.result["evidence_runs"][0]["git_dirty"] is False
+        assert gc.result["has_dirty_evidence_run"] is False
+        assert gc.result["dirty_evidence_run_ids"] == []
+
+        # Dirty run
+        (tmp_path / "dirty").mkdir()
+        _rd, store_d, cat_d, decl_d, _dd = self._setup_repo_with_run(tmp_path / "dirty", git_dirty=True)
+        declare_parity_record(decl_d, parity_store=store_d)
+        gd = grade_parity_record(decl_d, parity_store=store_d, catalog_dir=cat_d, track_run=False)
+        assert gd.result["evidence_runs"][0]["git_dirty"] is True
+        assert gd.result["has_dirty_evidence_run"] is True
+        assert gd.result["dirty_evidence_run_ids"] == ["r-ev-1"]
+        # Does NOT block cell verdict yet
+        assert gd.result["cells"][0]["verdict"] == "pass"
+
+        # Mock run without git_dirty attribute defaults cleanly to False; mock with git_dirty=True preserves True
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "bathos.parity.grader._load_runs_by_id",
+            lambda _cat, _rids: {
+                "r-ev-1": SimpleNamespace(
+                    id="r-ev-1",
+                    project_slug="demo",
+                    status="completed",
+                    outcome="pass",
+                    timestamp="2026-11-24T00:00:00Z",
+                )
+            },
+        )
+        gm = grade_parity_record(decl_c, parity_store=store_c, catalog_dir=cat_c, track_run=False)
+        assert gm.result["evidence_runs"][0]["git_dirty"] is False
+        assert gm.result["has_dirty_evidence_run"] is False
+
+        # Mock run with git_dirty=True preserves True
+        monkeypatch.setattr(
+            "bathos.parity.grader._load_runs_by_id",
+            lambda _cat, _rids: {
+                "r-ev-1": SimpleNamespace(
+                    id="r-ev-1",
+                    project_slug="demo",
+                    status="completed",
+                    outcome="pass",
+                    timestamp="2026-11-24T00:00:00Z",
+                    git_dirty=True,
+                )
+            },
+        )
+        gm_dirty = grade_parity_record(decl_c, parity_store=store_c, catalog_dir=cat_c, track_run=False)
+        assert gm_dirty.result["evidence_runs"][0]["git_dirty"] is True
+        assert gm_dirty.result["has_dirty_evidence_run"] is True
+        assert gm_dirty.result["dirty_evidence_run_ids"] == ["r-ev-1"]
+

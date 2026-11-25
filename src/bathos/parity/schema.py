@@ -22,6 +22,7 @@ _SUPERSEDES_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,80}@[0-9a-f]{12}\Z")
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 # Closed vocabularies (§3.2 - §3.10)
+WEIGHTS_CHECKPOINT_STATUSES = frozenset({"rederived", "attested_only", "attested_only_source_deleted"})
 PRONGS = frozenset({"reimplementation", "optimisation", "approximation"})
 LAYERS_UNDER_TEST = frozenset({"kernel", "module", "model", "pipeline", "api", "cli"})
 INSTRUMENTATIONS = frozenset({"instrumented", "black_box"})
@@ -245,6 +246,64 @@ def compute_cell_id(
 
 def _is_nonempty_str(val: Any) -> bool:
     return isinstance(val, str) and bool(val.strip())
+
+
+def is_sha256_hex(val: Any) -> bool:
+    """Return True if *val* is a 64-char lowercase hexadecimal SHA-256 digest."""
+    return isinstance(val, str) and bool(_SHA256_HEX_RE.match(val))
+
+
+def _validate_implementation_weights(
+    weights: Any,
+    prefix: str,
+    issues: list[ValidationIssue],
+    *,
+    code_prefix: str = "G01",
+) -> None:
+    if not isinstance(weights, Mapping):
+        issues.append(ValidationIssue(prefix, f"{code_prefix}_TYPE", f"{prefix} must be a table"))
+        return
+    _require_fields(
+        weights,
+        prefix,
+        ("artifact_path", "artifact_sha256", "source_checkpoint_status"),
+        issues,
+    )
+    _require_nonempty_str_fields(
+        weights,
+        prefix,
+        ("artifact_path", "artifact_sha256", "source_checkpoint_status"),
+        issues,
+    )
+    asha = weights.get("artifact_sha256")
+    if isinstance(asha, str) and asha.strip() and not is_sha256_hex(asha):
+        issues.append(
+            ValidationIssue(
+                f"{prefix}.artifact_sha256",
+                f"{code_prefix}_VALUE",
+                "artifact_sha256 must be a 64-char lowercase hex sha256",
+            )
+        )
+    status = weights.get("source_checkpoint_status")
+    if isinstance(status, str) and status.strip() and status not in WEIGHTS_CHECKPOINT_STATUSES:
+        issues.append(
+            ValidationIssue(
+                f"{prefix}.source_checkpoint_status",
+                f"{code_prefix}_ENUM",
+                f"invalid source_checkpoint_status {status!r}; expected one of {sorted(WEIGHTS_CHECKPOINT_STATUSES)}",
+            )
+        )
+    for opt_field in ("hf_repo", "hf_revision"):
+        if opt_field in weights and weights[opt_field] is not None:
+            val = weights[opt_field]
+            if not isinstance(val, str):
+                issues.append(
+                    ValidationIssue(f"{prefix}.{opt_field}", f"{code_prefix}_TYPE", f"'{prefix}.{opt_field}' must be a string")
+                )
+            elif not val.strip():
+                issues.append(
+                    ValidationIssue(f"{prefix}.{opt_field}", f"{code_prefix}_EMPTY_FIELD", f"'{prefix}.{opt_field}' must be non-empty")
+                )
 
 
 def _require_fields(
@@ -677,6 +736,30 @@ def validate_declaration(data: Mapping[str, Any]) -> list[ValidationIssue]:
                     "[implementation] must not declare 'revision' (recorded per run under G06)",
                 )
             )
+        loads_trained = False
+        if "loads_trained_parameters" in impl and impl["loads_trained_parameters"] is not None:
+            ltp = impl["loads_trained_parameters"]
+            if not isinstance(ltp, bool):
+                issues.append(
+                    ValidationIssue(
+                        "implementation.loads_trained_parameters",
+                        "G01_TYPE",
+                        "loads_trained_parameters must be a boolean",
+                    )
+                )
+            else:
+                loads_trained = ltp
+        weights = impl.get("weights")
+        if loads_trained and ("weights" not in impl or weights is None):
+            issues.append(
+                ValidationIssue(
+                    "implementation.weights",
+                    "G01_MISSING_SECTION",
+                    "[implementation.weights] is required when implementation.loads_trained_parameters is true",
+                )
+            )
+        elif "weights" in impl and weights is not None:
+            _validate_implementation_weights(weights, "implementation.weights", issues)
     elif impl is not None:
         issues.append(ValidationIssue("implementation", "G01_TYPE", "[implementation] must be a table"))
 
@@ -1191,6 +1274,28 @@ def validate_result_structure(result: Mapping[str, Any]) -> list[ValidationIssue
                     issues.append(
                         ValidationIssue(f"result.evidence_runs[{idx}].{k}", "RESULT_MISSING_FIELD", f"missing {k}")
                     )
+            if "git_dirty" in er and not isinstance(er["git_dirty"], bool):
+                issues.append(
+                    ValidationIssue(f"result.evidence_runs[{idx}].git_dirty", "RESULT_TYPE", "git_dirty must be boolean")
+                )
+
+    if "has_dirty_evidence_run" in result and not isinstance(result["has_dirty_evidence_run"], bool):
+        issues.append(
+            ValidationIssue("result.has_dirty_evidence_run", "RESULT_TYPE", "has_dirty_evidence_run must be boolean")
+        )
+    if "dirty_evidence_run_ids" in result:
+        drids = result["dirty_evidence_run_ids"]
+        if not isinstance(drids, list) or any(not isinstance(x, str) for x in drids):
+            issues.append(
+                ValidationIssue("result.dirty_evidence_run_ids", "RESULT_TYPE", "dirty_evidence_run_ids must be list of strings")
+            )
+    if "implementation_weights" in result and result["implementation_weights"] is not None:
+        _validate_implementation_weights(
+            result["implementation_weights"],
+            "result.implementation_weights",
+            issues,
+            code_prefix="RESULT",
+        )
 
     cells = result.get("cells")
     required_cell_keys = (

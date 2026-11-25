@@ -9,7 +9,12 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from bathos.parity.schema import DATA_TIERS, PARITY_KINDS_ORDER, STANDARD_VERSION
+from bathos.parity.schema import (
+    DATA_TIERS,
+    PARITY_KINDS_ORDER,
+    STANDARD_VERSION,
+    WEIGHTS_CHECKPOINT_STATUSES,
+)
 
 # Word 'parity' MUST be followed by one of: a kind word, "record(s)", or "report(s)" (§9.3.4, Rev 9 L2260).
 # Hyphenated/underscored identifiers (e.g. "aminx-parity-v1", "my_parity_check") are excluded.
@@ -261,6 +266,46 @@ def _evidence_token(ev_level: str) -> str:
     return "self-reported"
 
 
+def format_impl_revision(raw_rev: str, *, dirty: bool = False) -> str:
+    """Format the 12-char implementation revision token, preserving/appending ``+dirty``."""
+    rev = str(raw_rev or "000000000000")
+    if rev.endswith("+dirty"):
+        base = rev[: -len("+dirty")]
+        return f"{base[:12]}+dirty"
+    short = rev[:12]
+    return f"{short}+dirty" if dirty else short
+
+
+def _has_dirty_evidence(report_body: Mapping[str, Any]) -> bool:
+    parity_meta = report_body.get("parity_metadata", {})
+    tool = report_body.get("tool", {})
+    ev_runs = report_body.get("environment", {}).get("evidence_runs", [])
+    any_ev_dirty = any(isinstance(er, Mapping) and bool(er.get("git_dirty")) for er in ev_runs)
+    return (
+        bool(parity_meta.get("has_dirty_evidence_run"))
+        or bool(parity_meta.get("dirty_evidence_run_ids"))
+        or str(tool.get("revision", "")).endswith("+dirty")
+        or any_ev_dirty
+    )
+
+
+def _weights_attested_only_checked(parity_meta: Mapping[str, Any]) -> bool:
+    w_status = parity_meta.get("weights_status")
+    raw_wao = parity_meta.get("weights_attested_only")
+    if raw_wao is not None and not isinstance(raw_wao, bool):
+        raise BadgeValidationError(f"parity_metadata.weights_attested_only must be boolean, got {raw_wao!r}")
+    if w_status is not None:
+        if not isinstance(w_status, str) or w_status not in WEIGHTS_CHECKPOINT_STATUSES:
+            raise BadgeValidationError(f"invalid parity_metadata.weights_status {w_status!r}")
+        expected_wao = w_status.startswith("attested_only")
+        if raw_wao is not None and raw_wao is not expected_wao:
+            raise BadgeValidationError(
+                f"weights_attested_only={raw_wao!r} inconsistent with weights_status={w_status!r}"
+            )
+        return expected_wao
+    return bool(raw_wao)
+
+
 def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
     quals: list[str] = []
     parity_meta = report_body.get("parity_metadata", {})
@@ -306,7 +351,7 @@ def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
 
     if parity_meta.get("has_owner_stated_tolerance"):
         quals.append("owner-stated tolerance")
-    if parity_meta.get("weights_attested_only"):
+    if _weights_attested_only_checked(parity_meta):
         quals.append("weights attested-only")
 
     sup_cnt = int(parity_meta.get("superseded_runs_count") or 0)
@@ -319,6 +364,8 @@ def _qualifiers(report_body: Mapping[str, Any]) -> list[str]:
         quals.append("control")
     if parity_meta.get("legacy"):
         quals.append("legacy")
+    if _has_dirty_evidence(report_body):
+        quals.append("dirty evidence run")
 
     ev_level = str(report_body.get("evidence_level", "self_reported"))
     quals.append(_evidence_token(ev_level))
@@ -358,7 +405,7 @@ def render_t1(report_body: Mapping[str, Any], h2_full: str) -> str:
         parts.append(dual_txt)
 
     impl_name = str(tool.get("name", "unknown"))
-    impl_rev = str(tool.get("revision", "000000000000"))[:12]
+    impl_rev = format_impl_revision(str(tool.get("revision", "000000000000")), dirty=_has_dirty_evidence(report_body))
     ref_qual = format_reference_qualifier(report_body.get("references", []))
     parts.append(f"{impl_name}@{impl_rev} vs {ref_qual}")
 
@@ -411,7 +458,7 @@ def render_t0(report_body: Mapping[str, Any], h1_full: str) -> str:
         parts.append(dual_txt)
 
     impl_name = str(tool.get("name", "unknown"))
-    impl_rev = str(tool.get("revision", "000000000000"))[:12]
+    impl_rev = format_impl_revision(str(tool.get("revision", "000000000000")), dirty=_has_dirty_evidence(report_body))
     ref_qual = format_reference_qualifier(report_body.get("references", []))
     parts.append(f"{impl_name}@{impl_rev} vs {ref_qual}")
 
@@ -517,8 +564,34 @@ def validate_badge(t0: str, t1: str, report_body: Mapping[str, Any]) -> list[str
             errors.append("T0 missing 'reference self-reported' qualifier")
         if "reference self-reported" not in t1_segs:
             errors.append("T1 missing 'reference self-reported' qualifier")
-    if parity_meta.get("weights_attested_only") and "weights attested-only" not in t1_segs:
+    try:
+        is_attested_only = _weights_attested_only_checked(parity_meta)
+    except BadgeValidationError as exc:
+        errors.append(str(exc))
+        is_attested_only = False
+    if is_attested_only and "weights attested-only" not in t1_segs:
         errors.append("T1 missing 'weights attested-only' qualifier")
+    if "weights attested-only" in t0_segs:
+        errors.append("T0 must not contain 'weights attested-only' qualifier")
+    if not is_attested_only and "weights attested-only" in t1_segs:
+        errors.append("T1 must not contain 'weights attested-only' when weights are not attested-only")
+
+    tool = report_body.get("tool", {})
+    has_dirty = _has_dirty_evidence(report_body)
+    if has_dirty:
+        if "dirty evidence run" not in t1_segs:
+            errors.append("T1 missing 'dirty evidence run' qualifier")
+        if "dirty evidence run" in t0_segs:
+            errors.append("T0 must not contain 'dirty evidence run' qualifier")
+        impl_name = str(tool.get("name", "unknown"))
+        expected_rev = format_impl_revision(str(tool.get("revision", "000000000000")), dirty=True)
+        expected_prefix = f"{impl_name}@{expected_rev} vs "
+        if not any(s.startswith(expected_prefix) for s in t0_segs):
+            errors.append(f"T0 missing '+dirty' on implementation revision ({expected_prefix}...)")
+        if not any(s.startswith(expected_prefix) for s in t1_segs):
+            errors.append(f"T1 missing '+dirty' on implementation revision ({expected_prefix}...)")
+    elif "dirty evidence run" in t1_segs:
+        errors.append("T1 must not contain 'dirty evidence run' when no evidence run is dirty")
     sup_cnt = int(parity_meta.get("superseded_runs_count") or 0)
     if sup_cnt > 0:
         expected_sup_tok = f"superseded runs ({sup_cnt})"

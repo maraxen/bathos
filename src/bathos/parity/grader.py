@@ -51,9 +51,11 @@ from bathos.parity.metrics import compare_bitwise, compare_within_tolerance, get
 from bathos.parity.schema import (
     PARITY_KINDS_ORDER,
     STANDARD_VERSION,
+    WEIGHTS_CHECKPOINT_STATUSES,
     ParityValidationError,
     canonical_json,
     compute_cell_id,
+    is_sha256_hex,
     validate_declaration,
 )
 from bathos.parity.sealed_dump import SealedDumpError, load_sealed_dump_arrays
@@ -82,6 +84,95 @@ def register_overlay_hook(hook: CellOverlayHook) -> None:
 
 class ParityVerifyError(RuntimeError):
     """Raised when ``bth parity grade --verify`` sees byte divergence on replay."""
+
+
+class ParityGradeError(RuntimeError):
+    """Raised when parity grading fails a mandatory precondition (e.g., weights artifact check)."""
+
+
+def _resolve_weights_artifact_path(decl_path: Path, raw_artifact_path: str) -> Path:
+    art = Path(raw_artifact_path)
+    if art.is_absolute():
+        return art.resolve()
+    ws = resolve_workspace(decl_path.parent)
+    return (ws.fs_root / art).resolve()
+
+
+def _verify_implementation_weights(
+    *,
+    declaration: Mapping[str, Any],
+    decl_path: Path,
+    manifests: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    impl = declaration.get("implementation")
+    if not isinstance(impl, Mapping):
+        raise ParityGradeError("Declaration missing [implementation] table")
+    loads_trained = impl.get("loads_trained_parameters") is True
+    manifest_reports_weights = any(
+        (m.get("weights_path") is not None) or (m.get("weights_sha256") is not None)
+        for m in manifests
+    )
+    weights_sec = impl.get("weights")
+    if weights_sec is None:
+        if loads_trained:
+            raise ParityGradeError(
+                "Declaration has implementation.loads_trained_parameters=true but is missing [implementation.weights]"
+            )
+        if manifest_reports_weights:
+            raise ParityGradeError(
+                "Graded cell evidence manifest reports weights_path or weights_sha256, requiring [implementation.weights]"
+            )
+        return None
+    if not isinstance(weights_sec, Mapping):
+        raise ParityGradeError("[implementation.weights] must be a table")
+
+    raw_art_path = weights_sec.get("artifact_path")
+    if not isinstance(raw_art_path, str) or not raw_art_path.strip():
+        raise ParityGradeError("[implementation.weights].artifact_path must be a non-empty string")
+    expected_sha = weights_sec.get("artifact_sha256")
+    if not is_sha256_hex(expected_sha):
+        raise ParityGradeError("[implementation.weights].artifact_sha256 must be a 64-char lowercase hex sha256")
+    status = weights_sec.get("source_checkpoint_status")
+    if not isinstance(status, str) or status not in WEIGHTS_CHECKPOINT_STATUSES:
+        raise ParityGradeError(
+            f"[implementation.weights].source_checkpoint_status invalid: {status!r} "
+            f"(expected one of {sorted(WEIGHTS_CHECKPOINT_STATUSES)})"
+        )
+    for opt_field in ("hf_repo", "hf_revision"):
+        if opt_field in weights_sec and weights_sec[opt_field] is not None:
+            opt_val = weights_sec[opt_field]
+            if not isinstance(opt_val, str) or not opt_val.strip():
+                raise ParityGradeError(f"[implementation.weights].{opt_field} must be a non-empty string")
+
+    art_p = _resolve_weights_artifact_path(decl_path, raw_art_path)
+    if not art_p.is_file():
+        raise ParityGradeError(
+            f"[implementation.weights] artifact_path does not exist: {art_p} (declared {raw_art_path!r})"
+        )
+    h = hashlib.sha256()
+    try:
+        with art_p.open("rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                h.update(chunk)
+    except OSError as exc:
+        raise ParityGradeError(f"[implementation.weights] failed to read {art_p}: {exc}") from exc
+    actual_sha = h.hexdigest()
+    if actual_sha != expected_sha:
+        raise ParityGradeError(
+            f"[implementation.weights] artifact_sha256 mismatch for {art_p}: "
+            f"expected {expected_sha}, got {actual_sha}"
+        )
+
+    verified: dict[str, Any] = {
+        "artifact_path": raw_art_path,
+        "artifact_sha256": expected_sha,
+        "source_checkpoint_status": status,
+    }
+    if weights_sec.get("hf_repo") is not None:
+        verified["hf_repo"] = str(weights_sec["hf_repo"])
+    if weights_sec.get("hf_revision") is not None:
+        verified["hf_revision"] = str(weights_sec["hf_revision"])
+    return verified
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1189,7 @@ def _evaluate_cell(
 def _build_result_payload(
     *,
     declaration: Mapping[str, Any],
+    decl_path: Path,
     decl_sha: str,
     impl_rev: str,
     baseline_sha: str | None,
@@ -1230,6 +1322,33 @@ def _build_result_payload(
         {str(rid) for c in evaluated_cells for rid in c.get("superseded_run_ids", [])}
     )
     superseded_set = set(all_superseded_runs)
+    planned_cell_ids = {
+        compute_cell_id(
+            str(pc["component_id"]),
+            str(pc["use_id"]),
+            pc["knob_setting"],
+            pc["axis_value"],
+            str(pc["data_tier"]),
+            str(pc["pairing"]),
+        )
+        for pc in declaration.get("cell_plan", [])
+    }
+    graded_manifests = [
+        m
+        for m in manifests
+        if str(m.get("cell_id", "")) in planned_cell_ids
+        and str(m.get("run_id", "")) not in superseded_set
+        and not (
+            (val := validity_by_id.get(str(m.get("run_id", "")))) is not None
+            and val.is_hidden
+            and val.state != "superseded"
+        )
+    ]
+    verified_weights = _verify_implementation_weights(
+        declaration=declaration,
+        decl_path=decl_path,
+        manifests=graded_manifests,
+    )
 
     evidence_runs_summary: list[dict[str, Any]] = []
     for rid in referenced_run_ids:
@@ -1244,6 +1363,12 @@ def _build_result_payload(
         else:
             eff_state = val.state
             eff_hidden = bool(val.is_hidden)
+        if run is None:
+            run_dirty = False
+        elif isinstance(run, Mapping):
+            run_dirty = bool(run.get("git_dirty", False))
+        else:
+            run_dirty = bool(getattr(run, "git_dirty", False))
         evidence_runs_summary.append(
             {
                 "run_id": rid,
@@ -1251,10 +1376,15 @@ def _build_result_payload(
                 "outcome": run.outcome if run else "",
                 "validity_state": eff_state,
                 "is_hidden": eff_hidden,
+                "git_dirty": run_dirty,
                 "env_blob_sha256": None,
                 "declaration_blob_sha256": manifest_decl_sha_by_run.get(rid, decl_sha),
             }
         )
+    dirty_evidence_run_ids = sorted(
+        str(er["run_id"]) for er in evidence_runs_summary if er.get("git_dirty")
+    )
+    has_dirty_evidence_run = bool(dirty_evidence_run_ids)
 
     clauses, gates, cell_counts = compute_axes_and_clauses(
         declaration=declaration,
@@ -1356,6 +1486,9 @@ def _build_result_payload(
         "parity_store": store_meta,
         "grade_inputs": grade_inputs,
         "evidence_runs": evidence_runs_summary,
+        "has_dirty_evidence_run": has_dirty_evidence_run,
+        "dirty_evidence_run_ids": dirty_evidence_run_ids,
+        **({"implementation_weights": verified_weights} if verified_weights is not None else {}),
         "cells": evaluated_cells,
         "components": [],
         "supplementary": [],
@@ -1468,6 +1601,7 @@ def grade_parity_record(
 
         replayed = _build_result_payload(
             declaration=declaration,
+            decl_path=dpath,
             decl_sha=decl_sha,
             impl_rev=impl_rev,
             baseline_sha=baseline_sha,
@@ -1499,6 +1633,7 @@ def grade_parity_record(
     effective_as_of = as_of or datetime.now(UTC).isoformat()
     payload = _build_result_payload(
         declaration=declaration,
+        decl_path=dpath,
         decl_sha=decl_sha,
         impl_rev=impl_rev,
         baseline_sha=baseline_sha,

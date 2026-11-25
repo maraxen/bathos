@@ -492,3 +492,89 @@ class TestParityDeclarationSchema:
                 and f"use[0].precision_amplification.max_useful_tolerance.float32.{field}" in i.path
                 for i in issues_pa
             ), (field, bad_val, issues_pa)
+
+
+class TestImplementationWeightsSchema:
+    @pytest.mark.parametrize("status", ["rederived", "attested_only", "attested_only_source_deleted"])
+    def test_valid_weights_statuses_accepted(self, status: str) -> None:
+        decl = _minimal_valid_decl()
+        decl["implementation"]["loads_trained_parameters"] = True
+        decl["implementation"]["weights"] = {
+            "artifact_path": "data/weights/model.eqx.zst",
+            "artifact_sha256": "a" * 64,
+            "source_checkpoint_status": status,
+            "hf_repo": "owner/repo",
+            "hf_revision": "b" * 40,
+        }
+        assert validate_declaration(decl) == []
+        jsonschema.validate(instance=decl, schema=_load_json_schema("parity_declaration.v1.json"))
+
+    @pytest.mark.parametrize(
+        "bad_status",
+        ["verified_local", "Attested_Only", "attested-only", "REDERIVED", "", "unknown"],
+    )
+    def test_nc_invalid_source_checkpoint_status_rejected(self, bad_status: str) -> None:
+        decl = _minimal_valid_decl()
+        decl["implementation"]["weights"] = {
+            "artifact_path": "data/weights/model.eqx.zst",
+            "artifact_sha256": "a" * 64,
+            "source_checkpoint_status": bad_status,
+        }
+        issues = validate_declaration(decl)
+        assert any("source_checkpoint_status" in i.path for i in issues), (bad_status, issues)
+
+    def test_nc_missing_weights_fields_and_bad_sha_rejected(self) -> None:
+        for missing_field in ("artifact_path", "artifact_sha256", "source_checkpoint_status"):
+            decl = _minimal_valid_decl()
+            decl["implementation"]["weights"] = {
+                "artifact_path": "data/weights/model.eqx.zst",
+                "artifact_sha256": "a" * 64,
+                "source_checkpoint_status": "rederived",
+            }
+            del decl["implementation"]["weights"][missing_field]
+            issues = validate_declaration(decl)
+            assert any(missing_field in i.path for i in issues), (missing_field, issues)
+
+        # Uppercase or non-64 hex sha256 rejected
+        for bad_sha in ("A" * 64, "abc", "g" * 64, ""):
+            decl = _minimal_valid_decl()
+            decl["implementation"]["weights"] = {
+                "artifact_path": "data/weights/model.eqx.zst",
+                "artifact_sha256": bad_sha,
+                "source_checkpoint_status": "attested_only",
+            }
+            issues = validate_declaration(decl)
+            assert any("artifact_sha256" in i.path for i in issues), (bad_sha, issues)
+
+        # Empty optional hf_repo / hf_revision rejected
+        for opt_field in ("hf_repo", "hf_revision"):
+            decl = _minimal_valid_decl()
+            decl["implementation"]["weights"] = {
+                "artifact_path": "data/weights/model.eqx.zst",
+                "artifact_sha256": "a" * 64,
+                "source_checkpoint_status": "attested_only",
+                opt_field: "   ",
+            }
+            issues = validate_declaration(decl)
+            assert any(opt_field in i.path for i in issues), (opt_field, issues)
+
+    def test_loads_trained_parameters_requires_weights_and_must_be_bool(self) -> None:
+        # Omitted or false -> missing [implementation.weights] allowed
+        decl_omitted = _minimal_valid_decl()
+        assert validate_declaration(decl_omitted) == []
+
+        decl_false = _minimal_valid_decl()
+        decl_false["implementation"]["loads_trained_parameters"] = False
+        assert validate_declaration(decl_false) == []
+
+        # Non-bool loads_trained_parameters -> rejected
+        decl_bad_type = _minimal_valid_decl()
+        decl_bad_type["implementation"]["loads_trained_parameters"] = "yes"
+        assert any("loads_trained_parameters" in i.path for i in validate_declaration(decl_bad_type))
+
+        # True without [implementation.weights] -> rejected
+        decl_true_missing = _minimal_valid_decl()
+        decl_true_missing["implementation"]["loads_trained_parameters"] = True
+        issues = validate_declaration(decl_true_missing)
+        assert any("implementation.weights" in i.path for i in issues), issues
+

@@ -520,6 +520,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     # Parity Ring 0 (spec 261123)
     "ParityValidationError": BathosErrorCode.DOCUMENT_INVALID,
     "ParityDeclareError": BathosErrorCode.CATALOG_ERROR,
+    "ParityGradeError": BathosErrorCode.DOCUMENT_INVALID,
     "ParityVerifyError": BathosErrorCode.CATALOG_ERROR,
     "ParityReportVerifyError": BathosErrorCode.DOCUMENT_INVALID,
     "CellEvidenceError": BathosErrorCode.DOCUMENT_INVALID,

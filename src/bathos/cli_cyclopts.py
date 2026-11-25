@@ -2915,7 +2915,7 @@ def parity_grade_cmd(
     from bathos.parity.badge import format_kind_set
     from bathos.parity.declare import ParityDeclareError
     from bathos.parity.evidence import CellEvidenceError
-    from bathos.parity.grader import ParityVerifyError, grade_parity_record
+    from bathos.parity.grader import ParityGradeError, ParityVerifyError, grade_parity_record
     from bathos.parity.schema import ParityValidationError
     from bathos.parity.sealed_dump import SealedDumpError
     from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
@@ -2932,6 +2932,7 @@ def parity_grade_cmd(
         )
     except (
         ParityDeclareError,
+        ParityGradeError,
         ParityValidationError,
         ParityVerifyError,
         CellEvidenceError,
@@ -2986,7 +2987,7 @@ def parity_report_build_cmd(
     from bathos.parity.badge import BadgeValidationError, ReportLintError
     from bathos.parity.declare import ParityDeclareError
     from bathos.parity.evidence import CellEvidenceError
-    from bathos.parity.grader import ParityVerifyError
+    from bathos.parity.grader import ParityGradeError, ParityVerifyError
     from bathos.parity.report import ParityReportVerifyError, build_parity_report
     from bathos.parity.schema import ParityValidationError
     from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
@@ -3007,6 +3008,7 @@ def parity_report_build_cmd(
         KeyError,
         ValueError,
         ParityDeclareError,
+        ParityGradeError,
         ParityValidationError,
         ParityVerifyError,
         ParityReportVerifyError,
@@ -3040,7 +3042,7 @@ def parity_report_verify_cmd(
     from bathos.parity.badge import BadgeValidationError
     from bathos.parity.declare import ParityDeclareError
     from bathos.parity.evidence import CellEvidenceError
-    from bathos.parity.grader import ParityVerifyError
+    from bathos.parity.grader import ParityGradeError, ParityVerifyError
     from bathos.parity.report import ParityReportVerifyError, verify_parity_report
     from bathos.parity.schema import ParityValidationError
     from bathos.parity.store import ParityStoreConfigError, ParityStoreUnavailableError
@@ -3061,6 +3063,7 @@ def parity_report_verify_cmd(
         KeyError,
         ValueError,
         ParityDeclareError,
+        ParityGradeError,
         ParityValidationError,
         ParityVerifyError,
         ParityReportVerifyError,

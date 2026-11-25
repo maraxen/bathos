@@ -903,9 +903,16 @@ class TestReportCoreAndDisclosureTiers:
         decl_path, _res_path, store_dir, cat_dir = _build_graded_fixture(
             tmp_path / "attested", run_evidence=False
         )
+        wfile = decl_path.parent / "data" / "weights" / "example.eqx.zst"
+        wfile.parent.mkdir(parents=True)
+        wbytes = b"attested-weights-bytes"
+        wfile.write_bytes(wbytes)
+        wsha = hashlib.sha256(wbytes).hexdigest()
+
         decl_text = decl_path.read_text(encoding="utf-8") + (
             '\n[implementation.weights]\n'
             'artifact_path = "data/weights/example.eqx.zst"\n'
+            f'artifact_sha256 = "{wsha}"\n'
             'source_checkpoint_status = "attested_only_source_deleted"\n'
         )
         decl_path.write_text(decl_text, encoding="utf-8")
@@ -924,6 +931,7 @@ class TestReportCoreAndDisclosureTiers:
             catalog_dir=cat_dir,
         )
         assert rep["parity_metadata"]["weights_attested_only"] is True
+        assert rep["parity_metadata"]["weights_status"] == "attested_only_source_deleted"
         t0_segs = rep["badge"]["t0"].split(" · ")
         t1_segs = rep["badge"]["t1"].split(" · ")
         assert "weights attested-only" in t1_segs
@@ -933,21 +941,29 @@ class TestReportCoreAndDisclosureTiers:
         t1_missing = " · ".join(s for s in t1_segs if s != "weights attested-only")
         errs = validate_badge(rep["badge"]["t0"], t1_missing, report_body)
         assert any("weights attested-only" in e for e in errs)
+        errs_t0 = validate_badge(rep["badge"]["t0"] + " · weights attested-only", rep["badge"]["t1"], report_body)
+        assert any("T0 must not contain 'weights attested-only'" in e for e in errs_t0)
 
         md = render_report_markdown(rep)
         html_doc = render_report_html(rep)
-        assert "attested-only" in md
-        assert "attested-only" in html_doc
+        # Assert "Weights provenance" line specifically in T2 body isolated from T1 badge line
+        md_body_lines = [ln for ln in md.splitlines() if not ln.startswith("- **T0 Badge:**") and not ln.startswith("- **T1 Badge:**")]
+        assert any("Weights provenance" in ln and "attested-only" in ln for ln in md_body_lines)
+        assert "<strong>Weights provenance:</strong> attested-only" in html_doc
 
-        # Negative control: non-attested_only status and missing [implementation.weights] omit the qualifier
+        # Negative control: rederived status omits 'weights attested-only' qualifier but emits clean T2 Weights provenance
         (tmp_path / "local").mkdir()
         decl_local, _res_local, store_local, cat_local = _build_graded_fixture(
             tmp_path / "local", run_evidence=False
         )
+        wfile_local = decl_local.parent / "data" / "weights" / "example.eqx.zst"
+        wfile_local.parent.mkdir(parents=True)
+        wfile_local.write_bytes(wbytes)
         decl_local_text = decl_local.read_text(encoding="utf-8") + (
             '\n[implementation.weights]\n'
             'artifact_path = "data/weights/example.eqx.zst"\n'
-            'source_checkpoint_status = "verified_local"\n'
+            f'artifact_sha256 = "{wsha}"\n'
+            'source_checkpoint_status = "rederived"\n'
         )
         decl_local.write_text(decl_local_text, encoding="utf-8")
         declare_parity_record(decl_local, parity_store=store_local)
@@ -965,8 +981,16 @@ class TestReportCoreAndDisclosureTiers:
             catalog_dir=cat_local,
         )
         assert rep_local["parity_metadata"]["weights_attested_only"] is False
+        assert rep_local["parity_metadata"]["weights_status"] == "rederived"
         assert "weights attested-only" not in rep_local["badge"]["t1"].split(" · ")
         assert "weights attested-only" not in rep_local["badge"]["t0"].split(" · ")
+        md_local = render_report_markdown(rep_local)
+        md_local_body_lines = [
+            ln for ln in md_local.splitlines() if not ln.startswith("- **T0 Badge:**") and not ln.startswith("- **T1 Badge:**")
+        ]
+        assert any("Weights provenance" in ln and "rederived" in ln and "attested-only" not in ln for ln in md_local_body_lines)
+        html_local = render_report_html(rep_local)
+        assert "<strong>Weights provenance:</strong> rederived" in html_local
 
     def test_item_c_evidence_level_propagation_and_none_badge(self, tmp_path: Path) -> None:
         # 1. Manifest carrying evidence_level="reexecuted" propagates without overlay hooks
@@ -1114,3 +1138,200 @@ class TestReportCoreAndDisclosureTiers:
         body = {k: v for k, v in rep.items() if k != "badge"}
         t1_missing = " · ".join(s for s in t1_segs if s != "superseded runs (1)")
         assert any("superseded runs (1)" in e for e in validate_badge(rep["badge"]["t0"], t1_missing, body))
+
+    def test_finding2_verify_report_refuses_tampered_parity_metadata_with_recomputed_tier_hashes(
+        self, tmp_path: Path
+    ) -> None:
+        from bathos.parity.report import verify_report_tier_chain_in_memory
+
+        decl_path, _res_path, store_dir, cat_dir = _build_graded_fixture(tmp_path)
+        wfile = decl_path.parent / "data" / "weights" / "example.eqx.zst"
+        wfile.parent.mkdir(parents=True)
+        wbytes = b"weights-bytes-for-verify-tamper"
+        wfile.write_bytes(wbytes)
+        wsha = hashlib.sha256(wbytes).hexdigest()
+
+        decl_path.write_text(
+            decl_path.read_text(encoding="utf-8")
+            + (
+                '\n[implementation.weights]\n'
+                'artifact_path = "data/weights/example.eqx.zst"\n'
+                f'artifact_sha256 = "{wsha}"\n'
+                'source_checkpoint_status = "attested_only"\n'
+            ),
+            encoding="utf-8",
+        )
+        declare_parity_record(decl_path, parity_store=store_dir)
+        graded = grade_parity_record(
+            decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat_dir,
+            as_of="2026-11-24T12:00:00Z",
+            track_run=False,
+        )
+        rep_path, _rep = build_parity_report(
+            graded.result_path,
+            decl_path=decl_path,
+            parity_store=store_dir,
+            catalog_dir=cat_dir,
+        )
+        # Positive check
+        assert verify_parity_report(rep_path, parity_store=store_dir, catalog_dir=cat_dir)["verified"] is True
+
+        # Mutate parity_metadata + evidence_level and recompute T0/T1/T2 hashes so in-memory chain passes
+        tampered = json.loads(rep_path.read_text(encoding="utf-8"))
+        tampered["parity_metadata"]["weights_attested_only"] = False
+        tampered["parity_metadata"]["weights_status"] = "rederived"
+        tampered["evidence_level"] = "reexecuted"
+        tampered = _recompute_badge(tampered)
+        # Confirm in-memory tier chain check passes on the forged report
+        verify_report_tier_chain_in_memory(tampered)
+
+        rep_path.write_bytes(canonical_report_bytes(tampered))
+        with pytest.raises(ParityReportVerifyError, match="mismatch"):
+            verify_parity_report(rep_path, parity_store=store_dir, catalog_dir=cat_dir)
+
+    def test_finding3_weights_attested_only_and_fail_closed(self, tmp_path: Path) -> None:
+        from bathos.parity.report import verify_report_tier_chain_in_memory
+
+        # 1. attested_only emits 'weights attested-only' in T1 ONLY and 'Weights provenance' in T2
+        (tmp_path / "att").mkdir()
+        decl_path, _res_path, store_dir, cat_dir = _build_graded_fixture(tmp_path / "att")
+        wfile = decl_path.parent / "data" / "weights" / "w.bin"
+        wfile.parent.mkdir(parents=True)
+        wbytes = b"w-attested"
+        wfile.write_bytes(wbytes)
+        wsha = hashlib.sha256(wbytes).hexdigest()
+        decl_path.write_text(
+            decl_path.read_text(encoding="utf-8")
+            + (
+                '\n[implementation.weights]\n'
+                'artifact_path = "data/weights/w.bin"\n'
+                f'artifact_sha256 = "{wsha}"\n'
+                'source_checkpoint_status = "attested_only"\n'
+            ),
+            encoding="utf-8",
+        )
+        declare_parity_record(decl_path, parity_store=store_dir)
+        graded = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False
+        )
+        _, rep = build_parity_report(graded.result_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir)
+        assert "weights attested-only" in rep["badge"]["t1"].split(" · ")
+        assert "weights attested-only" not in rep["badge"]["t0"].split(" · ")
+        md = render_report_markdown(rep)
+        md_body_lines = [ln for ln in md.splitlines() if not ln.startswith("- **T0 Badge:**") and not ln.startswith("- **T1 Badge:**")]
+        assert any("Weights provenance" in ln for ln in md_body_lines)
+
+        # 2. Missing [implementation.weights] omits Weights provenance line
+        (tmp_path / "none").mkdir()
+        d_none, r_none, st_none, cat_none = _build_graded_fixture(tmp_path / "none")
+        _, rep_none = build_parity_report(r_none, decl_path=d_none, parity_store=st_none, catalog_dir=cat_none)
+        assert "Weights provenance" not in render_report_markdown(rep_none)
+
+        # 3. Invalid weights_status in report fails closed
+        from bathos.parity.badge import BadgeValidationError
+
+        bad_rep = json.loads(json.dumps(rep))
+        bad_rep["parity_metadata"]["weights_status"] = "verified_local"
+        with pytest.raises(BadgeValidationError, match="weights_status"):
+            render_t1(bad_rep, "a" * 64)
+        with pytest.raises(ParityReportVerifyError):
+            verify_report_tier_chain_in_memory(bad_rep)
+
+        # 4. Omitted source_checkpoint_status in [implementation.weights] fails closed in build_parity_report
+        bad_decl = decl_path.parent / "bad_weights.parity.bth.toml"
+        bad_decl.write_text(
+            decl_path.read_text(encoding="utf-8").replace('source_checkpoint_status = "attested_only"\n', ""),
+            encoding="utf-8",
+        )
+        res_for_bad = json.loads(graded.result_path.read_text(encoding="utf-8"))
+        res_for_bad["record_sha256"] = hashlib.sha256(bad_decl.read_bytes()).hexdigest()
+        bad_res_path = decl_path.parent / "bad_weights.parity.result.json"
+        bad_res_path.write_text(json.dumps(res_for_bad, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("bathos.parity.report.grade_parity_record", lambda *_a, **_k: None)
+            with pytest.raises(ParityReportVerifyError, match="source_checkpoint_status"):
+                build_parity_report(bad_res_path, decl_path=bad_decl, parity_store=store_dir, catalog_dir=cat_dir)
+
+    def test_finding4_dirty_evidence_run_labels_t0_t1_t2_and_enforced_in_memory(self, tmp_path: Path) -> None:
+        from bathos.parity.report import verify_report_tier_chain_in_memory
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        head_sha = _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
+        store_dir = tmp_path / "store"
+        cat_dir = tmp_path / "catalog"
+        init_catalog(cat_dir)
+        decl_path = repo / "dirty.parity.bth.toml"
+        raw_toml = render_declaration_scaffold("demo-dirty-v1", impl_name="aminx").replace(
+            'kind = "sealed_dump"\n'
+            'identity = { dump_sha256 = "0000000000000000000000000000000000000000000000000000000000000000", producer_run_id = "run_0000", upstream_commit = "0000000000000000000000000000000000000000" }',
+            'kind = "upstream_live"\n'
+            f'identity = {{ repo = "https://github.com/example/upstream", commit = "{"a" * 40}" }}',
+        )
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        cid = _cell_id(decl)
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash=head_sha,
+                git_branch="main",
+                git_dirty=True,
+                id="r-dirty-1",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat_dir,
+        )
+        write_cell_evidence(
+            store=store_dir,
+            record_id="demo-dirty-v1",
+            cell_id=cid,
+            run_id="r-dirty-1",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        graded = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-24T12:00:00Z", track_run=False
+        )
+        assert graded.result["cells"][0]["verdict"] == "pass"
+        assert graded.result["has_dirty_evidence_run"] is True
+        assert graded.result["dirty_evidence_run_ids"] == ["r-dirty-1"]
+
+        rep_path, rep = build_parity_report(
+            graded.result_path, decl_path=decl_path, parity_store=store_dir, catalog_dir=cat_dir
+        )
+        assert rep["parity_metadata"]["has_dirty_evidence_run"] is True
+        assert rep["parity_metadata"]["dirty_evidence_run_ids"] == ["r-dirty-1"]
+        expected_tok = f"aminx@{head_sha[:12]}+dirty"
+        assert expected_tok in rep["badge"]["t0"]
+        assert expected_tok in rep["badge"]["t1"]
+        assert rep["tool"]["revision"].endswith("+dirty")
+        assert "dirty evidence run" in rep["badge"]["t1"].split(" · ")
+        assert "dirty evidence run" not in rep["badge"]["t0"].split(" · ")
+        assert expected_tok in render_report_markdown(rep)
+        assert expected_tok in render_report_html(rep)
+
+        rep_schema = json.loads(
+            importlib.resources.files("bathos").joinpath("schemas", "parity_report.v1.json").read_text(encoding="utf-8")
+        )
+        jsonschema.validate(instance=rep, schema=rep_schema)
+
+        # Enforced by verify_report_tier_chain_in_memory if 'dirty evidence run' or '+dirty' is stripped
+        body = {k: v for k, v in rep.items() if k != "badge"}
+        t1_no_qual = " · ".join(s for s in rep["badge"]["t1"].split(" · ") if s != "dirty evidence run")
+        assert any("dirty evidence run" in e for e in validate_badge(rep["badge"]["t0"], t1_no_qual, body))
+        tampered_t1 = dict(rep)
+        tampered_t1["badge"] = {**rep["badge"], "t1": t1_no_qual}
+        with pytest.raises(ParityReportVerifyError):
+            verify_report_tier_chain_in_memory(tampered_t1)
+
+        assert verify_parity_report(rep_path, parity_store=store_dir, catalog_dir=cat_dir)["verified"] is True
