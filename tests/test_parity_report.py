@@ -1619,3 +1619,154 @@ class TestRing1Findings5And6Report:
         assert "aminx@f530f9190000+dirty" in rep_c2["badge"]["t0"]
         assert "dirty evidence run" in rep_c2["badge"]["t1"].split(" · ")
         assert not any(s.startswith("superseded runs (") for s in rep_c2["badge"]["t1"].split(" · "))
+
+    def test_finding6_partial_cell_supersession_and_other_cell_dirty_report_badges(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from bathos.compact import compact
+        from bathos.parity.npy_stdlib import encode_npz
+        from bathos.parity.sealed_dump import ingest_sealed_dump
+        from bathos.supersession import add_supersession_edge
+
+        def _setup_two_cell(sub: Path):
+            repo = sub / "repo"
+            repo.mkdir()
+            _init_git_repo(repo)
+            (repo / ".bth.toml").write_text('[project]\nslug = "aminx"\n', encoding="utf-8")
+            store_dir = sub / "parity-store"
+            cat_dir = sub / "catalog"
+            init_catalog(cat_dir)
+            store = ParityStore(store_dir)
+            dump_bytes = encode_npz({"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)})
+            dump_sha = hashlib.sha256(dump_bytes).hexdigest()
+            dump_p = sub / "frustrampnn_1ubq.npz"
+            dump_p.write_bytes(dump_bytes)
+            ingest_sealed_dump(dump_p, expected_sha256=dump_sha, store=store, stem="frustrampnn_1ubq")
+            raw_toml = render_declaration_scaffold("aminx-frustrampnn-score-v1", impl_name="aminx").replace(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                dump_sha,
+                1,
+            )
+            base_decl = tomllib.loads(raw_toml)
+            c0 = base_decl["cell_plan"][0]
+            raw_toml = raw_toml + (
+                "\n[[cell_plan]]\n"
+                f'use_id = "{c0["use_id"]}"\n'
+                f'component_id = "{c0["component_id"]}"\n'
+                "knob_setting = { k = 2 }\n"
+                'axis_value = { target = "2ptl" }\n'
+                'data_tier = "toy"\n'
+                'pairing = "fixture"\n'
+                'pooling_rule = "all_runs"\n'
+                f'tolerance_id = "{c0["tolerance_id"]}"\n'
+            )
+            decl_path = repo / "aminx-frustrampnn-score-v1.parity.bth.toml"
+            decl_path.write_text(raw_toml, encoding="utf-8")
+            decl = tomllib.loads(raw_toml)
+            monkeypatch.setattr("bathos.parity.declare._capture_git_head", lambda _d: self.COMMIT_F530)
+            declare_parity_record(decl_path, parity_store=store_dir)
+            return store, store_dir, cat_dir, decl_path, dump_sha, _cell_id(decl, 0), _cell_id(decl, 1)
+
+        # 1. Hidden failed dirty run in cell 0 + active dirty run in cell 1 -> +dirty & dirty evidence run kept
+        sub1 = tmp_path / "other_cell_dirty"
+        sub1.mkdir()
+        store1, store_dir1, cat1, decl1, dsha1, cid1_0, cid1_1 = _setup_two_cell(sub1)
+        r_fail_dirty = "1559f25c000000000000000000000021"
+        r_clean_c0 = "211bdde3000000000000000000000022"
+        r_dirty_c1 = "1559f25c000000000000000000000023"
+        for rid, is_dirty, status, outcome, ts, cid in (
+            (r_fail_dirty, True, "failed", "fail", datetime(2026, 11, 25, 8, 0, tzinfo=UTC), cid1_0),
+            (r_clean_c0, False, "completed", "pass", datetime(2026, 11, 25, 9, 0, tzinfo=UTC), cid1_0),
+            (r_dirty_c1, True, "completed", "pass", datetime(2026, 11, 25, 10, 0, tzinfo=UTC), cid1_1),
+        ):
+            write_run(
+                Run(
+                    project_slug="aminx",
+                    command="bth run score_frustrampnn.py",
+                    argv=[],
+                    git_hash=self.COMMIT_F530,
+                    git_branch="main",
+                    git_dirty=is_dirty,
+                    id=rid,
+                    timestamp=ts,
+                    exit_code=0 if status == "completed" else 1,
+                    status=status,
+                    outcome=outcome,
+                ),
+                cat1,
+            )
+            write_cell_evidence(
+                store=store1,
+                record_id="aminx-frustrampnn-score-v1",
+                cell_id=cid,
+                run_id=rid,
+                ours_arrays={"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)},
+                reference_dump_sha256=dsha1,
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+        compact(cat1)
+        add_supersession_edge("run", r_fail_dirty, "run", r_clean_c0, "retried failed dirty run", catalog_dir=cat1)
+        g1 = grade_parity_record(
+            decl1, parity_store=store_dir1, catalog_dir=cat1, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        rep_p1, rep1 = build_parity_report(
+            g1.result_path, decl_path=decl1, parity_store=store_dir1, catalog_dir=cat1
+        )
+        assert "aminx@f530f9190000+dirty" in rep1["badge"]["t0"]
+        assert "dirty evidence run" in rep1["badge"]["t1"].split(" · ")
+        assert "superseded runs (1)" in rep1["badge"]["t1"].split(" · ")
+        assert verify_parity_report(rep_p1, parity_store=store_dir1, catalog_dir=cat1)["verified"] is True
+
+        # 2. Partial-cell supersession: R_dirty superseded in cell 0 only while cell 1 still grades R_dirty
+        sub2 = tmp_path / "partial_cell"
+        sub2.mkdir()
+        store2, store_dir2, cat2, decl2, dsha2, cid2_0, cid2_1 = _setup_two_cell(sub2)
+        for rid, is_dirty, ts, cids in (
+            (self.RUN_MID_DIRTY, True, datetime(2026, 11, 25, 9, 0, tzinfo=UTC), (cid2_0, cid2_1)),
+            (self.RUN_LATEST_CLEAN, False, datetime(2026, 11, 25, 10, 0, tzinfo=UTC), (cid2_0,)),
+        ):
+            write_run(
+                Run(
+                    project_slug="aminx",
+                    command="bth run score_frustrampnn.py",
+                    argv=[],
+                    git_hash=self.COMMIT_F530,
+                    git_branch="main",
+                    git_dirty=is_dirty,
+                    id=rid,
+                    timestamp=ts,
+                    exit_code=0,
+                    status="completed",
+                    outcome="pass",
+                ),
+                cat2,
+            )
+            for cid in cids:
+                write_cell_evidence(
+                    store=store2,
+                    record_id="aminx-frustrampnn-score-v1",
+                    cell_id=cid,
+                    run_id=rid,
+                    ours_arrays={"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)},
+                    reference_dump_sha256=dsha2,
+                    input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+                )
+        compact(cat2)
+        add_supersession_edge(
+            "run", self.RUN_MID_DIRTY, "run", self.RUN_LATEST_CLEAN, "partial rerun for cell 0", catalog_dir=cat2
+        )
+        g2 = grade_parity_record(
+            decl2, parity_store=store_dir2, catalog_dir=cat2, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        rep_p2, rep2 = build_parity_report(
+            g2.result_path, decl_path=decl2, parity_store=store_dir2, catalog_dir=cat2
+        )
+        assert rep2["parity_metadata"]["has_dirty_evidence_run"] is True
+        assert rep2["parity_metadata"]["dirty_evidence_run_ids"] == [self.RUN_MID_DIRTY]
+        assert "aminx@f530f9190000+dirty" in rep2["badge"]["t0"]
+        assert "aminx@f530f9190000+dirty" in rep2["badge"]["t1"]
+        assert "dirty evidence run" in rep2["badge"]["t1"].split(" · ")
+        assert "superseded runs (1)" in rep2["badge"]["t1"].split(" · ")
+        assert verify_parity_report(rep_p2, parity_store=store_dir2, catalog_dir=cat2)["verified"] is True

@@ -1319,6 +1319,23 @@ def _build_result_payload(
         {str(rid) for c in evaluated_cells for rid in c.get("superseded_run_ids", [])}
     )
     superseded_set = set(all_superseded_runs)
+    cell_superseded_by_cell: dict[str, set[str]] = {
+        str(c["cell_id"]): {str(r) for r in c.get("superseded_run_ids", [])}
+        for c in evaluated_cells
+    }
+    active_run_ids: set[str] = set()
+    for c in evaluated_cells:
+        c_sup = cell_superseded_by_cell[str(c["cell_id"])]
+        for rid in c.get("evidence_run_ids", []):
+            s_rid = str(rid)
+            if s_rid in c_sup:
+                continue
+            val = validity_by_id.get(s_rid)
+            if val is not None and val.is_hidden and val.state != "superseded":
+                continue
+            active_run_ids.add(s_rid)
+    globally_superseded_set = superseded_set - active_run_ids
+
     planned_cell_ids = {
         compute_cell_id(
             str(pc["component_id"]),
@@ -1334,7 +1351,7 @@ def _build_result_payload(
         m
         for m in manifests
         if str(m.get("cell_id", "")) in planned_cell_ids
-        and str(m.get("run_id", "")) not in superseded_set
+        and str(m.get("run_id", "")) not in cell_superseded_by_cell.get(str(m.get("cell_id", "")), set())
         and not (
             (val := validity_by_id.get(str(m.get("run_id", "")))) is not None
             and val.is_hidden
@@ -1352,11 +1369,11 @@ def _build_result_payload(
         run = runs_by_id.get(rid)
         val = validity_by_id.get(rid)
         if val is None:
-            eff_state = "superseded" if rid in superseded_set else ("current" if run else "unknown")
-            eff_hidden = rid in superseded_set
+            eff_state = "superseded" if rid in globally_superseded_set else ("current" if run else "unknown")
+            eff_hidden = rid in globally_superseded_set
         elif val.state == "superseded":
-            eff_state = "superseded" if rid in superseded_set else "current"
-            eff_hidden = rid in superseded_set
+            eff_state = "superseded" if rid in globally_superseded_set else "current"
+            eff_hidden = rid in globally_superseded_set
         else:
             eff_state = val.state
             eff_hidden = bool(val.is_hidden)
