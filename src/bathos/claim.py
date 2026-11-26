@@ -1577,13 +1577,14 @@ def parity_confound_check(
         elif db is not None:
             # Query the run (output_metadata column may be absent in minimal test schemas)
             output_metadata_json: str | None = None
+            resolved_run_id = parity_run_id
             try:
                 run_rows = db.execute(
-                    "SELECT outcome, metadata, parity_run_type, output_metadata FROM runs WHERE id = ? OR id LIKE ?",
+                    "SELECT id, outcome, metadata, parity_run_type, output_metadata FROM runs WHERE id = ? OR id LIKE ?",
                     [parity_run_id, parity_run_id + "%"],
                 ).fetchall()
                 if run_rows:
-                    outcome, metadata_json, parity_run_type_col, output_metadata_json = run_rows[0]
+                    resolved_run_id, outcome, metadata_json, parity_run_type_col, output_metadata_json = run_rows[0]
             except Exception:
                 run_rows = db.execute(
                     "SELECT outcome, metadata, parity_run_type FROM runs WHERE id = ? OR id LIKE ?",
@@ -1616,8 +1617,18 @@ def parity_confound_check(
                 # AC-20: downgrade controlled parity when verdict artifacts drift on disk
                 if confound_info["status"] in ("controlled", "controlled-by-protocol"):
                     from bathos.checker import output_metadata_has_sha_drift
+                    from bathos.workspace import resolve_workspace
 
-                    if output_metadata_has_sha_drift(output_metadata_json):
+                    ws_root = None
+                    with suppress(Exception):
+                        ws_root = resolve_workspace(claim_path.parent).fs_root
+                    cat_dir = _infer_catalog_dir(db, None, ws_root)
+                    if output_metadata_has_sha_drift(
+                        output_metadata_json,
+                        worktree_root=ws_root,
+                        run_id=str(resolved_run_id),
+                        catalog_dir=cat_dir,
+                    ):
                         confound_info["status"] = "uncontrolled"
         else:
             # DB is None, mark as uncontrolled
@@ -1693,6 +1704,29 @@ def _resolve_member_sidecar(
                     and hashlib.sha256(rel_cand.read_bytes()).hexdigest() == sidecar_sha256
                 ):
                     return parse_sidecar(rel_cand)
+
+    if sidecar_sha256:
+        from bathos.query import resolve_local_sidecar_path
+        from bathos.schema import Run
+
+        inferred_cat = _infer_catalog_dir(db, catalog_dir, workspace_root)
+        local_sc = resolve_local_sidecar_path(
+            Run(
+                id=run_id,
+                project_slug="",
+                command="",
+                argv=[],
+                git_hash="",
+                git_branch="",
+                git_dirty=False,
+                sidecar_path=sidecar_path,
+                sidecar_sha256=sidecar_sha256,
+            ),
+            catalog_dir=inferred_cat,
+            worktree_root=workspace_root,
+        )
+        if local_sc is not None:
+            return parse_sidecar(local_sc)
     return None
 
 

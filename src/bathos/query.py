@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import hashlib
 import json
 import logging
 import re
 import time
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import MISSING
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import duckdb
 import pyarrow.parquet as pq
@@ -1104,3 +1106,134 @@ def lineage(run_id: str, catalog_dir: Path, depth: int = 50) -> list[Run]:
         raise CatalogError(f"Failed to query lineage for run {run_id}: {e}") from e
     finally:
         db.close()
+
+
+def read_import_receipts(run_id: str, catalog_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Return all `import_receipts` rows for ``run_id`` ordered newest first."""
+    from bathos.config import default_catalog_dir
+    from bathos.runlog.mode import is_log_mode
+
+    cd = Path(catalog_dir) if catalog_dir is not None else default_catalog_dir()
+    if not is_log_mode(cd) or not catalog_readable(cd):
+        return []
+    con = connect_read(cd, read_only=True, wire_validity=False)
+    try:
+        cur = con.execute(
+            "SELECT * FROM import_receipts WHERE run_id = ? "
+            "ORDER BY imported_at DESC, bundle_sha256 DESC",
+            [run_id],
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+    except duckdb.Error:
+        return []
+    finally:
+        con.close()
+
+
+def latest_import_receipt(run_id: str, catalog_dir: Path | None = None) -> dict[str, Any] | None:
+    """Return the latest `import_receipts` row for ``run_id``, or None."""
+    receipts = read_import_receipts(run_id, catalog_dir)
+    return receipts[0] if receipts else None
+
+
+def _file_matches_sha256(path: Path, expected_sha: str) -> bool:
+    if not path.is_file():
+        return False
+    if not expected_sha:
+        return True
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha
+    except OSError:
+        return False
+
+
+def _probe_sidecar_in_root(ws_root: Path, sidecar_path: str, expected_sha: str) -> Path | None:
+    if not sidecar_path or not ws_root.is_dir():
+        return None
+    p = Path(sidecar_path)
+    if not p.is_absolute():
+        cand = ws_root / p
+        if _file_matches_sha256(cand, expected_sha):
+            return cand.resolve()
+        return None
+    if expected_sha:
+        for idx in range(1, len(p.parts)):
+            rel_cand = ws_root.joinpath(*p.parts[idx:])
+            if _file_matches_sha256(rel_cand, expected_sha):
+                return rel_cand.resolve()
+    return None
+
+
+def resolve_local_sidecar_path(
+    run: Run,
+    catalog_dir: Path | None = None,
+    worktree_root: Path | str | None = None,
+) -> Path | None:
+    """Resolve a SHA-256-verified local sidecar path for ``run`` (spec 261125 §4.3).
+
+    Checks local checkout first (explicit ``worktree_root``, ``import_receipts.local_worktree_root``,
+    current workspace, or ``run.sidecar_path``), then ``import_receipts.local_sidecar_path``,
+    then ``<catalog_dir>/imported_sidecars/<run_id>/<sha256>.bth.toml``, then
+    ``<catalog_dir>/sidecars/snapshots/``.
+    """
+    from bathos.config import default_catalog_dir
+    from bathos.workspace import resolve_workspace
+
+    cd = Path(catalog_dir) if catalog_dir is not None else default_catalog_dir()
+    expected_sha = (run.sidecar_sha256 or "").strip()
+    recorded_path = (run.sidecar_path or "").strip()
+    if not expected_sha and not recorded_path:
+        return None
+
+    receipt = latest_import_receipt(run.id, cd)
+
+    ws_candidates: list[Path] = []
+    seen_roots: set[str] = set()
+
+    def _add_ws(raw_root: Path | str | None) -> None:
+        if not raw_root:
+            return
+        p = Path(raw_root)
+        key = str(p)
+        if key not in seen_roots:
+            seen_roots.add(key)
+            ws_candidates.append(p)
+
+    if worktree_root is not None:
+        _add_ws(worktree_root)
+    if receipt and receipt.get("local_worktree_root"):
+        _add_ws(receipt["local_worktree_root"])
+    with suppress(Exception):
+        _add_ws(resolve_workspace(Path.cwd()).fs_root)
+
+    for ws_root in ws_candidates:
+        matched = _probe_sidecar_in_root(ws_root, recorded_path, expected_sha)
+        if matched is not None:
+            return matched
+
+    if worktree_root is None and recorded_path and not run.imported_from_host and receipt is None:
+        p = Path(recorded_path)
+        if p.is_absolute() and _file_matches_sha256(p, expected_sha):
+            return p.resolve()
+
+    if receipt and receipt.get("local_sidecar_path"):
+        rec_sc = Path(receipt["local_sidecar_path"])
+        if _file_matches_sha256(rec_sc, expected_sha):
+            return rec_sc.resolve()
+
+    if expected_sha:
+        imported_cached = cd / "imported_sidecars" / run.id / f"{expected_sha}.bth.toml"
+        if _file_matches_sha256(imported_cached, expected_sha):
+            return imported_cached.resolve()
+
+        for snap in (
+            Path.home() / ".bth" / "sidecar-cache" / expected_sha[:2] / f"{expected_sha}.bth.toml",
+            Path.home() / ".bth" / "sidecar-cache" / f"{expected_sha}.bth.toml",
+            cd / "sidecars" / "snapshots" / f"{expected_sha}.bth.toml",
+            cd / "sidecars" / "snapshots" / f"{run.id}.bth.toml",
+        ):
+            if _file_matches_sha256(snap, expected_sha):
+                return snap.resolve()
+
+    return None

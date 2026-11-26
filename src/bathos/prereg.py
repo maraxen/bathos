@@ -800,8 +800,31 @@ def verify_run_manifest_detail(run: Run) -> ManifestVerification:
     except (OSError, ValueError) as e:
         logger.warning(f"Manifest verification failed to read {run.manifest_path}: {e}")
         return ManifestVerification(False, "lock_unlocatable")
+
+    local_sc: Path | None = None
+    if lookup.data is None and getattr(run, "imported_from_host", None):
+        try:
+            from bathos.query import resolve_local_sidecar_path
+
+            local_sc = resolve_local_sidecar_path(run)
+            if local_sc is not None:
+                lookup = locate_lock_bytes(run.manifest_path, run.id, str(local_sc))
+        except (OSError, ValueError):
+            pass
+        if lookup.data is None:
+            try:
+                from bathos.workspace import resolve_workspace
+
+                ws_root = resolve_workspace(Path.cwd()).fs_root
+                if ws_root.is_dir():
+                    lookup = locate_lock_bytes(
+                        run.manifest_path, run.id, str(ws_root / "scripts" / "sidecar")
+                    )
+            except (OSError, ValueError, RuntimeError):
+                pass
+
     if lookup.data is None:
-        return ManifestVerification(False, lookup.reason)
+        return ManifestVerification(False, lookup.reason, str(local_sc) if local_sc else "")
     if hashlib.sha256(lookup.data).hexdigest() != run.manifest_sha256:
         return ManifestVerification(False, "hash_mismatch", lookup.source)
     return ManifestVerification(True, "ok", lookup.source)

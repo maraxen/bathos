@@ -89,8 +89,14 @@ def check_root_syntax(value: str) -> str | None:
     """Why ``value`` is not a usable ``[outputs] roots`` entry, or ``None`` if it is."""
     if not isinstance(value, str) or not value:
         return "must be a non-empty string"
+    if "\x00" in value:
+        return "must not contain NUL bytes"
     if "\\" in value:
         return "must be a POSIX path (no backslashes)"
+    if "//" in value:
+        return "must not contain empty path segments ('//')"
+    if "." in value.split("/"):
+        return "must not contain '.' segments"
     pp = PurePosixPath(value)
     if pp.is_absolute():
         return "must be relative to the worktree root, not absolute"
@@ -280,6 +286,7 @@ class ReferenceEntry:
     origin_eid: str
     worktree_root: str
     path: str
+    external_root: str = ""
 
 
 def _ev_key(ev: dict) -> tuple[str, str]:
@@ -464,6 +471,7 @@ def reference_hashes(
             origin_eid=e.get("origin_eid", ""),
             worktree_root=e.get("worktree_root") or "",
             path=str(e.get("path", "")),
+            external_root=str(e.get("external_root") or ""),
         )
     return result
 

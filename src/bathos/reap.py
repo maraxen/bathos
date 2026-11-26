@@ -264,6 +264,15 @@ def _token_matches_cmd(tok: str, cmd_tokens: list[str], cmd_bases: list[str]) ->
     return Path(norm).name in cmd_bases
 
 
+def _same_host(a: str | None, b: str | None) -> bool:
+    """Compare hostnames by lowercased shortname (e.g. 'titanix' == 'titanix.mit.edu')."""
+    if not a or not b:
+        return False
+    na = a.strip().split(".")[0].lower()
+    nb = b.strip().split(".")[0].lower()
+    return bool(na) and na == nb
+
+
 def _is_live_process_on_host(hostname: str, argv: list[str]) -> bool:
     """Check if a live process matching argv exists on this host.
 
@@ -275,7 +284,7 @@ def _is_live_process_on_host(hostname: str, argv: list[str]) -> bool:
         True if a matching live process exists
     """
     this_host = socket.gethostname()
-    if hostname != this_host:
+    if not _same_host(hostname, this_host):
         return False
 
     if not argv:
@@ -323,6 +332,7 @@ def reap_runs(
     cwd: Path | None = None,
     reconcile_warm: bool = True,
     slurm_only: bool = False,
+    include_remote: bool = False,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
     """Reap orphaned runs by marking them abandoned.
 
@@ -377,6 +387,7 @@ def reap_runs(
             cwd=cwd,
             reconcile_warm=reconcile_warm,
             slurm_only=slurm_only,
+            include_remote=include_remote,
         )
 
 
@@ -428,10 +439,12 @@ def _classify_reap_candidates(
     now: datetime,
     older_than_h: float,
     slurm_only: bool = False,
+    include_remote: bool = False,
 ) -> tuple[list[Run], list[tuple[Run, str]], dict[str, str], dict[str, tuple[str, str | None]]]:
     """Classify running runs into reap candidates vs skipped, capturing sacct exit reasons."""
     now_utc = _normalize_utc(now) or datetime.now(UTC)
     cutoff_time = now_utc - timedelta(hours=older_than_h)
+    local_host = socket.gethostname()
     candidates: list[Run] = []
     skipped: list[tuple[Run, str]] = []
     candidate_reasons: dict[str, str] = {}
@@ -449,6 +462,19 @@ def _classify_reap_candidates(
 
         if run_ts >= cutoff_time:
             skipped.append((run, "too_recent"))
+            continue
+
+        is_imported = bool(getattr(run, "imported_from_host", None))
+        host_norm = (run.hostname or "").strip().lower()
+        # Treat explicit loopback placeholders (used by legacy test fixtures) as
+        # local unless the run carries an import receipt (`imported_from_host`).
+        is_remote_host = is_imported or (
+            bool(host_norm)
+            and host_norm not in ("localhost", "localhost.localdomain")
+            and not _same_host(run.hostname, local_host)
+        )
+        if is_remote_host and not include_remote:
+            skipped.append((run, "remote_host_skipped"))
             continue
 
         if run.slurm_job_id:
@@ -481,7 +507,7 @@ def _classify_reap_candidates(
         else:
             if slurm_only:
                 skipped.append((run, "auto_reap_requires_sacct_terminal"))
-            elif _is_live_process_on_host(run.hostname, run.argv):
+            elif not is_remote_host and _is_live_process_on_host(run.hostname, run.argv):
                 skipped.append((run, "same_host_live_process"))
             else:
                 candidates.append(run)
@@ -500,6 +526,7 @@ def _reap_runs_impl(
     cwd: Path | None,
     reconcile_warm: bool = True,
     slurm_only: bool = False,
+    include_remote: bool = False,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
     flag_on = current_mode()
 
@@ -556,6 +583,7 @@ def _reap_runs_impl(
             now=now,
             older_than_h=older_than_h,
             slurm_only=slurm_only,
+            include_remote=include_remote,
         )
 
     # Apply reaping if requested
@@ -613,6 +641,7 @@ def find_stale_running_runs(
     *,
     older_than_h: float = 24,
     slurm_only: bool = False,
+    include_remote: bool = False,
 ) -> list[dict]:
     """Read-only helper returning stale `status='running'` runs eligible for reaping.
 
@@ -632,6 +661,7 @@ def find_stale_running_runs(
         now=now,
         older_than_h=older_than_h,
         slurm_only=slurm_only,
+        include_remote=include_remote,
     )
     results: list[dict] = []
     for run in candidates:
@@ -656,6 +686,7 @@ def auto_reap_stale_runs(
     older_than_h: float = 24,
     apply: bool = False,
     slurm_only: bool = True,
+    include_remote: bool = False,
     cwd: Path | None = None,
     reconcile_warm: bool = True,
 ) -> tuple[list[Run], list[tuple[Run, str]]]:
@@ -673,6 +704,7 @@ def auto_reap_stale_runs(
         cwd=cwd,
         reconcile_warm=reconcile_warm,
         slurm_only=slurm_only,
+        include_remote=include_remote,
     )
 
 

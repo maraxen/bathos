@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS events (
     main_root VARCHAR,
     worktree_root VARCHAR,
     origin VARCHAR,
-    data VARCHAR
+    data VARCHAR,
+    envelope_sha256 VARCHAR,
+    extra_keys VARCHAR
 )
 """
 
@@ -160,7 +162,11 @@ CREATE TABLE IF NOT EXISTS runs (
     postmortem_asset_links VARCHAR,
     seq_position BIGINT,
     evalue DOUBLE,
-    adopted_outputs VARCHAR
+    adopted_outputs VARCHAR,
+    imported_from_host VARCHAR,
+    imported_at VARCHAR,
+    import_method VARCHAR,
+    bundle_sha256 VARCHAR
 )
 """
 
@@ -497,6 +503,27 @@ CREATE TABLE IF NOT EXISTS appraisals (
 )
 """
 
+# Durable cross-host bundle import receipts (spec 261125 §4.2), rebuilt deterministically
+# from `.receipt.json` files under `.bth/log/imported/` and `~/.bth/log/imported/`.
+IMPORT_RECEIPTS_DDL = """
+CREATE TABLE IF NOT EXISTS import_receipts (
+    run_id VARCHAR,
+    bundle_sha256 VARCHAR,
+    origin_host VARCHAR,
+    source_main_root VARCHAR,
+    source_worktree_root VARCHAR,
+    imported_at VARCHAR,
+    import_method VARCHAR,
+    remote_name VARCHAR,
+    local_worktree_root VARCHAR,
+    local_sidecar_path VARCHAR,
+    external_campaign_ref VARCHAR,
+    git_commit_local BOOLEAN,
+    sidecar_missing_allowed BOOLEAN,
+    PRIMARY KEY (run_id, bundle_sha256)
+)
+"""
+
 
 _DDL_NON_COLUMN_PREFIXES = ("CREATE", ")", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK")
 
@@ -528,6 +555,7 @@ BEARINGS_ITEMS_COLUMNS: list[str] = _columns_of(BEARINGS_ITEMS_DDL)
 OBSERVATIONS_COLUMNS: list[str] = _columns_of(OBSERVATIONS_DDL)
 OBSERVATION_STATUSES_COLUMNS: list[str] = _columns_of(OBSERVATION_STATUSES_DDL)
 APPRAISALS_COLUMNS: list[str] = _columns_of(APPRAISALS_DDL)
+IMPORT_RECEIPTS_COLUMNS: list[str] = _columns_of(IMPORT_RECEIPTS_DDL)
 
 
 def index_db_path(catalog_dir: Path | None = None) -> Path:
@@ -564,6 +592,7 @@ def _add_missing_columns(con: duckdb.DuckDBPyConnection, table: str, ddl: str) -
 
 def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(EVENTS_DDL)
+    _add_missing_columns(con, "events", EVENTS_DDL)
     con.execute(QUARANTINE_DDL)
     con.execute(WATERMARKS_DDL)
     con.execute(RUNS_DDL)
@@ -602,6 +631,8 @@ def init_index_schema(con: duckdb.DuckDBPyConnection) -> None:
     _add_missing_columns(con, "observation_statuses", OBSERVATION_STATUSES_DDL)
     con.execute(APPRAISALS_DDL)
     _add_missing_columns(con, "appraisals", APPRAISALS_DDL)
+    con.execute(IMPORT_RECEIPTS_DDL)
+    _add_missing_columns(con, "import_receipts", IMPORT_RECEIPTS_DDL)
 
 
 def _empty_select(ddl: str) -> str:
@@ -613,7 +644,8 @@ def _empty_select(ddl: str) -> str:
         if not stripped or stripped.startswith(_DDL_NON_COLUMN_PREFIXES):
             continue
         name, col_type = stripped.split(None, 1)
-        cols.append(f"CAST(NULL AS {col_type.replace(' PRIMARY KEY', '')}) AS {name}")
+        col_type_clean = col_type.replace(" PRIMARY KEY", "").replace(" NOT NULL", "")
+        cols.append(f"CAST(NULL AS {col_type_clean}) AS {name}")
     return "SELECT " + ", ".join(cols) + " WHERE false"
 
 
@@ -863,6 +895,7 @@ def connect_read(
             ("observations", OBSERVATIONS_DDL),
             ("observation_statuses", OBSERVATION_STATUSES_DDL),
             ("appraisals", APPRAISALS_DDL),
+            ("import_receipts", IMPORT_RECEIPTS_DDL),
         ):
             have_tbl = con.execute(
                 "SELECT count(*) FROM duckdb_tables() "
@@ -999,6 +1032,8 @@ __all__ = [
     "CHARTER_PIVOTS_COLUMNS",
     "CHARTER_PIVOTS_DDL",
     "EVENTS_DDL",
+    "IMPORT_RECEIPTS_COLUMNS",
+    "IMPORT_RECEIPTS_DDL",
     "OBSERVATIONS_COLUMNS",
     "OBSERVATIONS_DDL",
     "OBSERVATION_STATUSES_COLUMNS",

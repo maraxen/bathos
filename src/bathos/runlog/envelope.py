@@ -12,6 +12,8 @@ deterministic for a fixed event set).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import time
 import uuid
@@ -19,6 +21,54 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+
+STANDARD_ENVELOPE_KEYS = (
+    "v",
+    "eid",
+    "kind",
+    "entity",
+    "ts",
+    "project",
+    "project_id",
+    "writer",
+    "seq",
+    "main_root",
+    "worktree_root",
+    "origin",
+    "data",
+)
+
+
+def canonical_json_bytes(obj: Any) -> bytes:
+    """RFC 8785-style canonical JSON serialization, rejecting NaN/Infinity."""
+    return json.dumps(
+        obj,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def extract_extra_keys(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Return sorted extra top-level envelope keys beyond the 13 standard keys."""
+    return {k: envelope[k] for k in sorted(envelope) if k not in STANDARD_ENVELOPE_KEYS}
+
+
+def normalize_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Normalize an event envelope into canonical 13-key + sorted-extra-key form."""
+    norm: dict[str, Any] = {k: envelope.get(k) for k in STANDARD_ENVELOPE_KEYS}
+    if "origin" not in envelope:
+        norm["origin"] = "live"
+    for k in sorted(envelope):
+        if k not in STANDARD_ENVELOPE_KEYS:
+            norm[k] = envelope[k]
+    return norm
+
+
+def compute_envelope_sha256(envelope: dict[str, Any]) -> str:
+    """SHA-256 hex digest of the canonical full-envelope JSON bytes."""
+    return hashlib.sha256(canonical_json_bytes(normalize_envelope(envelope))).hexdigest()
 
 # The spec's NAMESPACE_BATHOS: the one uuid5 namespace for every deterministic id
 # (import eids, anchor_id). Fixed forever -- changing it re-keys every entity.

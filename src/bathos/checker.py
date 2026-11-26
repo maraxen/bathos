@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import duckdb
+
 from bathos.git import capture_git_state
 from bathos.query import list_runs
 from bathos.schema import Run
@@ -196,11 +198,81 @@ def check_output_files(run: Run) -> list[OutputCheckResult]:
     return results
 
 
-def check_output_sha_drift(run: Run) -> list[OutputShaDriftResult]:
+def _resolve_local_output_path(
+    entry: dict,
+    run: Run,
+    *,
+    worktree_root: Path | str | None = None,
+    catalog_dir: Path | None = None,
+) -> str:
+    """Resolve an output entry's local path using recorded ``path``, ``external_root``, or ``relpath``."""
+    raw_path = str(entry.get("path") or "")
+    if raw_path and Path(raw_path).exists():
+        return raw_path
+
+    relpath = entry.get("relpath")
+    if not relpath:
+        return raw_path
+
+    ext_root = entry.get("external_root")
+    if not ext_root:
+        adopted_raw = getattr(run, "adopted_outputs", None)
+        if adopted_raw:
+            try:
+                adopted_list = (
+                    json.loads(adopted_raw) if isinstance(adopted_raw, str) else adopted_raw
+                )
+                if isinstance(adopted_list, list):
+                    for ae in adopted_list:
+                        if isinstance(ae, dict) and ae.get("relpath") == relpath and ae.get("external_root"):
+                            ext_root = ae.get("external_root")
+                            break
+            except (json.JSONDecodeError, TypeError):
+                pass
+    if ext_root:
+        cand_ext = Path(str(ext_root)) / relpath
+        if cand_ext.exists():
+            return str(cand_ext)
+
+    roots: list[Path] = []
+    if worktree_root is not None:
+        roots.append(Path(worktree_root))
+    if getattr(run, "id", None):
+        try:
+            from bathos.query import latest_import_receipt
+
+            receipt = latest_import_receipt(run.id, catalog_dir)
+            if receipt and receipt.get("local_worktree_root"):
+                roots.append(Path(receipt["local_worktree_root"]))
+        except (OSError, RuntimeError, ValueError, duckdb.Error):
+            pass
+    try:
+        from bathos.workspace import resolve_workspace
+
+        roots.append(resolve_workspace(Path.cwd()).fs_root)
+    except (OSError, RuntimeError, ValueError, duckdb.Error):
+        pass
+
+    for root in roots:
+        cand = root / relpath
+        if cand.exists():
+            return str(cand)
+
+    return raw_path
+
+
+def check_output_sha_drift(
+    run: Run,
+    *,
+    worktree_root: Path | str | None = None,
+    catalog_dir: Path | None = None,
+) -> list[OutputShaDriftResult]:
     """Compare warm-tier output_metadata SHA256 hashes to on-disk files.
 
     Args:
         run: Run object with output_metadata JSON (warm tier)
+        worktree_root: Optional local worktree root for imported relpath resolution
+        catalog_dir: Optional catalog directory for import receipt lookup
 
     Returns:
         List of OutputShaDriftResult for each catalogued output with a recorded hash
@@ -237,7 +309,10 @@ def check_output_sha_drift(run: Run) -> list[OutputShaDriftResult]:
             )
             continue
 
-        fresh = _collect_output_metadata(path)
+        resolved_path = _resolve_local_output_path(
+            entry, run, worktree_root=worktree_root, catalog_dir=catalog_dir
+        )
+        fresh = _collect_output_metadata(resolved_path)
         if fresh["status"] == "missing":
             results.append(
                 OutputShaDriftResult(
@@ -341,21 +416,29 @@ def check_dependency_lock_drift(
     return current != recorded_sha256
 
 
-def output_metadata_has_sha_drift(output_metadata_json: str | None) -> bool:
+def output_metadata_has_sha_drift(
+    output_metadata_json: str | None,
+    *,
+    worktree_root: Path | str | None = None,
+    run_id: str = "",
+    catalog_dir: Path | None = None,
+) -> bool:
     """Return True if any catalogued output SHA no longer matches disk."""
     if not output_metadata_json or output_metadata_json == "[]":
         return False
+    run_obj = Run(
+        id=run_id,
+        project_slug="",
+        command="",
+        argv=[],
+        git_hash="",
+        git_branch="",
+        git_dirty=False,
+        output_metadata=output_metadata_json,
+    )
     return any(
         r.status in ("DRIFT", "MISSING", "UNREADABLE")
         for r in check_output_sha_drift(
-            Run(
-                project_slug="",
-                command="",
-                argv=[],
-                git_hash="",
-                git_branch="",
-                git_dirty=False,
-                output_metadata=output_metadata_json,
-            )
+            run_obj, worktree_root=worktree_root, catalog_dir=catalog_dir
         )
     )

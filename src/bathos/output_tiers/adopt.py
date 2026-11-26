@@ -175,34 +175,48 @@ def hash_outputs(
     """
     from bathos.output_tiers.retention import check_citation_retention
 
-    ctx = open_run(catalog_dir, run_prefix, worktree_root=worktree_root)
-    assert ctx.worktree_root is not None
+    ctx = open_run(catalog_dir, run_prefix, worktree_root=worktree_root, need_root=False)
+    try:
+        ctx = attach_root(ctx, worktree_root)
+    except OutputTierError:
+        pre_ref = reference_hashes(ctx.events, imported_root=ctx.imported_root)
+        if not pre_ref or not all(bool(e.external_root) for e in pre_ref.values()):
+            raise
     _check_legacy_resolvable(ctx)
     ref = reference_hashes(ctx.events, imported_root=ctx.imported_root)
     if not ref:
         raise OutputTierError(NO_REFERENCE_HASHES, ctx.run_id)
-    files = [_live_state(ctx.worktree_root, ref[rel]) for rel in sorted(ref)]
+    files: list[dict[str, Any]] = []
+    for rel in sorted(ref):
+        entry = ref[rel]
+        target_root = Path(entry.external_root) if entry.external_root else ctx.worktree_root
+        assert target_root is not None
+        item = _live_state(target_root, entry)
+        if entry.external_root:
+            item["external_root"] = entry.external_root
+        files.append(item)
     counts = {s: sum(1 for f in files if f["status"] == s) for s in ("match", "drift", "missing")}
     out: dict[str, Any] = {
         "ok": True,
         "run_id": ctx.run_id,
-        "worktree_root": str(ctx.worktree_root),
-        "worktree_root_source": ctx.root_source,
+        "worktree_root": str(ctx.worktree_root) if ctx.worktree_root is not None else None,
+        "worktree_root_source": ctx.root_source or "external_root",
         "n_reference": len(files),
         "counts": counts,
         "all_match": counts["drift"] == 0 and counts["missing"] == 0,
         "files": files,
     }
-    retention = check_citation_retention(
-        catalog_dir,
-        ctx.run_id,
-        worktree_root=str(ctx.worktree_root),
-        decision_relevant=None,
-        emit_telemetry=False,
-    )
-    out["retention"] = retention.to_dict()
-    if retention.warnings:
-        out["warnings"] = list(retention.warnings)
+    if ctx.worktree_root is not None:
+        retention = check_citation_retention(
+            catalog_dir,
+            ctx.run_id,
+            worktree_root=str(ctx.worktree_root),
+            decision_relevant=None,
+            emit_telemetry=False,
+        )
+        out["retention"] = retention.to_dict()
+        if retention.warnings:
+            out["warnings"] = list(retention.warnings)
     return out
 
 
@@ -226,6 +240,39 @@ def _root_relpath(root_arg: str, worktree_root: Path) -> str:
     return rel
 
 
+def _validated_external_base(relpath_base: str | Path) -> Path:
+    """Validate ``--relpath-base`` exists, is a directory, and is symlink-free."""
+    from bathos.output_tiers.reference import SYMLINK_IN_OUTPUTS
+
+    raw = Path(os.path.expanduser(str(relpath_base)))
+    abs_base = Path(os.path.normpath(os.path.abspath(raw)))
+    try:
+        st = os.lstat(abs_base)
+    except FileNotFoundError as exc:
+        raise OutputTierError(ROOT_MISSING, f"--relpath-base {relpath_base} does not exist") from exc
+    except OSError as exc:
+        raise OutputTierError(INVALID_PARAM, f"cannot stat --relpath-base {relpath_base}: {exc}") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise OutputTierError(SYMLINK_IN_OUTPUTS, str(abs_base))
+    if not stat.S_ISDIR(st.st_mode):
+        raise OutputTierError(INVALID_PARAM, f"--relpath-base {relpath_base} is not a directory")
+    # Walk from parent chain only for relative input components (and confirm resolved realpath matches
+    # any relative subpaths without system-level false positives like /tmp -> /private/tmp).
+    if not raw.is_absolute():
+        cur = Path.cwd()
+        for part in raw.parts:
+            if part in ("", "."):
+                continue
+            cur = cur / part
+            try:
+                pst = os.lstat(cur)
+                if stat.S_ISLNK(pst.st_mode):
+                    raise OutputTierError(SYMLINK_IN_OUTPUTS, str(cur))
+            except FileNotFoundError:
+                break
+    return Path(os.path.realpath(abs_base))
+
+
 def adopt_outputs(
     catalog_dir: Path,
     run_prefix: str,
@@ -233,6 +280,8 @@ def adopt_outputs(
     reason: str,
     *,
     worktree_root: str | None = None,
+    allow_external_root: bool = False,
+    relpath_base: str | Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Hash ``roots`` now and record the paths that have no ``run_end`` / ``run_end_legacy`` entry.
@@ -250,6 +299,10 @@ def adopt_outputs(
         raise OutputTierError(INVALID_PARAM, "at least one --root is required")
     if not reason or not reason.strip():
         raise OutputTierError(INVALID_PARAM, "--reason is required")
+    if relpath_base is not None and str(relpath_base).strip() and not allow_external_root:
+        raise OutputTierError(INVALID_PARAM, "--relpath-base requires --allow-external-root")
+    if allow_external_root and (relpath_base is None or not str(relpath_base).strip()):
+        raise OutputTierError(INVALID_PARAM, "--relpath-base is required with --allow-external-root")
 
     with unit_of_work(catalog_dir) as log_mode:
         if not log_mode:
@@ -262,13 +315,28 @@ def adopt_outputs(
             )
         if not is_terminal(ctx.status):
             raise OutputTierError(RUN_NOT_TERMINAL, f"run {ctx.run_id} has status {ctx.status!r}")
-        ctx = attach_root(ctx, worktree_root)
-        wt = ctx.worktree_root
-        assert wt is not None
+
+        ext_base: Path | None = None
+        if allow_external_root:
+            assert relpath_base is not None
+            ext_base = _validated_external_base(relpath_base)
+            try:
+                ctx = attach_root(ctx, worktree_root)
+            except OutputTierError:
+                if worktree_root is not None:
+                    raise
+            wt = ctx.worktree_root
+            scan_base = ext_base
+        else:
+            ctx = attach_root(ctx, worktree_root)
+            wt = ctx.worktree_root
+            assert wt is not None
+            scan_base = wt
+
         _check_legacy_resolvable(ctx)
 
-        rels = [_root_relpath(r, wt) for r in roots]
-        files, missing_roots = expand_roots(rels, wt)
+        rels = [_root_relpath(r, scan_base) for r in roots]
+        files, missing_roots = expand_roots(rels, scan_base)
         if missing_roots:
             raise OutputTierError(ROOT_MISSING, _named(missing_roots))
 
@@ -276,6 +344,7 @@ def adopt_outputs(
         entries: list[dict[str, Any]] = []
         skipped: list[dict[str, str]] = []
         conflicts: list[str] = []
+        cur_ext = str(ext_base) if ext_base is not None else ""
         for f in files:
             try:
                 sha = hash_file(f.path)
@@ -289,20 +358,30 @@ def adopt_outputs(
                 else:
                     conflicts.append(f.relpath)
                 continue
-            if existing is not None and existing.phase == PHASE_ADOPTED and existing.sha256 == sha:
-                skipped.append({"relpath": f.relpath, "reason": "already_adopted"})
-                continue
-            entries.append(
-                {
-                    "path": str(f.path),
-                    "status": "present",
-                    "size_bytes": st.st_size,
-                    "mtime_unix": st.st_mtime,
-                    "sha256": sha,
-                    "relpath": f.relpath,
-                    "phase": PHASE_ADOPTED,
-                }
-            )
+            if existing is not None and existing.phase == PHASE_ADOPTED:
+                prev_ext = existing.external_root or ""
+                if prev_ext != cur_ext:
+                    raise OutputTierError(
+                        INVALID_PARAM,
+                        f"relpath {f.relpath!r} collides with existing adopted output under a different root "
+                        f"({prev_ext or 'worktree_root'} vs {cur_ext or 'worktree_root'})",
+                    )
+                if existing.sha256 == sha:
+                    skipped.append({"relpath": f.relpath, "reason": "already_adopted"})
+                    continue
+            entry_dict: dict[str, Any] = {
+                "path": str(f.path),
+                "status": "present",
+                "size_bytes": st.st_size,
+                "mtime_unix": st.st_mtime,
+                "sha256": sha,
+                "relpath": f.relpath,
+                "phase": PHASE_ADOPTED,
+            }
+            if ext_base is not None:
+                entry_dict["external_root"] = str(ext_base)
+                entry_dict["adopted_from_external_root"] = True
+            entries.append(entry_dict)
         if conflicts:
             raise OutputTierError(
                 RUN_END_CONFLICT,
@@ -314,8 +393,8 @@ def adopt_outputs(
         result: dict[str, Any] = {
             "ok": True,
             "run_id": ctx.run_id,
-            "worktree_root": str(wt),
-            "worktree_root_source": ctx.root_source,
+            "worktree_root": str(wt) if wt is not None else None,
+            "worktree_root_source": ctx.root_source or ("external_root" if ext_base is not None else ""),
             "dry_run": dry_run,
             "roots": rels,
             "n_files": len(entries),
@@ -324,17 +403,24 @@ def adopt_outputs(
             "skipped": skipped,
             "eid": None,
         }
+        if ext_base is not None:
+            result["external_root"] = str(ext_base)
+            result["adopted_from_external_root"] = True
         if dry_run or not entries:
             return result
+        event_data: dict[str, Any] = {
+            "phase": PHASE_ADOPTED,
+            "output_metadata": entries,
+            "roots": rels,
+            "reason": reason,
+        }
+        if ext_base is not None:
+            event_data["external_root"] = str(ext_base)
+            event_data["adopted_from_external_root"] = True
         outcome = emit_event(
             kind="run.outputs_hashed",
             entity=[ctx.run_id],
-            data={
-                "phase": PHASE_ADOPTED,
-                "output_metadata": entries,
-                "roots": rels,
-                "reason": reason,
-            },
+            data=event_data,
             cwd=_log_cwd(ctx, None),
             hard_fail=True,
             worktree_root=wt,

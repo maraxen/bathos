@@ -263,6 +263,11 @@ class Run:
     #: v20 (spec 261106). Resolved toolchain version source:
     #: "recorded" | "verified-from-lock" | "inferred-from-commit" | "unknown" | None.
     toolchain_version_source: str | None = None
+    #: Cross-host bundle import provenance (spec 261125, index-folded from import_receipts).
+    imported_from_host: str | None = None
+    imported_at: str | None = None
+    import_method: str | None = None
+    bundle_sha256: str | None = None
 
     def to_arrow(self) -> pa.Table:
         return pa.table(
