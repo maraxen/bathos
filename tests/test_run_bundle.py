@@ -810,50 +810,71 @@ def test_nc1_tampered_metadata_and_nan_refused_zero_writes(tmp_path: Path, monke
     orig = tmp_path / "orig.bthbundle"
     export_run_bundle(run_id, orig, catalog_dir=src_cat)
 
-    # 1. Alter non-data key (`writer` and `actor`) in events.jsonl -> RunBundleTamperedError
+    # 1. Alter non-data key (`writer` and `actor`) in events.jsonl AND update events_sha256
+    #    (a) leaving event_digests unchanged -> fails specifically at compute_envelope_sha256
+    #    (b) forging event_digests with only (kind, entity, data) -> STILL fails full 13+key envelope verification
     tampered_meta = tmp_path / "tampered_meta.bthbundle"
+    forged_partial_digest = tmp_path / "forged_partial_digest.bthbundle"
 
-    def _mutate_writer(members):
-        out = []
-        for info, data in members:
-            if info.name == "events.jsonl":
-                lines = [json.loads(ln) for ln in data.decode().splitlines() if ln.strip()]
-                lines[0]["writer"] = "evil-writer"
-                lines[0]["actor"] = "forger"
-                data = b"".join(canonical_json_bytes(ev) + b"\n" for ev in lines)
-            out.append((info, data))
-        return out
-
-    _rewrite_tar_zst(orig, tampered_meta, _mutate_writer)
-
-    monkeypatch.setenv("HOME", str(tmp_path / "home_dst"))
-    dst_cat = tmp_path / "cat_dst"
-    _init_log_catalog(dst_cat)
-    with pytest.raises(RunBundleTamperedError):
-        import_run_bundle(tampered_meta, catalog_dir=dst_cat)
-    assert not index_db_path(dst_cat).exists()
-
-    # 2. Inject NaN in events.jsonl (even with recomputed hashes) -> RunBundleInvalidError
-    nan_bundle = tmp_path / "nan.bthbundle"
-
-    def _mutate_nan(members):
+    def _mutate_writer_with_events_sha(members, *, forge_partial_digests: bool = False):
         m_dict = {info.name: (info, data) for info, data in members}
         ev_info, ev_data = m_dict["events.jsonl"]
-        ev_text = ev_data.decode().replace('"duration_s":60.0', '"duration_s":NaN')
-        new_ev_bytes = ev_text.encode()
+        lines = [json.loads(ln) for ln in ev_data.decode().splitlines() if ln.strip()]
+        lines[0]["writer"] = "evil-writer"
+        lines[0]["actor"] = "forger"
+        new_ev_bytes = b"".join(canonical_json_bytes(ev) + b"\n" for ev in lines)
         man_info, man_data = m_dict["manifest.json"]
         man = json.loads(man_data.decode())
         man["events_sha256"] = hashlib.sha256(new_ev_bytes).hexdigest()
+        if forge_partial_digests:
+            man["event_digests"] = {
+                ev["eid"]: hashlib.sha256(
+                    canonical_json_bytes(
+                        {"kind": ev["kind"], "entity": ev["entity"], "data": ev["data"]}
+                    )
+                ).hexdigest()
+                for ev in lines
+            }
         man_body = {k: v for k, v in man.items() if k != "bundle_sha256"}
         man["bundle_sha256"] = hashlib.sha256(canonical_json_bytes(man_body)).hexdigest()
         m_dict["events.jsonl"] = (ev_info, new_ev_bytes)
         m_dict["manifest.json"] = (man_info, json.dumps(man).encode())
         return list(m_dict.values())
 
-    _rewrite_tar_zst(orig, nan_bundle, _mutate_nan)
-    with pytest.raises((RunBundleInvalidError, RunBundleTamperedError)):
-        import_run_bundle(nan_bundle, catalog_dir=dst_cat)
+    _rewrite_tar_zst(orig, tampered_meta, lambda ms: _mutate_writer_with_events_sha(ms, forge_partial_digests=False))
+    _rewrite_tar_zst(orig, forged_partial_digest, lambda ms: _mutate_writer_with_events_sha(ms, forge_partial_digests=True))
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home_dst"))
+    dst_cat = tmp_path / "cat_dst"
+    _init_log_catalog(dst_cat)
+    with pytest.raises(RunBundleTamperedError, match="Canonical digest mismatch"):
+        import_run_bundle(tampered_meta, catalog_dir=dst_cat)
+    with pytest.raises(RunBundleTamperedError, match="Canonical digest mismatch"):
+        import_run_bundle(forged_partial_digest, catalog_dir=dst_cat)
     assert not index_db_path(dst_cat).exists()
+
+    # 2. Inject NaN / Infinity in events.jsonl (even with recomputed hashes) -> RunBundleInvalidError specifically
+    for bad_const in ("NaN", "Infinity"):
+        nan_bundle = tmp_path / f"bad_{bad_const}.bthbundle"
+
+        def _mutate_nonfinite(members, _const=bad_const):
+            m_dict = {info.name: (info, data) for info, data in members}
+            ev_info, ev_data = m_dict["events.jsonl"]
+            ev_text = ev_data.decode().replace('"duration_s":60.0', f'"duration_s":{_const}')
+            new_ev_bytes = ev_text.encode()
+            man_info, man_data = m_dict["manifest.json"]
+            man = json.loads(man_data.decode())
+            man["events_sha256"] = hashlib.sha256(new_ev_bytes).hexdigest()
+            man_body = {k: v for k, v in man.items() if k != "bundle_sha256"}
+            man["bundle_sha256"] = hashlib.sha256(canonical_json_bytes(man_body)).hexdigest()
+            m_dict["events.jsonl"] = (ev_info, new_ev_bytes)
+            m_dict["manifest.json"] = (man_info, json.dumps(man).encode())
+            return list(m_dict.values())
+
+        _rewrite_tar_zst(orig, nan_bundle, _mutate_nonfinite)
+        with pytest.raises(RunBundleInvalidError, match="Non-standard JSON constant"):
+            import_run_bundle(nan_bundle, catalog_dir=dst_cat)
+        assert not index_db_path(dst_cat).exists()
 
 
 def test_nc2_same_eid_envelope_conflict_in_ingest_and_import(tmp_path: Path, monkeypatch):
@@ -1008,6 +1029,37 @@ def test_nc4_missing_or_tampered_sidecar_and_outputs(tmp_path: Path, monkeypatch
     with pytest.raises(RunBundleTamperedError):
         verify_run_bundle(b_tampered_out)
 
+    # (a) Tampered sidecar.bth.toml (included=True) -> RunBundleTamperedError + zero writes
+    b_with_sc = tmp_path / "with_sc.bthbundle"
+    export_run_bundle("other-run-2", b_with_sc, include_outputs=True, catalog_dir=src_cat2)
+    b_tampered_sc = tmp_path / "tampered_sc.bthbundle"
+
+    def _tamper_sidecar(members):
+        out = []
+        for info, data in members:
+            if info.name == "sidecar.bth.toml":
+                data = data + b"\n# tampered\n"
+            out.append((info, data))
+        return out
+
+    _rewrite_tar_zst(b_with_sc, b_tampered_sc, _tamper_sidecar)
+    dst_cat_sc = tmp_path / "cat_dst_sc"
+    _init_log_catalog(dst_cat_sc)
+    with pytest.raises(RunBundleTamperedError, match="sidecar.bth.toml SHA-256 mismatch"):
+        import_run_bundle(b_tampered_sc, catalog_dir=dst_cat_sc)
+    assert not index_db_path(dst_cat_sc).exists()
+
+    # (b) Missing blobs/outputs/<relpath> when include_outputs=True -> RunBundleTamperedError + zero writes
+    b_missing_blob = tmp_path / "missing_blob.bthbundle"
+    _rewrite_tar_zst(
+        b_with_sc,
+        b_missing_blob,
+        lambda ms: [(info, data) for info, data in ms if not info.name.startswith("blobs/outputs/")],
+    )
+    with pytest.raises(RunBundleTamperedError, match="Output blobs mismatch"):
+        import_run_bundle(b_missing_blob, catalog_dir=dst_cat_sc)
+    assert not index_db_path(dst_cat_sc).exists()
+
 
 def test_nc5_container_security_and_extract_outputs_guards(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home_src"))
@@ -1024,12 +1076,15 @@ def test_nc5_container_security_and_extract_outputs_guards(tmp_path: Path, monke
     bad_paths = [
         "../evil.txt",
         "./manifest.json",
+        "/etc/passwd",
+        "/blobs/outputs/res.txt",
+        "blobs\\outputs\\res.txt",
         "blobs//outputs/res.txt",
         "blobs/outputs/a\x00b",
         "unknown_top.txt",
     ]
-    for bad in bad_paths:
-        bad_bundle = tmp_path / f"bad_{abs(hash(bad))}.bthbundle"
+    for idx, bad in enumerate(bad_paths):
+        bad_bundle = tmp_path / f"bad_{idx}.bthbundle"
 
         def _add_bad(members, _bad=bad):
             if "\x00" in _bad:
@@ -1043,18 +1098,45 @@ def test_nc5_container_security_and_extract_outputs_guards(tmp_path: Path, monke
         with pytest.raises(RunBundleUnsafePathError):
             verify_run_bundle(bad_bundle)
 
-    # Symlink member inside archive
-    sym_bundle = tmp_path / "sym.bthbundle"
+    # Symlink, hardlink (LNKTYPE), and FIFO (FIFOTYPE) members inside archive
+    for kind_name, ttype, linkname in (
+        ("sym", tarfile.SYMTYPE, "/etc/passwd"),
+        ("hardlink", tarfile.LNKTYPE, "manifest.json"),
+        ("fifo", tarfile.FIFOTYPE, ""),
+    ):
+        special_bundle = tmp_path / f"{kind_name}.bthbundle"
 
-    def _add_sym(members):
-        info = tarfile.TarInfo(name="blobs/outputs/link")
-        info.type = tarfile.SYMTYPE
-        info.linkname = "/etc/passwd"
-        return [*members, (info, b"")]
+        def _add_special(members, _tt=ttype, _ln=linkname, _kn=kind_name):
+            info = tarfile.TarInfo(name=f"blobs/outputs/{_kn}")
+            info.type = _tt
+            info.linkname = _ln
+            return [*members, (info, b"")]
 
-    _rewrite_tar_zst(orig, sym_bundle, _add_sym)
-    with pytest.raises(RunBundleUnsafePathError):
-        verify_run_bundle(sym_bundle)
+        _rewrite_tar_zst(orig, special_bundle, _add_special)
+        with pytest.raises(RunBundleUnsafePathError):
+            verify_run_bundle(special_bundle)
+
+    # Duplicate archive member
+    dup_bundle = tmp_path / "dup.bthbundle"
+    _rewrite_tar_zst(
+        orig,
+        dup_bundle,
+        lambda ms: [*ms, (tarfile.TarInfo(name="manifest.json"), b"{}")],
+    )
+    with pytest.raises(RunBundleUnsafePathError, match="Duplicate archive member"):
+        verify_run_bundle(dup_bundle)
+
+    # Member-count bomb limit
+    import bathos.run_bundle as run_bundle_mod
+
+    monkeypatch.setattr(run_bundle_mod, "MAX_MEMBER_COUNT", 3)
+    with pytest.raises(RunBundleUnsafePathError, match="max member count"):
+        verify_run_bundle(orig)
+    monkeypatch.undo()
+
+    # Output byte bomb cap on verify
+    with pytest.raises(RunBundleUnsafePathError, match="exceeds limit"):
+        verify_run_bundle(orig, max_output_bytes=4)
 
     # Extraction guards: pre-existing parent symlink & clobber refusal
     monkeypatch.setenv("HOME", str(tmp_path / "home_dst"))
@@ -1084,3 +1166,522 @@ def test_nc5_container_security_and_extract_outputs_guards(tmp_path: Path, monke
     )
     assert imp["status"] == "imported"
     assert (clobber_dir / "outputs" / "res.txt").read_bytes() == b"hello-output\n"
+
+
+def _build_signed_bundle(
+    out_path: Path,
+    *,
+    run_id: str,
+    events: list[dict],
+    manifest_overrides: dict | None = None,
+    extra_members: list[tuple[str, bytes]] | None = None,
+) -> None:
+    ev_bytes = b"".join(canonical_json_bytes(ev) + b"\n" for ev in events)
+    ev_sha = hashlib.sha256(ev_bytes).hexdigest()
+    ev_digests = {str(ev["eid"]): hashlib.sha256(canonical_json_bytes(ev)).hexdigest() for ev in events}
+    from bathos.output_tiers.reference import reference_hashes
+
+    refs = reference_hashes(events)
+    outputs_manifest = [
+        {
+            "relpath": entry.relpath,
+            "sha256": entry.sha256,
+            "size_bytes": entry.size_bytes,
+            "phase": entry.phase,
+            "blob_included": bool(extra_members),
+        }
+        for _, entry in sorted(refs.items())
+    ]
+    manifest_body = {
+        "format": "bathos.bundle.v1",
+        "bundle_version": 1,
+        "source_mode": "log",
+        "run_id": run_id,
+        "project_slug": "proj",
+        "project_id": None,
+        "origin_host": "titanix",
+        "source_main_root": "",
+        "source_worktree_root": "",
+        "exported_at": "2026-11-25T10:00:00.000000Z",
+        "exported_by_bth_version": "0.18.0",
+        "include_outputs": bool(extra_members),
+        "include_git": False,
+        "events_count": len(events),
+        "events_sha256": ev_sha,
+        "event_digests": ev_digests,
+        "sidecar": {"included": False, "recorded_path": "", "sha256": "", "missing_reason": None},
+        "outputs": outputs_manifest,
+        "campaign_context": {"campaign_id": None, "external_campaign_ref": None, "with_campaign": False},
+        "git": {"git_hash": "", "git_branch": "", "git_dirty": False, "git_bundle_included": False},
+    }
+    if manifest_overrides:
+        manifest_body.update(manifest_overrides)
+    bundle_sha = hashlib.sha256(canonical_json_bytes(manifest_body)).hexdigest()
+    manifest = {**manifest_body, "bundle_sha256": bundle_sha}
+    from bathos.run_bundle import _write_archive_atomic
+
+    members: list[tuple[str, bytes]] = [
+        ("manifest.json", json.dumps(manifest).encode("utf-8")),
+        ("events.jsonl", ev_bytes),
+    ]
+    if extra_members:
+        members.extend(extra_members)
+    _write_archive_atomic(out_path, members)
+
+
+def test_blocker1_run_id_and_sidecar_sha_path_traversal_rejected(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home_dst"))
+    dst_cat = tmp_path / "cat_dst"
+    _init_log_catalog(dst_cat)
+
+    for idx, bad_rid in enumerate(
+        ["../../../../../outside_escape", ".hidden", "a..b", "a/b", "a\\b", "a\x00b"]
+    ):
+        ev = build_envelope(
+            kind="run.started",
+            entity=[bad_rid],
+            data={"id": bad_rid, "project_slug": "proj", "command": "python a.py"},
+            main_root=tmp_path,
+            worktree_root=tmp_path,
+            project="proj",
+            project_id=None,
+            writer="titanix.1.1",
+            seq=1,
+            ts="2026-11-25T10:00:00Z",
+            eid=f"eid-bad-rid-{idx}",
+        )
+        bpath = tmp_path / f"bad_rid_{idx}.bthbundle"
+        _build_signed_bundle(bpath, run_id=bad_rid, events=[ev])
+        with pytest.raises(RunBundleUnsafePathError, match="Unsafe run_id"):
+            import_run_bundle(bpath, allow_missing_sidecar=True, catalog_dir=dst_cat)
+
+    assert not list(tmp_path.glob("outside_escape*"))
+
+    # Unsafe sidecar_sha256 path segment must raise RunBundleUnsafePathError
+    bad_sc_ev = build_envelope(
+        kind="run.started",
+        entity=["safe-run-1"],
+        data={
+            "id": "safe-run-1",
+            "project_slug": "proj",
+            "command": "python a.py",
+            "sidecar_sha256": "../../evil",
+        },
+        main_root=tmp_path,
+        worktree_root=tmp_path,
+        project="proj",
+        project_id=None,
+        writer="titanix.1.1",
+        seq=1,
+        ts="2026-11-25T10:00:00Z",
+        eid="eid-bad-sc",
+    )
+    b_sc = tmp_path / "bad_sc_sha.bthbundle"
+    _build_signed_bundle(
+        b_sc,
+        run_id="safe-run-1",
+        events=[bad_sc_ev],
+        manifest_overrides={
+            "sidecar": {"included": False, "recorded_path": "", "sha256": "../../evil", "missing_reason": "unavailable"}
+        },
+    )
+    with pytest.raises(RunBundleUnsafePathError, match="Unsafe sidecar_sha256"):
+        import_run_bundle(b_sc, allow_missing_sidecar=True, catalog_dir=dst_cat)
+
+
+def test_blocker2_pre_upgrade_index_lacking_envelope_sha_and_extra_keys(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home_src"))
+    src_cat = tmp_path / "cat_src"
+    _init_log_catalog(src_cat)
+    src_repo, pid = _setup_repo(tmp_path / "src_repo")
+    run_id = "pre-upg-run-1"
+    events, _, _ = _make_sample_run_events(repo=src_repo, pid=pid, run_id=run_id)
+    _write_seg(src_repo, "seg1.jsonl", events)
+    run_ingest(src_cat)
+
+    bundle = tmp_path / "pre_upg.bthbundle"
+    export_run_bundle(run_id, bundle, catalog_dir=src_cat)
+
+    # Create pre-upgrade index.db missing envelope_sha256 and extra_keys on `events`
+    monkeypatch.setenv("HOME", str(tmp_path / "home_dst"))
+    dst_cat = tmp_path / "cat_dst"
+    _init_log_catalog(dst_cat)
+    db_path = index_db_path(dst_cat)
+    from bathos.index import init_index_schema
+
+    con = duckdb.connect(str(db_path))
+    try:
+        init_index_schema(con)
+        con.execute("DROP TABLE events")
+        con.execute(
+            "CREATE TABLE events ("
+            "eid VARCHAR PRIMARY KEY, v INTEGER, kind VARCHAR, entity_key VARCHAR, "
+            "entity VARCHAR, ts VARCHAR, project VARCHAR, project_id VARCHAR, "
+            "writer VARCHAR, seq INTEGER, main_root VARCHAR, worktree_root VARCHAR, "
+            "origin VARCHAR, data VARCHAR)"
+        )
+        # Seed an existing legacy event for the same run_id (to test _fetch_events_by_key fallback)
+        existing_ev = build_envelope(
+            kind="run.remote_dispatched",
+            entity=[run_id],
+            data={"id": run_id, "sidecar_sha256": events[0]["data"]["sidecar_sha256"], "git_hash": "abc1234"},
+            main_root=src_repo,
+            worktree_root=src_repo,
+            project="proj",
+            project_id=pid,
+            writer="local.1.1",
+            seq=1,
+            ts="2026-11-25T09:59:00Z",
+            eid="eid-legacy-stub",
+        )
+        con.execute(
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                existing_ev["eid"],
+                existing_ev["v"],
+                existing_ev["kind"],
+                json.dumps(existing_ev["entity"]),
+                json.dumps(existing_ev["entity"]),
+                existing_ev["ts"],
+                existing_ev["project"],
+                existing_ev["project_id"],
+                existing_ev["writer"],
+                existing_ev["seq"],
+                existing_ev["main_root"],
+                existing_ev["worktree_root"],
+                existing_ev["origin"],
+                json.dumps(existing_ev["data"]),
+            ],
+        )
+    finally:
+        con.close()
+
+    imp = import_run_bundle(bundle, catalog_dir=dst_cat)
+    assert imp["status"] == "imported"
+    assert imp["new_events"] == len(events)
+
+    # Also verify same-eid conflict detection works on a pre-upgrade index.db
+    dst_cat2 = tmp_path / "cat_dst2"
+    _init_log_catalog(dst_cat2)
+    con2 = duckdb.connect(str(index_db_path(dst_cat2)))
+    try:
+        con2.execute("CREATE TABLE runs (id VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR)")
+        con2.execute(
+            "CREATE TABLE events ("
+            "eid VARCHAR PRIMARY KEY, v INTEGER, kind VARCHAR, entity_key VARCHAR, "
+            "entity VARCHAR, ts VARCHAR, project VARCHAR, project_id VARCHAR, "
+            "writer VARCHAR, seq INTEGER, main_root VARCHAR, worktree_root VARCHAR, "
+            "origin VARCHAR, data VARCHAR)"
+        )
+        con2.execute(
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                events[0]["eid"],
+                events[0]["v"],
+                events[0]["kind"],
+                json.dumps(events[0]["entity"]),
+                json.dumps(events[0]["entity"]),
+                "2026-11-25T11:11:11Z",  # altered ts -> same-eid digest conflict!
+                events[0]["project"],
+                events[0]["project_id"],
+                events[0]["writer"],
+                events[0]["seq"],
+                events[0]["main_root"],
+                events[0]["worktree_root"],
+                events[0]["origin"],
+                json.dumps(events[0]["data"]),
+            ],
+        )
+        con2.execute("CREATE TABLE quarantine (file VARCHAR)")
+        con2.execute("CREATE TABLE ingest_watermarks (root_kind VARCHAR)")
+        con2.execute("CREATE TABLE campaigns (id VARCHAR PRIMARY KEY)")
+        con2.execute("CREATE TABLE campaign_runs (campaign_id VARCHAR, run_id VARCHAR)")
+        con2.execute("CREATE TABLE campaign_edges (child_campaign_id VARCHAR)")
+        con2.execute("CREATE TABLE run_edges (child_run_id VARCHAR)")
+        con2.execute("CREATE TABLE sidecar_anchors (id VARCHAR PRIMARY KEY)")
+        con2.execute("CREATE TABLE blast_radius_ledger (id VARCHAR PRIMARY KEY)")
+        con2.execute("CREATE TABLE trust_ledger (id VARCHAR PRIMARY KEY)")
+        con2.execute("CREATE TABLE archived_items (record_id VARCHAR PRIMARY KEY)")
+        con2.execute("CREATE TABLE submits (id VARCHAR PRIMARY KEY)")
+    finally:
+        con2.close()
+
+    with pytest.raises(RunImportConflictError, match="Same-eid equivocation"):
+        import_run_bundle(bundle, catalog_dir=dst_cat2)
+
+
+def test_major3_smuggled_multi_run_events_rejected_and_campaign_equivocation(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home_dst"))
+    dst_cat = tmp_path / "cat_dst"
+    _init_log_catalog(dst_cat)
+    repo, pid = _setup_repo(tmp_path / "repo")
+
+    ev_primary = build_envelope(
+        kind="run.started",
+        entity=["primary-run"],
+        data={"id": "primary-run", "project_slug": "proj", "command": "python a.py"},
+        main_root=repo,
+        worktree_root=repo,
+        project="proj",
+        project_id=pid,
+        writer="titanix.1.1",
+        seq=1,
+        ts="2026-11-25T10:00:00Z",
+        eid="eid-prim-1",
+    )
+    ev_foreign_run = build_envelope(
+        kind="run.started",
+        entity=["smuggled-run"],
+        data={"id": "smuggled-run", "project_slug": "proj", "command": "python evil.py"},
+        main_root=repo,
+        worktree_root=repo,
+        project="proj",
+        project_id=pid,
+        writer="titanix.1.1",
+        seq=2,
+        ts="2026-11-25T10:00:01Z",
+        eid="eid-smug-1",
+    )
+    b_smug_run = tmp_path / "smug_run.bthbundle"
+    _build_signed_bundle(b_smug_run, run_id="primary-run", events=[ev_primary, ev_foreign_run])
+    with pytest.raises(RunBundleInvalidError, match="foreign run event"):
+        import_run_bundle(b_smug_run, allow_missing_sidecar=True, catalog_dir=dst_cat)
+
+    ev_foreign_oc = build_envelope(
+        kind="output_copy.recorded",
+        entity=["smuggled-run", "copy-1"],
+        data={"copy_id": "copy-1", "run_id": "smuggled-run", "tier": "cold", "profile": "s3", "path": "/x"},
+        main_root=repo,
+        worktree_root=repo,
+        project="proj",
+        project_id=pid,
+        writer="titanix.1.1",
+        seq=3,
+        ts="2026-11-25T10:00:02Z",
+        eid="eid-smug-oc",
+    )
+    b_smug_oc = tmp_path / "smug_oc.bthbundle"
+    _build_signed_bundle(b_smug_oc, run_id="primary-run", events=[ev_primary, ev_foreign_oc])
+    with pytest.raises(RunBundleInvalidError, match="foreign output_copy event"):
+        import_run_bundle(b_smug_oc, allow_missing_sidecar=True, catalog_dir=dst_cat)
+
+    ev_foreign_camp = build_envelope(
+        kind="campaign.created",
+        entity=["camp-smug"],
+        data={"id": "camp-smug", "project_slug": "proj", "name": "c", "mode": "exploration", "status": "open", "started_at": "2026-11-25T10:00:00Z"},
+        main_root=repo,
+        worktree_root=repo,
+        project="proj",
+        project_id=pid,
+        writer="titanix.1.1",
+        seq=4,
+        ts="2026-11-25T10:00:03Z",
+        eid="eid-smug-camp",
+    )
+    b_smug_camp = tmp_path / "smug_camp.bthbundle"
+    _build_signed_bundle(b_smug_camp, run_id="primary-run", events=[ev_primary, ev_foreign_camp])
+    with pytest.raises(RunBundleInvalidError, match="campaign event"):
+        import_run_bundle(b_smug_camp, allow_missing_sidecar=True, catalog_dir=dst_cat)
+
+    # Even when with_campaign=True, campaign events undergo distinct-eid equivocation check
+    _write_seg(repo, "seg1.jsonl", [ev_foreign_camp])
+    run_ingest(dst_cat)
+
+    ev_camp_conflict = build_envelope(
+        kind="campaign.created",
+        entity=["camp-smug"],
+        data={"id": "camp-smug", "project_slug": "proj", "name": "DIFFERENT", "mode": "confirmation", "status": "open", "started_at": "2026-11-25T10:00:00Z"},
+        main_root=repo,
+        worktree_root=repo,
+        project="proj",
+        project_id=pid,
+        writer="titanix.1.1",
+        seq=5,
+        ts="2026-11-25T10:00:04Z",
+        eid="eid-camp-conflict",
+    )
+    b_with_camp = tmp_path / "with_camp_conflict.bthbundle"
+    _build_signed_bundle(
+        b_with_camp,
+        run_id="primary-run",
+        events=[ev_primary, ev_camp_conflict],
+        manifest_overrides={
+            "campaign_context": {
+                "campaign_id": "camp-smug",
+                "external_campaign_ref": None,
+                "with_campaign": True,
+            }
+        },
+    )
+    with pytest.raises(RunImportConflictError, match="Conflicting campaign.created"):
+        import_run_bundle(b_with_camp, allow_missing_sidecar=True, catalog_dir=dst_cat)
+
+
+def test_minor_external_root_symlink_check_and_limit_zero_boundary_and_legacy_project_filter(
+    tmp_path: Path, monkeypatch
+):
+    # 1. entry.external_root parent symlink check on export(..., include_outputs=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home_ext"))
+    ext_cat = tmp_path / "ext_cat"
+    _init_log_catalog(ext_cat)
+    ext_repo, pid = _setup_repo(tmp_path / "ext_repo")
+    ext_root = tmp_path / "external_store"
+    real_sub = tmp_path / "real_ext_sub"
+    real_sub.mkdir()
+    ext_root.mkdir()
+    (ext_root / "sub").symlink_to(real_sub)
+    target_file = real_sub / "artifact.bin"
+    target_file.write_bytes(b"abc")
+    ext_sha = hash_file(target_file)
+
+    evs_ext = [
+        build_envelope(
+            kind="run.started",
+            entity=["ext-run-1"],
+            data={"id": "ext-run-1", "project_slug": "proj", "command": "python a.py"},
+            main_root=ext_repo,
+            worktree_root=ext_repo,
+            project="proj",
+            project_id=pid,
+            writer="titanix.1.1",
+            seq=1,
+            ts="2026-11-25T10:00:00Z",
+            eid="eid-ext-1",
+        ),
+        build_envelope(
+            kind="run.outputs_hashed",
+            entity=["ext-run-1"],
+            data={
+                "phase": PHASE_ADOPTED,
+                "output_metadata": [
+                    {
+                        "path": str(ext_root / "sub" / "artifact.bin"),
+                        "relpath": "sub/artifact.bin",
+                        "external_root": str(ext_root),
+                        "status": "present",
+                        "size_bytes": 3,
+                        "sha256": ext_sha,
+                        "phase": PHASE_ADOPTED,
+                    }
+                ],
+            },
+            main_root=ext_repo,
+            worktree_root=ext_repo,
+            project="proj",
+            project_id=pid,
+            writer="titanix.1.1",
+            seq=2,
+            ts="2026-11-25T10:00:01Z",
+            eid="eid-ext-2",
+        ),
+    ]
+    _write_seg(ext_repo, "seg1.jsonl", evs_ext)
+    run_ingest(ext_cat)
+    with pytest.raises(RunBundleUnsafePathError, match="symlink"):
+        export_run_bundle(
+            "ext-run-1",
+            tmp_path / "ext.bthbundle",
+            include_outputs=True,
+            allow_missing_sidecar=True,
+            catalog_dir=ext_cat,
+        )
+
+    # 2. max_output_bytes boundary when prior blob leaves remaining == 0
+    from bathos.run_bundle import _read_bounded_member_bytes
+
+    blob_cat = tmp_path / "blob_cat"
+    _init_log_catalog(blob_cat)
+    blob_repo, bpid = _setup_repo(tmp_path / "blob_repo")
+    b1 = blob_repo / "outputs" / "a.bin"
+    b2 = blob_repo / "outputs" / "b.bin"
+    b1.parent.mkdir(parents=True, exist_ok=True)
+    b1.write_bytes(b"0123456789")  # 10 bytes
+    b2.write_bytes(b"X")  # 1 byte -> hits remaining == 0
+    evs_blob = [
+        build_envelope(
+            kind="run.started",
+            entity=["blob-run-1"],
+            data={"id": "blob-run-1", "project_slug": "proj", "command": "python a.py"},
+            main_root=blob_repo,
+            worktree_root=blob_repo,
+            project="proj",
+            project_id=bpid,
+            writer="titanix.1.1",
+            seq=1,
+            ts="2026-11-25T10:00:00Z",
+            eid="eid-blob-1",
+        ),
+        build_envelope(
+            kind="run.outputs_hashed",
+            entity=["blob-run-1"],
+            data={
+                "phase": PHASE_RUN_END,
+                "output_metadata": [
+                    {"path": str(b1), "relpath": "outputs/a.bin", "size_bytes": 10, "sha256": hash_file(b1), "phase": PHASE_RUN_END},
+                    {"path": str(b2), "relpath": "outputs/b.bin", "size_bytes": 1, "sha256": hash_file(b2), "phase": PHASE_RUN_END},
+                ],
+            },
+            main_root=blob_repo,
+            worktree_root=blob_repo,
+            project="proj",
+            project_id=bpid,
+            writer="titanix.1.1",
+            seq=2,
+            ts="2026-11-25T10:00:01Z",
+            eid="eid-blob-2",
+        ),
+    ]
+    _write_seg(blob_repo, "seg1.jsonl", evs_blob)
+    run_ingest(blob_cat)
+    b_two = tmp_path / "two_blobs.bthbundle"
+    export_run_bundle("blob-run-1", b_two, include_outputs=True, allow_missing_sidecar=True, catalog_dir=blob_cat)
+    with pytest.raises(RunBundleUnsafePathError, match="max_output_bytes"):
+        verify_run_bundle(b_two, allow_missing_sidecar=True, max_output_bytes=10)
+
+    # Also test _read_bounded_member_bytes(..., limit=0) fails closed on 1-byte member
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        info = tarfile.TarInfo(name="blobs/outputs/b.bin")
+        info.size = 1
+        tf.addfile(info, io.BytesIO(b"X"))
+    buf.seek(0)
+    with tarfile.open(fileobj=buf, mode="r") as tf:
+        m = tf.next()
+        assert m is not None
+        with pytest.raises(RunBundleUnsafePathError, match="exceeds limit \\(0\\)"):
+            _read_bounded_member_bytes(tf, m, limit=0)
+
+    # 3. Legacy export filters `--project` before prefix resolution
+    leg_cat = tmp_path / "leg_proj_cat"
+    leg_cat.mkdir(parents=True)
+    write_run(
+        Run(
+            id="shared-1111",
+            project_slug="proj-a",
+            command="python a.py",
+            argv=["python", "a.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+        ),
+        leg_cat,
+    )
+    write_run(
+        Run(
+            id="shared-2222",
+            project_slug="proj-b",
+            command="python b.py",
+            argv=["python", "b.py"],
+            git_hash="abc",
+            git_branch="main",
+            git_dirty=False,
+            status="completed",
+        ),
+        leg_cat,
+    )
+    b_leg = tmp_path / "leg_proj_a.bthbundle"
+    exp_leg = export_run_bundle("shared-", b_leg, project="proj-a", catalog_dir=leg_cat)
+    assert exp_leg["run_id"] == "shared-1111"

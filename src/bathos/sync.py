@@ -717,6 +717,15 @@ def _parse_event_ts(raw: object) -> datetime | None:
         return None
 
 
+def _run_id_in_run_ids(raw_rids: Any, run_id: str) -> bool:
+    if isinstance(raw_rids, str):
+        try:
+            raw_rids = json.loads(raw_rids)
+        except json.JSONDecodeError:
+            return False
+    return isinstance(raw_rids, list) and run_id in raw_rids
+
+
 def _collect_staged_causal_closure(
     all_events: list[dict[str, Any]],
     run_id: str,
@@ -789,15 +798,13 @@ def _collect_staged_causal_closure(
         elif kind.startswith("trust_ledger.") and data.get("run_id") == run_id:
             _keep(ev)
         elif kind.startswith("archived_item."):
-            rids = data.get("run_ids")
-            if isinstance(rids, list) and run_id in rids:
+            if _run_id_in_run_ids(data.get("run_ids"), run_id):
                 _keep(ev)
         elif kind.startswith("observation."):
             if data.get("run_id") == run_id or (derived_obs_id and entity == [derived_obs_id]):
                 _keep(ev)
         elif kind in ("validity.acknowledged", "validity.estimand_override_recorded"):
-            rids = data.get("run_ids")
-            if isinstance(rids, list) and run_id in rids:
+            if _run_id_in_run_ids(data.get("run_ids"), run_id):
                 _keep(ev)
         elif with_campaign and campaign_id and (
             entity in ([campaign_id], [campaign_id, run_id])
@@ -856,6 +863,8 @@ def _mirror_fallback_selective_pull(
         _resolve_local_project_roots,
         _sanitize_path_segment,
         _sha256_bytes,
+        _validate_safe_run_id,
+        _validate_safe_sha256,
     )
     from bathos.runlog.fold_runs import fold_run
     from bathos.runlog.ingest import _RUN_KINDS, _validate_envelope, run_ingest
@@ -961,6 +970,7 @@ def _mirror_fallback_selective_pull(
         warnings: list[str] = []
         planned: list[dict[str, Any]] = []
         for rid in matched_ids:
+            _validate_safe_run_id(rid)
             reves = run_events_map[rid]
             if not any(ev.get("kind") in ("run.started", "run.imported") for ev in reves):
                 raise RunBundleInvalidError(
@@ -992,6 +1002,7 @@ def _mirror_fallback_selective_pull(
             sc_path = str(folded.get("sidecar_path") or "")
             local_sc_path: Path | None = None
             if sc_sha:
+                _validate_safe_sha256(sc_sha, label="sidecar_sha256")
                 found_bytes, local_sc_path = _probe_sidecar_bytes(
                     sidecar_path=sc_path,
                     sidecar_sha256=sc_sha,
@@ -1062,6 +1073,7 @@ def _mirror_fallback_selective_pull(
             else:
                 target_dir = Path.home() / ".bth" / "log" / "imported" / safe_slug / safe_host
 
+            _validate_safe_run_id(rid)
             stem = f"{rid}.{p['bundle_sha256'][:12]}"
             jsonl_path = target_dir / f"{stem}.jsonl"
             receipt_path = target_dir / f"{stem}.receipt.json"

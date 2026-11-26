@@ -20,7 +20,7 @@ import pytest
 
 from bathos.cli_cyclopts import app
 from bathos.config import ProjectConfig
-from bathos.errors import RunBundleInvalidError, RunImportConflictError
+from bathos.errors import RunBundleInvalidError, RunBundleUnsafePathError, RunImportConflictError
 from bathos.mcp import (
     get_run_tool,
     mcp_bundle_export_tool,
@@ -851,3 +851,154 @@ def test_cli_and_mcp_bundle_and_import_alias_and_sync_flags(tmp_path: Path, monk
     )
     assert bad_sync["ok"] is False
     assert "require --pull" in (bad_sync.get("error") or "")
+
+
+def test_mirror_fallback_rejects_unsafe_run_id_and_collects_json_string_run_ids(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BTH_PROJECTS_FILE", str(tmp_path / "home" / ".bth" / "projects.toml"))
+
+    rem_repo, pid = _setup_repo(tmp_path / "rem_repo", slug="proj_m2")
+    rid = "ffff6666-0000-4000-8000-000000000001"
+    ts = "2026-11-25T10:00:00.000000Z"
+    evs, _ = _write_run_seg(
+        repo=rem_repo,
+        slug="proj_m2",
+        pid=pid,
+        run_id=rid,
+        ts_start=ts,
+        ts_end=ts,
+        with_sidecar=False,
+    )
+    # Append validity.acknowledged & archived_item.recorded with JSON-string-encoded run_ids
+    extra_evs = [
+        build_envelope(
+            kind="validity.acknowledged",
+            entity=["ack-json-1"],
+            data={
+                "id": "ack-json-1",
+                "kind": "suspect",
+                "entity_type": "run",
+                "entity_id": rid,
+                "run_ids": json.dumps([rid]),
+                "surface": "review",
+                "reason": "json string run_ids",
+                "actor": "marielle",
+                "recorded_at": ts,
+            },
+            main_root=rem_repo,
+            worktree_root=rem_repo,
+            project="proj_m2",
+            project_id=pid,
+            writer="titanix.1.1",
+            seq=10,
+            ts=ts,
+            eid="eid-ack-json-1",
+        ),
+        build_envelope(
+            kind="archived_item.recorded",
+            entity=["arch-json-1"],
+            data={
+                "id": "item-json-1",
+                "record_id": "arch-json-1",
+                "project_slug": "proj_m2",
+                "event": "archived",
+                "kind": "outputs",
+                "paths": ["outputs/x.txt"],
+                "pre_archive_sha": "a" * 64,
+                "recorded_at": ts,
+                "run_ids": json.dumps([rid]),
+            },
+            main_root=rem_repo,
+            worktree_root=rem_repo,
+            project="proj_m2",
+            project_id=pid,
+            writer="titanix.1.1",
+            seq=11,
+            ts=ts,
+            eid="eid-arch-json-1",
+        ),
+    ]
+    seg_extra = rem_repo / ".bth" / "log" / "seg_extra.jsonl"
+    seg_extra.write_text(
+        "".join(json.dumps(e, sort_keys=True) + "\n" for e in extra_evs), encoding="utf-8"
+    )
+
+    remote_mirror = tmp_path / "remote_mirror"
+    remote_mirror.mkdir()
+    for seg in (rem_repo / ".bth" / "log").glob("*.jsonl"):
+        shutil.copy2(seg, remote_mirror / seg.name)
+
+    local_cat = tmp_path / "local_cat"
+    _init_log_catalog(local_cat)
+    local_repo = make_git_repo(tmp_path / "local_repo")
+    (local_repo / ".bth.toml").write_text(
+        f'[project]\nslug = "proj_m2"\nid = "{pid}"\n', encoding="utf-8"
+    )
+    register_main_root(local_repo)
+    config = ProjectConfig(
+        slug="proj_m2",
+        root=local_repo,
+        remotes={"titanix": {"host": "titanix", "remote_root": "~/projects/proj_m2"}},
+    )
+
+    def ssh_no_bundle(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps({"mode": "no_bundle_cmd"}), stderr=""
+        )
+
+    def pull_mirror(_host, remote_path, local_dest):
+        if "log-mirror" in remote_path:
+            dest = Path(local_dest)
+            for seg in remote_mirror.glob("*.jsonl"):
+                shutil.copy2(seg, dest / seg.name)
+        else:
+            raise RuntimeError("not present")
+
+    with (
+        patch("bathos.sync.subprocess.run", side_effect=ssh_no_bundle),
+        patch("bathos.cluster.pull_path", side_effect=pull_mirror),
+    ):
+        res = selective_pull_runs(
+            "titanix",
+            config,
+            local_cat,
+            run_ids=[rid[:8]],
+            allow_missing_sidecar=True,
+            project_root=local_repo,
+        )
+    assert res["imported_count"] == 1
+    assert run_sql("SELECT count(*) FROM acknowledgment_ledger", local_cat)[0][0] == 1
+    assert run_sql("SELECT count(*) FROM archived_items", local_cat)[0][0] == 1
+
+    # Also verify unsafe run_id in mirror fallback is rejected with RunBundleUnsafePathError
+    bad_rid = "../../../../outside_escape"
+    bad_ev = build_envelope(
+        kind="run.started",
+        entity=[bad_rid],
+        data={"id": bad_rid, "project_slug": "proj_m2", "command": "python evil.py"},
+        main_root=rem_repo,
+        worktree_root=rem_repo,
+        project="proj_m2",
+        project_id=pid,
+        writer="titanix.1.1",
+        seq=99,
+        ts=ts,
+        eid="eid-bad-mirror-rid",
+    )
+    (remote_mirror / "seg_bad.jsonl").write_text(json.dumps(bad_ev) + "\n", encoding="utf-8")
+    with (
+        patch("bathos.sync.subprocess.run", side_effect=ssh_no_bundle),
+        patch("bathos.cluster.pull_path", side_effect=pull_mirror),
+        pytest.raises(RunBundleUnsafePathError, match="Unsafe run_id"),
+    ):
+        selective_pull_runs(
+            "titanix",
+            config,
+            local_cat,
+            run_ids=[bad_rid],
+            allow_missing_sidecar=True,
+            project_root=local_repo,
+        )
+    assert not list(tmp_path.glob("outside_escape*"))

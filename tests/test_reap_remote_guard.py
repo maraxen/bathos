@@ -164,3 +164,76 @@ def test_ac10_imported_running_run_guarded_even_if_hostname_matches_or_empty(
         )
     finally:
         con.close()
+
+
+def test_imported_remote_slurm_run_skips_local_sacct(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home_src"))
+    src_cat = tmp_path / "src_cat"
+    src_cat.mkdir()
+    cutover_marker_path(src_cat).write_text(
+        json.dumps({"at": "2026-11-25T00:00:00Z", "bathos": "test", "attempt": "1", "segments": []})
+    )
+    src_repo = make_git_repo(tmp_path / "src_repo")
+    write_bth_toml(src_repo, slug="proj")
+    assign_project_id(src_repo)
+    pid = read_project_id(src_repo / ".bth.toml")
+    register_main_root(src_repo)
+
+    old_ts = (datetime.now(UTC) - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    ev = build_envelope(
+        kind="run.started",
+        entity=["imp-slurm-1"],
+        data={
+            "id": "imp-slurm-1",
+            "project_slug": "proj",
+            "command": "python run.py",
+            "argv": ["python", "run.py"],
+            "git_hash": "abc",
+            "git_branch": "main",
+            "git_dirty": False,
+            "timestamp": old_ts,
+            "hostname": "othercluster-login01",
+            "slurm_job_id": "123456",
+        },
+        main_root=src_repo,
+        worktree_root=src_repo,
+        project="proj",
+        project_id=pid,
+        writer="othercluster.1.1",
+        seq=1,
+        ts=old_ts,
+        eid="eid-imp-slurm-1",
+    )
+    seg = src_repo / ".bth" / "log" / "seg1.jsonl"
+    seg.parent.mkdir(parents=True)
+    seg.write_text(json.dumps(ev) + "\n", encoding="utf-8")
+    run_ingest(src_cat)
+
+    bundle = tmp_path / "imp_slurm.bthbundle"
+    export_run_bundle("imp-slurm-1", bundle, catalog_dir=src_cat)
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home_dst"))
+    dst_cat = tmp_path / "dst_cat"
+    dst_cat.mkdir()
+    cutover_marker_path(dst_cat).write_text(
+        json.dumps({"at": "2026-11-25T00:00:00Z", "bathos": "test", "attempt": "1", "segments": []})
+    )
+    import_run_bundle(bundle, catalog_dir=dst_cat)
+
+    def _boom_sacct(_job_id: str):
+        raise AssertionError("sacct must not be queried for an imported remote SLURM run")
+
+    monkeypatch.setattr("bathos.reap._query_slurm_job_details", _boom_sacct)
+    monkeypatch.setattr("bathos.reap._query_slurm_job", _boom_sacct)
+
+    cands, skipped = reap_runs(dst_cat, older_than_h=24, apply=True)
+    assert cands == []
+    assert any(r.id == "imp-slurm-1" and reason == "remote_host_skipped" for r, reason in skipped)
+
+    con = connect_read(dst_cat, wire_validity=False)
+    try:
+        assert con.execute("SELECT status FROM runs WHERE id = 'imp-slurm-1'").fetchone() == (
+            "running",
+        )
+    finally:
+        con.close()

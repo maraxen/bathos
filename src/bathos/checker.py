@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import duckdb
+
 from bathos.git import capture_git_state
 from bathos.query import list_runs
 from bathos.schema import Run
@@ -242,13 +244,13 @@ def _resolve_local_output_path(
             receipt = latest_import_receipt(run.id, catalog_dir)
             if receipt and receipt.get("local_worktree_root"):
                 roots.append(Path(receipt["local_worktree_root"]))
-        except Exception:
+        except (OSError, RuntimeError, ValueError, duckdb.Error):
             pass
     try:
         from bathos.workspace import resolve_workspace
 
         roots.append(resolve_workspace(Path.cwd()).fs_root)
-    except Exception:
+    except (OSError, RuntimeError, ValueError, duckdb.Error):
         pass
 
     for root in roots:

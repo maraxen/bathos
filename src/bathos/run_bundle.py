@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import duckdb
 import zstandard
 
 from bathos.config import default_catalog_dir, find_project_config, load_project_config
@@ -100,6 +101,8 @@ _CAMPAIGN_EVENT_KINDS = frozenset(
     }
 )
 _SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SAFE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _bth_version() -> str:
@@ -170,6 +173,26 @@ def _sanitize_path_segment(value: str | None, fallback: str) -> str:
     return cleaned or fallback
 
 
+def _validate_safe_run_id(run_id: str) -> str:
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or ".." in run_id
+        or "/" in run_id
+        or "\\" in run_id
+        or "\x00" in run_id
+        or not _SAFE_RUN_ID_RE.fullmatch(run_id)
+    ):
+        raise RunBundleUnsafePathError(f"Unsafe run_id: {run_id!r}")
+    return run_id
+
+
+def _validate_safe_sha256(sha: str, *, label: str = "sidecar_sha256") -> str:
+    if not isinstance(sha, str) or not _SAFE_SHA256_RE.fullmatch(sha):
+        raise RunBundleUnsafePathError(f"Unsafe {label}: {sha!r}")
+    return sha
+
+
 def _probe_sidecar_bytes(
     *,
     sidecar_path: str,
@@ -200,15 +223,21 @@ def _probe_sidecar_bytes(
         if allow_raw_sidecar_path and sp.is_absolute():
             candidates.append(sp)
 
-    candidates.extend(
-        [
-            Path.home() / ".bth" / "sidecar-cache" / sidecar_sha256[:2] / f"{sidecar_sha256}.bth.toml",
-            Path.home() / ".bth" / "sidecar-cache" / f"{sidecar_sha256}.bth.toml",
-            catalog_dir / "imported_sidecars" / run_id / f"{sidecar_sha256}.bth.toml",
-            catalog_dir / "sidecars" / "snapshots" / f"{sidecar_sha256}.bth.toml",
-            catalog_dir / "sidecars" / "snapshots" / f"{run_id}.bth.toml",
-        ]
-    )
+    if _SAFE_SHA256_RE.fullmatch(sidecar_sha256):
+        candidates.extend(
+            [
+                Path.home() / ".bth" / "sidecar-cache" / sidecar_sha256[:2] / f"{sidecar_sha256}.bth.toml",
+                Path.home() / ".bth" / "sidecar-cache" / f"{sidecar_sha256}.bth.toml",
+                catalog_dir / "sidecars" / "snapshots" / f"{sidecar_sha256}.bth.toml",
+            ]
+        )
+        if _SAFE_RUN_ID_RE.fullmatch(run_id) and ".." not in run_id:
+            candidates.extend(
+                [
+                    catalog_dir / "imported_sidecars" / run_id / f"{sidecar_sha256}.bth.toml",
+                    catalog_dir / "sidecars" / "snapshots" / f"{run_id}.bth.toml",
+                ]
+            )
 
     seen: set[str] = set()
     for cand in candidates:
@@ -261,9 +290,19 @@ def _ensure_symlink_free_path(root: Path, relpath: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _fetch_events_by_key(con: Any, key: list[str]) -> list[dict[str, Any]]:
+def _fetch_events_by_key(
+    con: Any, key: list[str], *, has_extra_keys: bool = True
+) -> list[dict[str, Any]]:
+    select_sql = (
+        _EVENT_SELECT
+        if has_extra_keys
+        else (
+            "SELECT eid, v, kind, entity, ts, project, project_id, writer, seq, "
+            "main_root, worktree_root, origin, data, NULL::VARCHAR AS extra_keys FROM events"
+        )
+    )
     rows = con.execute(
-        f"{_EVENT_SELECT} WHERE entity_key = ?",  # noqa: S608 -- internal constant
+        f"{select_sql} WHERE entity_key = ?",  # noqa: S608 -- internal constant
         [json.dumps(key)],
     ).fetchall()
     return [_row_to_event(r) for r in rows]
@@ -332,7 +371,7 @@ def _collect_log_causal_closure(
         for (cid,) in copy_rows:
             if cid:
                 collected.extend(_fetch_events_by_key(con, [run_id, cid]))
-    except Exception:
+    except duckdb.Error:
         pass
 
     # 4. submits (per SUBMITS_DDL: slurm_job_id or (project_slug, sidecar_sha256, command))
@@ -373,7 +412,7 @@ def _collect_log_causal_closure(
         for (sup_id,) in sup_rows:
             if sup_id:
                 collected.extend(_fetch_events_by_key(con, [sup_id]))
-    except Exception:
+    except duckdb.Error:
         pass
 
     # 7. blast_radius_ledger
@@ -435,7 +474,7 @@ def _collect_log_causal_closure(
         for (obs_id,) in obs_rows:
             if obs_id:
                 collected.extend(_fetch_events_by_key(con, [obs_id]))
-    except Exception:
+    except duckdb.Error:
         pass
 
     # 11. acknowledgment_ledger
@@ -450,7 +489,7 @@ def _collect_log_causal_closure(
                 continue
             if isinstance(rids, list) and run_id in rids:
                 collected.extend(_fetch_events_by_key(con, [ack_id]))
-    except Exception:
+    except duckdb.Error:
         pass
 
     # Optional campaign closure
@@ -480,15 +519,47 @@ def _collect_log_causal_closure(
     return sorted(by_eid.values(), key=lambda e: (e.get("ts", ""), e.get("eid", "")))
 
 
+def _resolve_legacy_run(catalog_dir: Path, run_id: str, project: str | None) -> Any:
+    if not project:
+        return get_run(run_id, catalog_dir, allow_cool_fallback=True, include_superseded=True)
+
+    from bathos.catalog import read_runs
+    from bathos.query import _SOURCE_KEY, COOL_UNINDEXED_SOURCE, find_runs
+
+    pool: dict[str, Any] = {}
+    for r in find_runs(catalog_dir, project=project, include_superseded=True):
+        pool[r.id] = r
+    if (catalog_dir / "bathos.db").is_file():
+        for r in read_runs(catalog_dir):
+            if r.project_slug == project and r.id not in pool:
+                try:
+                    meta = json.loads(r.metadata or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta[_SOURCE_KEY] = COOL_UNINDEXED_SOURCE
+                r.metadata = json.dumps(meta)
+                pool[r.id] = r
+
+    if run_id in pool:
+        return pool[run_id]
+    matches = sorted(rid for rid in pool if rid.startswith(run_id))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise AmbiguousRunId(run_id, matches)
+    return pool[matches[0]]
+
+
 def _synthesize_legacy_closure(
     catalog_dir: Path, run_id: str, project: str | None
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """Synthesize canonical events for a pre-cutover cool/warm catalog."""
-    run = get_run(run_id, catalog_dir, allow_cool_fallback=True, include_superseded=True)
+    run = _resolve_legacy_run(catalog_dir, run_id, project)
     if run is None:
-        raise OutputTierError(RUN_NOT_FOUND, run_id)
-    if project and run.project_slug != project:
-        raise OutputTierError(RUN_NOT_FOUND, f"{run_id} (project={project})")
+        detail = f"{run_id} (project={project})" if project else run_id
+        raise OutputTierError(RUN_NOT_FOUND, detail)
 
     ws = resolve_workspace_for_run(run, catalog_dir)
     main_root = ws["main_root"]
@@ -549,6 +620,7 @@ def _synthesize_legacy_closure(
     campaign_ctx: dict[str, Any] = {
         "campaign_id": run.campaign_id or None,
         "external_campaign_ref": run.campaign_id or None,
+        "with_campaign": False,
     }
     db_path = catalog_dir / "bathos.db"
     if db_path.is_file():
@@ -607,10 +679,15 @@ def _build_campaign_context_log(
 ) -> dict[str, Any]:
     cid = run_row.get("campaign_id") or ""
     if not cid:
-        return {"campaign_id": None, "external_campaign_ref": None}
+        return {
+            "campaign_id": None,
+            "external_campaign_ref": None,
+            "with_campaign": bool(with_campaign),
+        }
     ctx: dict[str, Any] = {
         "campaign_id": cid,
         "external_campaign_ref": None if with_campaign else cid,
+        "with_campaign": bool(with_campaign),
         "seq_position": run_row.get("seq_position"),
         "evalue": run_row.get("evalue"),
     }
@@ -786,7 +863,12 @@ def export_run_bundle(
         if include_outputs:
             root_candidates = [
                 Path(r)
-                for r in (entry.worktree_root, source_worktree_root, source_main_root)
+                for r in (
+                    entry.worktree_root,
+                    entry.external_root,
+                    source_worktree_root,
+                    source_main_root,
+                )
                 if r
             ]
             blob_file: Path | None = None
@@ -926,11 +1008,11 @@ def _validate_archive_member_name(name: str) -> str:
 
 
 def _read_bounded_member_bytes(
-    tf: tarfile.TarFile, member: tarfile.TarInfo, *, limit: int
+    tf: tarfile.TarFile, member: tarfile.TarInfo, *, limit: int | None
 ) -> bytes:
     if member.size < 0:
         raise RunBundleUnsafePathError(f"Negative member size for {member.name!r}")
-    if limit > 0 and member.size > limit:
+    if limit is not None and member.size > limit:
         raise RunBundleUnsafePathError(
             f"Member {member.name!r} size ({member.size}) exceeds limit ({limit})"
         )
@@ -941,7 +1023,7 @@ def _read_bounded_member_bytes(
     with fobj:
         while chunk := fobj.read(READ_CHUNK_BYTES):
             buf.extend(chunk)
-            if limit > 0 and len(buf) > limit:
+            if limit is not None and len(buf) > limit:
                 raise RunBundleUnsafePathError(
                     f"Member {member.name!r} actual bytes exceed limit ({limit})"
                 )
@@ -991,6 +1073,7 @@ def _read_and_validate_archive(
                                 f"Duplicate archive member: {clean_name!r}"
                             )
 
+                        limit: int | None
                         if clean_name == "manifest.json":
                             limit = MAX_MANIFEST_BYTES
                         elif clean_name == "events.jsonl":
@@ -1000,16 +1083,15 @@ def _read_and_validate_archive(
                         elif clean_name == "git.bundle":
                             limit = MAX_GIT_BUNDLE_BYTES
                         else:
-                            remaining = (
-                                max(0, max_output_bytes - total_output_bytes)
-                                if max_output_bytes > 0
-                                else 0
-                            )
-                            if max_output_bytes > 0 and remaining == 0 and m.size > 0:
-                                raise RunBundleUnsafePathError(
-                                    f"Output blobs exceed max_output_bytes ({max_output_bytes})"
-                                )
-                            limit = remaining
+                            if max_output_bytes > 0:
+                                remaining = max(0, max_output_bytes - total_output_bytes)
+                                if remaining == 0 and m.size > 0:
+                                    raise RunBundleUnsafePathError(
+                                        f"Output blobs exceed max_output_bytes ({max_output_bytes})"
+                                    )
+                                limit = remaining
+                            else:
+                                limit = None
 
                         payload = _read_bounded_member_bytes(tf, m, limit=limit)
                         if clean_name.startswith(OUTPUT_BLOB_PREFIX):
@@ -1121,6 +1203,7 @@ def _verify_bundle_in_memory(
     run_id = manifest.get("run_id")
     if not isinstance(run_id, str) or not run_id:
         raise RunBundleInvalidError("manifest.json missing non-empty run_id")
+    _validate_safe_run_id(run_id)
     declared_bundle_sha = manifest.get("bundle_sha256")
     if not isinstance(declared_bundle_sha, str) or not declared_bundle_sha:
         raise RunBundleTamperedError("manifest.json missing bundle_sha256")
@@ -1173,6 +1256,38 @@ def _verify_bundle_in_memory(
     if set(manifest_digests) != seen_eids:
         raise RunBundleTamperedError("manifest.event_digests keys do not match events.jsonl eids")
 
+    campaign_ctx_raw = manifest.get("campaign_context")
+    if campaign_ctx_raw is not None and not isinstance(campaign_ctx_raw, dict):
+        raise RunBundleInvalidError("manifest.campaign_context must be an object")
+    campaign_ctx = campaign_ctx_raw if isinstance(campaign_ctx_raw, dict) else {}
+    campaign_bundled = bool(campaign_ctx.get("with_campaign")) or (
+        bool(campaign_ctx.get("campaign_id")) and campaign_ctx.get("external_campaign_ref") is None
+    )
+
+    if not campaign_bundled:
+        for ev in events:
+            ev_kind = str(ev.get("kind") or "")
+            ev_entity = ev.get("entity")
+            if ev_kind in _RUN_KINDS or ev_kind == "run.remote_dispatched":
+                if ev_entity != [run_id]:
+                    raise RunBundleInvalidError(
+                        f"Single-run bundle for {run_id!r} cannot contain foreign run event "
+                        f"{ev_kind!r} for entity={ev_entity!r}"
+                    )
+            elif ev_kind.startswith("output_copy."):
+                if not (isinstance(ev_entity, list) and len(ev_entity) >= 1 and ev_entity[0] == run_id):
+                    raise RunBundleInvalidError(
+                        f"Single-run bundle for {run_id!r} cannot contain foreign output_copy event "
+                        f"{ev_kind!r} for entity={ev_entity!r}"
+                    )
+            elif (
+                ev_kind in (_CAMPAIGN_EVENT_KINDS | {"campaign.run_added", "campaign_run.imported"})
+                or ev_kind.startswith("campaign_edge.")
+            ):
+                raise RunBundleInvalidError(
+                    f"Single-run bundle without campaign context cannot contain campaign event {ev_kind!r}"
+                )
+
     run_events = [e for e in events if e.get("kind") in _RUN_KINDS and e.get("entity") == [run_id]]
     if not run_events:
         raise RunBundleInvalidError(f"Bundle contains no run events for run_id={run_id!r}")
@@ -1189,6 +1304,8 @@ def _verify_bundle_in_memory(
     if not isinstance(sidecar_meta, dict):
         raise RunBundleInvalidError("manifest.sidecar must be an object")
     run_sidecar_sha = str(folded_run.get("sidecar_sha256") or "")
+    if run_sidecar_sha:
+        _validate_safe_sha256(run_sidecar_sha, label="sidecar_sha256")
     run_sidecar_path = str(folded_run.get("sidecar_path") or "")
     sidecar_included = bool(sidecar_meta.get("included"))
     sidecar_bytes = members.get("sidecar.bth.toml")
@@ -1328,17 +1445,30 @@ def verify_run_bundle(
 
 
 def _load_catalog_events_for_equivocation(
-    cd: Path, eids: list[str], run_id: str
+    cd: Path,
+    eids: list[str],
+    run_id: str,
+    *,
+    entity_keys: list[list[str]] | None = None,
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
     if not is_log_mode(cd) or not index_db_path(cd).exists():
         return {}, []
     con = connect_read(cd, wire_validity=False)
     try:
+        event_cols = {
+            str(r[1])
+            for r in con.execute("PRAGMA table_info('events')").fetchall()
+        }
+        has_env_sha = "envelope_sha256" in event_cols
+        has_extra = "extra_keys" in event_cols
+        env_expr = "envelope_sha256" if has_env_sha else "NULL::VARCHAR AS envelope_sha256"
+        extra_expr = "extra_keys" if has_extra else "NULL::VARCHAR AS extra_keys"
+
         existing_digests: dict[str, str] = {}
         if eids:
             rows = con.execute(
-                "SELECT eid, v, kind, entity, ts, project, project_id, writer, seq, "
-                "main_root, worktree_root, origin, data, envelope_sha256, extra_keys "
+                f"SELECT eid, v, kind, entity, ts, project, project_id, writer, seq, "  # noqa: S608
+                f"main_root, worktree_root, origin, data, {env_expr}, {extra_expr} "
                 "FROM events WHERE eid IN (SELECT unnest(?::VARCHAR[]))",
                 [eids],
             ).fetchall()
@@ -1383,8 +1513,20 @@ def _load_catalog_events_for_equivocation(
                             ev.update(parsed_extra)
                     existing_digests[eid] = _compute_digest_strict(ev)
 
-        existing_run_events = _fetch_events_by_key(con, [run_id])
-        return existing_digests, existing_run_events
+        keys_to_load: list[list[str]] = [[run_id]]
+        seen_keys: set[tuple[str, ...]] = {(run_id,)}
+        for key in entity_keys or ():
+            kt = tuple(str(x) for x in key)
+            if kt and kt not in seen_keys:
+                seen_keys.add(kt)
+                keys_to_load.append([str(x) for x in key])
+
+        existing_entity_events: list[dict[str, Any]] = []
+        for key in keys_to_load:
+            existing_entity_events.extend(
+                _fetch_events_by_key(con, key, has_extra_keys=has_extra)
+            )
+        return existing_digests, existing_entity_events
     finally:
         con.close()
 
@@ -1422,6 +1564,27 @@ def _run_end_outputs_signature(ev: dict[str, Any]) -> bytes:
     )
 
 
+def _campaign_genesis_signature(ev: dict[str, Any]) -> tuple[Any, ...]:
+    d = ev.get("data") or {}
+    return (
+        d.get("name") or "",
+        d.get("mode") or "",
+        d.get("claim_sha256") or "",
+        d.get("started_at") or "",
+    )
+
+
+def _output_copy_signature(ev: dict[str, Any]) -> tuple[Any, ...]:
+    d = ev.get("data") or {}
+    return (
+        d.get("tier") or "",
+        d.get("profile") or "",
+        d.get("path") or "",
+        d.get("archive_sha256") or "",
+        d.get("manifest_sha256") or "",
+    )
+
+
 def _check_events_equivocation(
     cd: Path,
     *,
@@ -1430,8 +1593,20 @@ def _check_events_equivocation(
     event_digests: dict[str, str],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     eids = [str(ev["eid"]) for ev in events]
-    existing_digests, existing_run_events = _load_catalog_events_for_equivocation(
-        cd, eids, run_id
+    entity_keys: list[list[str]] = []
+    for ev in events:
+        ent = ev.get("entity")
+        kind = str(ev.get("kind") or "")
+        if not isinstance(ent, list):
+            continue
+        if (
+            (kind in _RUN_KINDS or kind == "run.remote_dispatched" or kind in ("campaign.created", "campaign.imported"))
+            and len(ent) == 1
+        ) or (kind == "output_copy.recorded" and len(ent) == 2):
+            entity_keys.append([str(x) for x in ent])
+
+    existing_digests, existing_entity_events = _load_catalog_events_for_equivocation(
+        cd, eids, run_id, entity_keys=entity_keys
     )
 
     new_events: list[dict[str, Any]] = []
@@ -1449,69 +1624,98 @@ def _check_events_equivocation(
         else:
             new_events.append(ev)
 
-    if not new_events or not existing_run_events:
+    if not new_events or not existing_entity_events:
         return new_events, skipped_eids
 
-    existing_by_kind: dict[str, list[dict[str, Any]]] = {}
-    for ev in existing_run_events:
-        if ev.get("entity") == [run_id]:
-            existing_by_kind.setdefault(str(ev.get("kind")), []).append(ev)
+    existing_by_ent_kind: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
+    for ev in existing_entity_events:
+        ent = ev.get("entity")
+        if isinstance(ent, list):
+            ent_key = tuple(str(x) for x in ent)
+            existing_by_ent_kind.setdefault((ent_key, str(ev.get("kind"))), []).append(ev)
 
     for ev in new_events:
-        if ev.get("entity") != [run_id]:
+        ent = ev.get("entity")
+        if not isinstance(ent, list):
             continue
-        kind = ev.get("kind")
+        ent_key = tuple(str(x) for x in ent)
+        kind = str(ev.get("kind") or "")
 
-        # Option D stub -> remote run.started transition
-        if kind == "run.started" and "run.remote_dispatched" in existing_by_kind:
-            inc_d = ev.get("data") or {}
-            for stub in existing_by_kind["run.remote_dispatched"]:
-                st_d = stub.get("data") or {}
-                if st_d.get("sidecar_sha256") and st_d.get("sidecar_sha256") != inc_d.get(
-                    "sidecar_sha256"
-                ):
-                    raise RunImportConflictError(
-                        f"Incoming run.started sidecar_sha256 conflicts with remote_dispatched stub for {run_id}"
-                    )
-                if st_d.get("git_hash") and st_d.get("git_hash") != inc_d.get("git_hash"):
-                    raise RunImportConflictError(
-                        f"Incoming run.started git_hash conflicts with remote_dispatched stub for {run_id}"
-                    )
-
-        # Distinct-eid genesis equivocation
-        if kind == "run.started" and "run.started" in existing_by_kind:
-            inc_sig = _genesis_signature(ev)
-            for ex in existing_by_kind["run.started"]:
-                if _genesis_signature(ex) != inc_sig:
-                    raise RunImportConflictError(
-                        f"Conflicting run.started genesis event for run {run_id}"
-                    )
-
-        # Distinct-eid terminal equivocation
-        if kind == "run.finished" and "run.finished" in existing_by_kind:
-            inc_term = _terminal_signature(ev)
-            for ex in existing_by_kind["run.finished"]:
-                if _terminal_signature(ex) != inc_term:
-                    raise RunImportConflictError(
-                        f"Conflicting run.finished terminal event for run {run_id}"
-                    )
-
-        # Distinct-eid run_end outputs equivocation
-        if (
-            kind == "run.outputs_hashed"
-            and (ev.get("data") or {}).get("phase") == PHASE_RUN_END
-        ):
-            existing_run_end = [
-                ex
-                for ex in existing_by_kind.get("run.outputs_hashed", [])
-                if (ex.get("data") or {}).get("phase") == PHASE_RUN_END
-            ]
-            if existing_run_end:
-                inc_out = _run_end_outputs_signature(ev)
-                for ex in existing_run_end:
-                    if _run_end_outputs_signature(ex) != inc_out:
+        if len(ent_key) == 1 and (kind in _RUN_KINDS or kind == "run.remote_dispatched"):
+            rid = ent_key[0]
+            # Option D stub -> remote run.started transition
+            if kind == "run.started" and (ent_key, "run.remote_dispatched") in existing_by_ent_kind:
+                inc_d = ev.get("data") or {}
+                for stub in existing_by_ent_kind[(ent_key, "run.remote_dispatched")]:
+                    st_d = stub.get("data") or {}
+                    if st_d.get("sidecar_sha256") and st_d.get("sidecar_sha256") != inc_d.get(
+                        "sidecar_sha256"
+                    ):
                         raise RunImportConflictError(
-                            f"Conflicting run.outputs_hashed (phase='run_end') event for run {run_id}"
+                            f"Incoming run.started sidecar_sha256 conflicts with remote_dispatched stub for {rid}"
+                        )
+                    if st_d.get("git_hash") and st_d.get("git_hash") != inc_d.get("git_hash"):
+                        raise RunImportConflictError(
+                            f"Incoming run.started git_hash conflicts with remote_dispatched stub for {rid}"
+                        )
+
+            # Distinct-eid genesis equivocation
+            if kind == "run.started" and (ent_key, "run.started") in existing_by_ent_kind:
+                inc_sig = _genesis_signature(ev)
+                for ex in existing_by_ent_kind[(ent_key, "run.started")]:
+                    if _genesis_signature(ex) != inc_sig:
+                        raise RunImportConflictError(
+                            f"Conflicting run.started genesis event for run {rid}"
+                        )
+
+            # Distinct-eid terminal equivocation
+            if kind == "run.finished" and (ent_key, "run.finished") in existing_by_ent_kind:
+                inc_term = _terminal_signature(ev)
+                for ex in existing_by_ent_kind[(ent_key, "run.finished")]:
+                    if _terminal_signature(ex) != inc_term:
+                        raise RunImportConflictError(
+                            f"Conflicting run.finished terminal event for run {rid}"
+                        )
+
+            # Distinct-eid run_end outputs equivocation
+            if (
+                kind == "run.outputs_hashed"
+                and (ev.get("data") or {}).get("phase") == PHASE_RUN_END
+            ):
+                existing_run_end = [
+                    ex
+                    for ex in existing_by_ent_kind.get((ent_key, "run.outputs_hashed"), [])
+                    if (ex.get("data") or {}).get("phase") == PHASE_RUN_END
+                ]
+                if existing_run_end:
+                    inc_out = _run_end_outputs_signature(ev)
+                    for ex in existing_run_end:
+                        if _run_end_outputs_signature(ex) != inc_out:
+                            raise RunImportConflictError(
+                                f"Conflicting run.outputs_hashed (phase='run_end') event for run {rid}"
+                            )
+
+        if len(ent_key) == 1 and kind in ("campaign.created", "campaign.imported"):
+            cid = ent_key[0]
+            prior_camp = existing_by_ent_kind.get(
+                (ent_key, "campaign.created"), []
+            ) + existing_by_ent_kind.get((ent_key, "campaign.imported"), [])
+            if prior_camp:
+                inc_camp = _campaign_genesis_signature(ev)
+                for ex in prior_camp:
+                    if _campaign_genesis_signature(ex) != inc_camp:
+                        raise RunImportConflictError(
+                            f"Conflicting {kind} event for campaign {cid}"
+                        )
+
+        if len(ent_key) == 2 and kind == "output_copy.recorded":
+            prior_copies = existing_by_ent_kind.get((ent_key, "output_copy.recorded"), [])
+            if prior_copies:
+                inc_copy = _output_copy_signature(ev)
+                for ex in prior_copies:
+                    if _output_copy_signature(ex) != inc_copy:
+                        raise RunImportConflictError(
+                            f"Conflicting output_copy.recorded event for {ent_key!r}"
                         )
 
     return new_events, skipped_eids
@@ -1665,7 +1869,10 @@ def import_run_bundle(
     if extract_outputs is not None and str(extract_outputs).strip():
         extract_dest = Path(extract_outputs).expanduser().resolve()
 
+    _validate_safe_run_id(vb.run_id)
     run_sidecar_sha = str(vb.folded_run.get("sidecar_sha256") or "")
+    if run_sidecar_sha:
+        _validate_safe_sha256(run_sidecar_sha, label="sidecar_sha256")
     resolved_sidecar_path = vb.local_sidecar_path
     cached_sidecar_path: Path | None = None
     if resolved_sidecar_path is None and vb.sidecar_bytes is not None and run_sidecar_sha:

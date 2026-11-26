@@ -464,6 +464,19 @@ def _classify_reap_candidates(
             skipped.append((run, "too_recent"))
             continue
 
+        is_imported = bool(getattr(run, "imported_from_host", None))
+        host_norm = (run.hostname or "").strip().lower()
+        # Treat explicit loopback placeholders (used by legacy test fixtures) as
+        # local unless the run carries an import receipt (`imported_from_host`).
+        is_remote_host = is_imported or (
+            bool(host_norm)
+            and host_norm not in ("localhost", "localhost.localdomain")
+            and not _same_host(run.hostname, local_host)
+        )
+        if is_remote_host and not include_remote:
+            skipped.append((run, "remote_host_skipped"))
+            continue
+
         if run.slurm_job_id:
             if _query_slurm_job is _ORIG_QUERY_SLURM_JOB:
                 state, slurm_exit_code, error = _query_slurm_job_details(run.slurm_job_id)
@@ -492,19 +505,8 @@ def _classify_reap_candidates(
                 candidate_reasons[run.id] = _format_sacct_reason(state, slurm_exit_code)
                 candidate_sacct[run.id] = (state, slurm_exit_code)
         else:
-            is_imported = bool(getattr(run, "imported_from_host", None))
-            host_norm = (run.hostname or "").strip().lower()
-            # Treat explicit loopback placeholders (used by legacy test fixtures) as
-            # local unless the run carries an import receipt (`imported_from_host`).
-            is_remote_host = is_imported or (
-                bool(host_norm)
-                and host_norm not in ("localhost", "localhost.localdomain")
-                and not _same_host(run.hostname, local_host)
-            )
             if slurm_only:
                 skipped.append((run, "auto_reap_requires_sacct_terminal"))
-            elif is_remote_host and not include_remote:
-                skipped.append((run, "remote_host_skipped"))
             elif not is_remote_host and _is_live_process_on_host(run.hostname, run.argv):
                 skipped.append((run, "same_host_live_process"))
             else:
