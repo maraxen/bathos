@@ -1116,7 +1116,7 @@ def read_import_receipts(run_id: str, catalog_dir: Path | None = None) -> list[d
     cd = Path(catalog_dir) if catalog_dir is not None else default_catalog_dir()
     if not is_log_mode(cd) or not catalog_readable(cd):
         return []
-    con = connect_read(cd)
+    con = connect_read(cd, read_only=True, wire_validity=False)
     try:
         cur = con.execute(
             "SELECT * FROM import_receipts WHERE run_id = ? "
