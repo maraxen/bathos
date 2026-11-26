@@ -48,7 +48,22 @@
         "name": { "type": "string", "minLength": 1 },
         "repo": { "type": "string", "minLength": 1 },
         "licence": { "type": "string", "minLength": 1 },
-        "third_party": { "type": "boolean" }
+        "third_party": { "type": "boolean" },
+        "loads_trained_parameters": { "type": "boolean" },
+        "weights": {
+          "type": "object",
+          "required": ["artifact_path", "artifact_sha256", "source_checkpoint_status"],
+          "properties": {
+            "artifact_path": { "type": "string", "minLength": 1 },
+            "artifact_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "source_checkpoint_status": {
+              "type": "string",
+              "enum": ["rederived", "attested_only", "attested_only_source_deleted"]
+            },
+            "hf_repo": { "type": "string", "minLength": 1 },
+            "hf_revision": { "type": "string", "minLength": 1 }
+          }
+        }
       }
     },
     "reference": {

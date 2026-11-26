@@ -1583,3 +1583,1067 @@ class TestMinimalGraderAndNCs:
         monkeypatch.delattr(bathos, "__version__")
         with pytest.raises(AttributeError):
             _package_version()
+
+    def test_item_a_strict_project_slug_resolution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BTH_PROJECT_SLUG", raising=False)
+        repo = tmp_path / "no_cfg_repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        store = tmp_path / "store"
+        cat = tmp_path / "catalog"
+        init_catalog(cat)
+        decl_path = repo / "demo.parity.bth.toml"
+        decl_path.write_text(render_declaration_scaffold("item-a-v1", impl_name="aminx"), encoding="utf-8")
+        declare_parity_record(decl_path, parity_store=store)
+
+        # Missing .bth.toml and unset BTH_PROJECT_SLUG MUST raise (never fall back to implementation.name)
+        with pytest.raises(ParityDeclareError, match="Cannot resolve project slug"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+        # Empty [project].slug MUST raise
+        (repo / ".bth.toml").write_text('[project]\nslug = ""\n', encoding="utf-8")
+        with pytest.raises(ParityDeclareError, match=r"missing non-empty \[project\]\.slug"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+        # Malformed .bth.toml MUST raise (never swallowed)
+        (repo / ".bth.toml").write_text("[project\nbroken\n", encoding="utf-8")
+        with pytest.raises(ParityDeclareError, match="Failed to read project config"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+    def test_item_b_prior_declaration_blob_failures(self, tmp_path: Path) -> None:
+        _repo, store_dir, cat, decl_path, _decl = self._setup_workspace(tmp_path)
+        declare_parity_record(decl_path, parity_store=store_dir)
+        store = ParityStore(store_dir)
+
+        # Missing referenced blob SHA -> raises ParityDeclareError
+        other_dir = store.root / "declarations" / "prior-missing-blob"
+        other_dir.mkdir(parents=True, exist_ok=True)
+        (other_dir / "first.json").write_text(
+            json.dumps({"declaration_sha256": "a" * 64}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ParityDeclareError, match="Failed to load prior declaration blob"):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+        # Invalid TOML bytes in referenced prior blob -> raises ParityDeclareError
+        bad_toml_sha = store.put_bytes(b"[not valid toml\n")
+        (other_dir / "first.json").write_text(
+            json.dumps({"declaration_sha256": bad_toml_sha}),
+            encoding="utf-8",
+        )
+        with pytest.raises(ParityDeclareError, match="Failed to load prior declaration blob"):
+            grade_parity_record(decl_path, parity_store=store_dir, catalog_dir=cat, track_run=False)
+
+    def test_item_e_failed_and_nonterminal_supersession_rules(self, tmp_path: Path) -> None:
+        from bathos.supersession import add_supersession_edge
+
+        def _make_env(name: str):
+            sub = tmp_path / name
+            sub.mkdir()
+            repo, store_dir, cat_dir, decl_path, base_decl = self._setup_workspace(sub)
+            base_cell = base_decl["cell_plan"][0]
+            # Two cells so we can also test cross-cell supersession rejection
+            two_toml = decl_path.read_text(encoding="utf-8") + (
+                '\n[[cell_plan]]\n'
+                f'use_id = "{base_cell["use_id"]}"\n'
+                f'component_id = "{base_cell["component_id"]}"\n'
+                'knob_setting = { k = 2 }\n'
+                'axis_value = { target = "1ubq", arm = "alt" }\n'
+                'data_tier = "toy"\n'
+                'pairing = "fixture"\n'
+                'pooling_rule = "all_runs"\n'
+                f'tolerance_id = "{base_cell["tolerance_id"]}"\n'
+            )
+            decl_path.write_text(two_toml, encoding="utf-8")
+            decl = tomllib.loads(two_toml)
+            declare_parity_record(decl_path, parity_store=store_dir)
+            cid0 = _cell_id_from_decl(decl, 0)
+            cid1 = _cell_id_from_decl(decl, 1)
+            store = ParityStore(store_dir)
+            # Populate cell 1 with a passing run in every fixture
+            write_run(
+                Run(
+                    project_slug="demo",
+                    command="bth run ev.py",
+                    argv=[],
+                    git_hash="0" * 40,
+                    git_branch="main",
+                    git_dirty=False,
+                    id=f"r-c1-{name}",
+                    timestamp=datetime(2026, 11, 25, 10, 30, tzinfo=UTC),
+                    exit_code=0,
+                    status="completed",
+                    outcome="pass",
+                ),
+                cat_dir,
+            )
+            write_cell_evidence(
+                store=store,
+                record_id="demo-record-v1",
+                cell_id=cid1,
+                run_id=f"r-c1-{name}",
+                ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+            return repo, store_dir, cat_dir, decl_path, cid0, cid1
+
+        def _add_run(cat_dir: Path, run_id: str, hour: int, *, status: str = "completed", outcome: str = "pass", exit_code: int = 0) -> None:
+            write_run(
+                Run(
+                    project_slug="demo",
+                    command="bth run ev.py",
+                    argv=[],
+                    git_hash="0" * 40,
+                    git_branch="main",
+                    git_dirty=False,
+                    id=run_id,
+                    timestamp=datetime(2026, 11, 25, hour, 0, tzinfo=UTC),
+                    exit_code=exit_code,
+                    status=status,
+                    outcome=outcome,
+                ),
+                cat_dir,
+            )
+
+        def _write_ev(store_dir: Path, cid: str, run_id: str) -> None:
+            write_cell_evidence(
+                store=store_dir,
+                record_id="demo-record-v1",
+                cell_id=cid,
+                run_id=run_id,
+                ours_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                reference_arrays={"scores": np.array([1.0], dtype=np.float32)},
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+
+        # 1. Failed run + later passing run with NO supersession edge -> inconclusive (run_failed)
+        _r, store1, cat1, decl1, cid1_0, _ = _make_env("no_edge_fail")
+        _add_run(cat1, "r-fail-1", 9, status="failed", outcome="fail", exit_code=1)
+        _add_run(cat1, "r-pass-1", 10)
+        _write_ev(store1, cid1_0, "r-fail-1")
+        _write_ev(store1, cid1_0, "r-pass-1")
+        g1 = grade_parity_record(decl1, parity_store=store1, catalog_dir=cat1, track_run=False)
+        c1 = next(c for c in g1.result["cells"] if c["cell_id"] == cid1_0)
+        assert c1["verdict"] == "inconclusive"
+        assert "run_failed" in c1["flags"]
+        assert g1.result.get("superseded_run_ids", []) == []
+
+        # 2. Non-terminal run + later passing run with NO supersession edge -> not_run
+        _r, store2, cat2, decl2, cid2_0, _ = _make_env("no_edge_running")
+        _add_run(cat2, "r-run-2", 9, status="running", outcome="running", exit_code=0)
+        _add_run(cat2, "r-pass-2", 10)
+        _write_ev(store2, cid2_0, "r-run-2")
+        _write_ev(store2, cid2_0, "r-pass-2")
+        g2 = grade_parity_record(decl2, parity_store=store2, catalog_dir=cat2, track_run=False)
+        c2 = next(c for c in g2.result["cells"] if c["cell_id"] == cid2_0)
+        assert c2["verdict"] == "not_run"
+
+        # 3. Failed (t1) superseded by later passing (t2 > t1) on same cell with non-empty reason -> pass
+        _r, store3, cat3, decl3, cid3_0, _ = _make_env("sup_fail_ok")
+        _add_run(cat3, "r-fail-3", 9, status="failed", outcome="fail", exit_code=1)
+        _add_run(cat3, "r-pass-3", 10)
+        _write_ev(store3, cid3_0, "r-fail-3")
+        _write_ev(store3, cid3_0, "r-pass-3")
+        compact(cat3)
+        add_supersession_edge("run", "r-fail-3", "run", "r-pass-3", "OOM on node resolved on retry", catalog_dir=cat3)
+        g3 = grade_parity_record(decl3, parity_store=store3, catalog_dir=cat3, track_run=False)
+        c3 = next(c for c in g3.result["cells"] if c["cell_id"] == cid3_0)
+        assert c3["verdict"] == "pass"
+        assert c3["superseded_run_ids"] == ["r-fail-3"]
+        assert g3.result["superseded_run_ids"] == ["r-fail-3"]
+        assert g3.result["cell_counts"]["superseded_runs"] == 1
+
+        # 4. Non-terminal (t1) superseded by later passing (t2 > t1) on same cell with non-empty reason -> pass
+        _r, store4, cat4, decl4, cid4_0, _ = _make_env("sup_run_ok")
+        _add_run(cat4, "r-run-4", 9, status="running", outcome="running")
+        _add_run(cat4, "r-pass-4", 10)
+        _write_ev(store4, cid4_0, "r-run-4")
+        _write_ev(store4, cid4_0, "r-pass-4")
+        compact(cat4)
+        add_supersession_edge("run", "r-run-4", "run", "r-pass-4", "preempted SLURM job restarted", catalog_dir=cat4)
+        g4 = grade_parity_record(decl4, parity_store=store4, catalog_dir=cat4, track_run=False)
+        c4 = next(c for c in g4.result["cells"] if c["cell_id"] == cid4_0)
+        assert c4["verdict"] == "pass"
+        assert g4.result["superseded_run_ids"] == ["r-run-4"]
+
+        # 5. NC: empty reason does NOT supersede -> stays inconclusive (run_failed)
+        _r, store5, cat5, decl5, cid5_0, _ = _make_env("empty_reason")
+        _add_run(cat5, "r-fail-5", 9, status="failed", outcome="fail", exit_code=1)
+        _add_run(cat5, "r-pass-5", 10)
+        _write_ev(store5, cid5_0, "r-fail-5")
+        _write_ev(store5, cid5_0, "r-pass-5")
+        compact(cat5)
+        add_supersession_edge("run", "r-fail-5", "run", "r-pass-5", "   ", catalog_dir=cat5)
+        g5 = grade_parity_record(decl5, parity_store=store5, catalog_dir=cat5, track_run=False)
+        c5 = next(c for c in g5.result["cells"] if c["cell_id"] == cid5_0)
+        assert c5["verdict"] == "inconclusive"
+        assert "run_failed" in c5["flags"]
+        assert g5.result.get("superseded_run_ids", []) == []
+
+        # 6. NC (wrong direction): earlier passing (t1) listed as superseding later failed (t2 > t1) -> does NOT supersede
+        _r, store6, cat6, decl6, cid6_0, _ = _make_env("wrong_direction")
+        _add_run(cat6, "r-pass-6", 9)
+        _add_run(cat6, "r-fail-6", 10, status="failed", outcome="fail", exit_code=1)
+        _write_ev(store6, cid6_0, "r-pass-6")
+        _write_ev(store6, cid6_0, "r-fail-6")
+        compact(cat6)
+        add_supersession_edge("run", "r-fail-6", "run", "r-pass-6", "invalid backward edge", catalog_dir=cat6)
+        g6 = grade_parity_record(decl6, parity_store=store6, catalog_dir=cat6, track_run=False)
+        c6 = next(c for c in g6.result["cells"] if c["cell_id"] == cid6_0)
+        assert c6["verdict"] == "inconclusive"
+        assert "run_failed" in c6["flags"]
+        assert g6.result.get("superseded_run_ids", []) == []
+
+        # 7. NC (cross-cell): later passing run belongs to a different cell -> does NOT supersede
+        _r, store7, cat7, decl7, cid7_0, cid7_1 = _make_env("cross_cell")
+        _add_run(cat7, "r-fail-7", 9, status="failed", outcome="fail", exit_code=1)
+        _write_ev(store7, cid7_0, "r-fail-7")
+        compact(cat7)
+        add_supersession_edge("run", "r-fail-7", "run", "r-c1-cross_cell", "different cell run", catalog_dir=cat7)
+        g7 = grade_parity_record(decl7, parity_store=store7, catalog_dir=cat7, track_run=False)
+        c7 = next(c for c in g7.result["cells"] if c["cell_id"] == cid7_0)
+        assert c7["verdict"] == "inconclusive"
+        assert "run_failed" in c7["flags"]
+        assert g7.result.get("superseded_run_ids", []) == []
+
+
+class TestRing1FindingsWeightsAndDirtyRuns:
+    def _setup_repo_with_run(self, tmp_path: Path, *, git_dirty: bool = False) -> tuple[Path, Path, Path, Path, dict]:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
+        store = tmp_path / "store"
+        cat = tmp_path / "catalog"
+        init_catalog(cat)
+        decl_path = repo / "demo.parity.bth.toml"
+        raw_toml = render_declaration_scaffold("demo-weights-v1", impl_name="aminx").replace(
+            'kind = "sealed_dump"\n'
+            'identity = { dump_sha256 = "0000000000000000000000000000000000000000000000000000000000000000", producer_run_id = "run_0000", upstream_commit = "0000000000000000000000000000000000000000" }',
+            'kind = "upstream_live"\n'
+            f'identity = {{ repo = "https://github.com/example/upstream", commit = "{"a" * 40}" }}',
+        )
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=git_dirty,
+                id="r-ev-1",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-weights-v1",
+            cell_id=cid,
+            run_id="r-ev-1",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+        return repo, store, cat, decl_path, decl
+
+    def test_finding1_weights_artifact_hash_verified_and_tamper_refused(self, tmp_path: Path) -> None:
+        from bathos.parity.grader import ParityGradeError
+
+        repo, store, cat, decl_path, _decl = self._setup_repo_with_run(tmp_path)
+        weights_file = repo / "data" / "weights" / "model.eqx.zst"
+        weights_file.parent.mkdir(parents=True)
+        weights_bytes = b"trained-weights-payload-v1"
+        weights_file.write_bytes(weights_bytes)
+        weights_sha = hashlib.sha256(weights_bytes).hexdigest()
+
+        base_toml = decl_path.read_text(encoding="utf-8")
+        decl_path.write_text(
+            base_toml
+            + (
+                '\n[implementation.weights]\n'
+                'artifact_path = "data/weights/model.eqx.zst"\n'
+                f'artifact_sha256 = "{weights_sha}"\n'
+                'source_checkpoint_status = "rederived"\n'
+                'hf_repo = "example/aminx-weights"\n'
+                f'hf_revision = "{"c" * 40}"\n'
+            ),
+            encoding="utf-8",
+        )
+        declare_parity_record(decl_path, parity_store=store)
+
+        graded = grade_parity_record(
+            decl_path, parity_store=store, catalog_dir=cat, as_of="2026-11-24T12:00:00Z", track_run=False
+        )
+        assert graded.result["implementation_weights"] == {
+            "artifact_path": "data/weights/model.eqx.zst",
+            "artifact_sha256": weights_sha,
+            "source_checkpoint_status": "rederived",
+            "hf_repo": "example/aminx-weights",
+            "hf_revision": "c" * 40,
+        }
+        res_schema = json.loads(
+            importlib.resources.files("bathos").joinpath("schemas", "parity_result.v1.json").read_text(encoding="utf-8")
+        )
+        jsonschema.validate(instance=graded.result, schema=res_schema)
+
+        # (a) Mutate bytes on disk so hash != artifact_sha256 -> grader refuses with ParityGradeError
+        weights_file.write_bytes(b"corrupted-weights-bytes")
+        with pytest.raises(ParityGradeError, match="artifact_sha256 mismatch"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+        with pytest.raises(ParityGradeError, match="artifact_sha256 mismatch"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, verify=True)
+
+        # (b) Remove weights file on disk -> grader refuses with ParityGradeError
+        weights_file.unlink()
+        with pytest.raises(ParityGradeError, match="does not exist"):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+    def test_finding3_loads_trained_params_and_invalid_status_fail_closed_in_grader(self, tmp_path: Path) -> None:
+        from bathos.parity.grader import ParityGradeError, _verify_implementation_weights
+
+        repo, store, cat, decl_path, _decl = self._setup_repo_with_run(tmp_path)
+        base_toml = decl_path.read_text(encoding="utf-8")
+
+        # loads_trained_parameters = true without [implementation.weights] refused
+        decl_path.write_text(
+            base_toml.replace("third_party = false", "third_party = false\nloads_trained_parameters = true"),
+            encoding="utf-8",
+        )
+        with pytest.raises(ParityValidationError):
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+        with pytest.raises(ParityGradeError, match="loads_trained_parameters"):
+            _verify_implementation_weights(
+                declaration=tomllib.loads(decl_path.read_text(encoding="utf-8")),
+                decl_path=decl_path,
+                manifests=[],
+            )
+
+        # Invalid source_checkpoint_status refused both by validate_declaration and grader fail-closed helper
+        wfile = repo / "data" / "weights" / "model.eqx.zst"
+        wfile.parent.mkdir(parents=True)
+        wbytes = b"bytes"
+        wfile.write_bytes(wbytes)
+        wsha = hashlib.sha256(wbytes).hexdigest()
+        for bad_st in ("verified_local", "Attested_Only", "attested-only"):
+            decl_path.write_text(
+                base_toml
+                + (
+                    '\n[implementation.weights]\n'
+                    'artifact_path = "data/weights/model.eqx.zst"\n'
+                    f'artifact_sha256 = "{wsha}"\n'
+                    f'source_checkpoint_status = "{bad_st}"\n'
+                ),
+                encoding="utf-8",
+            )
+            with pytest.raises(ParityValidationError):
+                grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+            with pytest.raises(ParityGradeError, match="source_checkpoint_status"):
+                _verify_implementation_weights(
+                    declaration=tomllib.loads(decl_path.read_text(encoding="utf-8")),
+                    decl_path=decl_path,
+                    manifests=[],
+                )
+
+    def test_finding3_manifest_weights_requires_declaration_weights(self, tmp_path: Path) -> None:
+        from bathos.parity.grader import ParityGradeError
+
+        (tmp_path / "no_weights_needed").mkdir()
+        _r0, store0, cat0, decl0, _d0 = self._setup_repo_with_run(tmp_path / "no_weights_needed")
+        declare_parity_record(decl0, parity_store=store0)
+        g0 = grade_parity_record(decl0, parity_store=store0, catalog_dir=cat0, track_run=False)
+        assert "implementation_weights" not in g0.result
+
+        # Manifest declaring weights_path or weights_sha256 without [implementation.weights] -> ParityGradeError
+        for extra_key, extra_val in (("weights_path", "data/w.bin"), ("weights_sha256", "d" * 64)):
+            sub = tmp_path / f"manifest_{extra_key}"
+            sub.mkdir()
+            repo, store, cat, decl_path, decl = self._setup_repo_with_run(sub)
+            declare_parity_record(decl_path, parity_store=store)
+            cid = _cell_id_from_decl(decl)
+            ev_index_path = store / "evidence" / "demo-weights-v1" / "r-ev-1" / f"{cid}.json"
+            idx_obj = json.loads(ev_index_path.read_text(encoding="utf-8"))
+            idx_body = {k: v for k, v in idx_obj.items() if k != "manifest_sha256"}
+            idx_body[extra_key] = extra_val
+            m_bytes = (json.dumps(idx_body, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+            m_sha = ParityStore(store).put_bytes(m_bytes)
+            atomic_write_json(ev_index_path, {"manifest_sha256": m_sha, **idx_body})
+
+            with pytest.raises(ParityGradeError, match="implementation.weights"):
+                grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, track_run=False)
+
+    def test_finding4_dirty_evidence_runs_recorded_and_mock_defaults_cleanly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Clean run
+        (tmp_path / "clean").mkdir()
+        _rc, store_c, cat_c, decl_c, _dc = self._setup_repo_with_run(tmp_path / "clean", git_dirty=False)
+        declare_parity_record(decl_c, parity_store=store_c)
+        gc = grade_parity_record(decl_c, parity_store=store_c, catalog_dir=cat_c, track_run=False)
+        assert gc.result["evidence_runs"][0]["git_dirty"] is False
+        assert gc.result["has_dirty_evidence_run"] is False
+        assert gc.result["dirty_evidence_run_ids"] == []
+
+        # Dirty run
+        (tmp_path / "dirty").mkdir()
+        _rd, store_d, cat_d, decl_d, _dd = self._setup_repo_with_run(tmp_path / "dirty", git_dirty=True)
+        declare_parity_record(decl_d, parity_store=store_d)
+        gd = grade_parity_record(decl_d, parity_store=store_d, catalog_dir=cat_d, track_run=False)
+        assert gd.result["evidence_runs"][0]["git_dirty"] is True
+        assert gd.result["has_dirty_evidence_run"] is True
+        assert gd.result["dirty_evidence_run_ids"] == ["r-ev-1"]
+        # Does NOT block cell verdict yet
+        assert gd.result["cells"][0]["verdict"] == "pass"
+
+        # Mock run without git_dirty attribute defaults cleanly to False; mock with git_dirty=True preserves True
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "bathos.parity.grader._load_runs_by_id",
+            lambda _cat, _rids: {
+                "r-ev-1": SimpleNamespace(
+                    id="r-ev-1",
+                    project_slug="demo",
+                    status="completed",
+                    outcome="pass",
+                    timestamp="2026-11-24T00:00:00Z",
+                )
+            },
+        )
+        gm = grade_parity_record(decl_c, parity_store=store_c, catalog_dir=cat_c, track_run=False)
+        assert gm.result["evidence_runs"][0]["git_dirty"] is False
+        assert gm.result["has_dirty_evidence_run"] is False
+
+        # Mock run with git_dirty=True preserves True
+        monkeypatch.setattr(
+            "bathos.parity.grader._load_runs_by_id",
+            lambda _cat, _rids: {
+                "r-ev-1": SimpleNamespace(
+                    id="r-ev-1",
+                    project_slug="demo",
+                    status="completed",
+                    outcome="pass",
+                    timestamp="2026-11-24T00:00:00Z",
+                    git_dirty=True,
+                )
+            },
+        )
+        gm_dirty = grade_parity_record(decl_c, parity_store=store_c, catalog_dir=cat_c, track_run=False)
+        assert gm_dirty.result["evidence_runs"][0]["git_dirty"] is True
+        assert gm_dirty.result["has_dirty_evidence_run"] is True
+        assert gm_dirty.result["dirty_evidence_run_ids"] == ["r-ev-1"]
+
+
+class TestRing1Finding5BackendVersionMismatch:
+    def _setup_graded_record(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        recorded_numpy: str,
+    ) -> tuple[Path, Path, Path, Path, dict]:
+        from bathos.parity.metrics import get_backend_identity as real_get_backend_identity
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "demo"\n', encoding="utf-8")
+        store = tmp_path / "store"
+        cat = tmp_path / "catalog"
+        init_catalog(cat)
+        decl_path = repo / "demo.parity.bth.toml"
+        raw_toml = render_declaration_scaffold("demo-f5-v1", impl_name="aminx").replace(
+            'kind = "sealed_dump"\n'
+            'identity = { dump_sha256 = "0000000000000000000000000000000000000000000000000000000000000000", producer_run_id = "run_0000", upstream_commit = "0000000000000000000000000000000000000000" }',
+            'kind = "upstream_live"\n'
+            f'identity = {{ repo = "https://github.com/example/upstream", commit = "{"a" * 40}" }}',
+        )
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        declare_parity_record(decl_path, parity_store=store)
+        cid = _cell_id_from_decl(decl)
+        write_run(
+            Run(
+                project_slug="demo",
+                command="bth run ev.py",
+                argv=[],
+                git_hash="0" * 40,
+                git_branch="main",
+                git_dirty=False,
+                id="r-f5-1",
+                exit_code=0,
+                status="completed",
+                outcome="pass",
+            ),
+            cat,
+        )
+        write_cell_evidence(
+            store=store,
+            record_id="demo-f5-v1",
+            cell_id=cid,
+            run_id="r-f5-1",
+            ours_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            reference_arrays={"scores": np.array([1.0, 2.0], dtype=np.float32)},
+            input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+        )
+
+        def _fake_recorded_backend() -> dict[str, str]:
+            ident = real_get_backend_identity()
+            ident["numpy_version"] = recorded_numpy
+            return ident
+
+        monkeypatch.setattr("bathos.parity.grader.get_backend_identity", _fake_recorded_backend)
+        graded = grade_parity_record(
+            decl_path,
+            parity_store=store,
+            catalog_dir=cat,
+            as_of="2026-11-24T12:00:00Z",
+            track_run=False,
+        )
+        return repo, store, cat, decl_path, graded.result
+
+    def test_verify_backend_version_mismatch_semantic_match_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bathos.errors import (
+            EXCEPTION_TO_CODE,
+            BathosErrorCode,
+            ParityBackendVersionMismatchError,
+        )
+        from bathos.parity.metrics import get_backend_identity as real_get_backend_identity
+
+        assert EXCEPTION_TO_CODE["ParityBackendVersionMismatchError"] is BathosErrorCode.PARITY_BACKEND_VERSION_MISMATCH
+
+        _repo, store, cat, decl_path, _res = self._setup_graded_record(
+            tmp_path, monkeypatch, recorded_numpy="2.5.5"
+        )
+
+        def _fake_local_backend() -> dict[str, str]:
+            ident = real_get_backend_identity()
+            ident["numpy_version"] = "2.5.1"
+            return ident
+
+        monkeypatch.setattr("bathos.parity.grader.get_backend_identity", _fake_local_backend)
+        with pytest.raises(ParityBackendVersionMismatchError) as exc_info:
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, verify=True)
+
+        exc = exc_info.value
+        assert isinstance(exc, ParityVerifyError)
+        assert exc.semantic_match is True
+        assert exc.recorded_backend["numpy_version"] == "2.5.5"
+        assert exc.local_backend["numpy_version"] == "2.5.1"
+        msg = str(exc)
+        assert "2.5.5" in msg
+        assert "2.5.1" in msg
+        assert "numpy_version" in msg
+        assert "semantic_match=True" in msg
+
+    def test_verify_backend_version_mismatch_semantic_match_false_with_tampered_cell(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bathos.errors import ParityBackendVersionMismatchError
+        from bathos.parity.metrics import get_backend_identity as real_get_backend_identity
+
+        repo, store, cat, decl_path, _res = self._setup_graded_record(
+            tmp_path, monkeypatch, recorded_numpy="2.5.5"
+        )
+        res_path = repo / "demo.parity.result.json"
+        obj = json.loads(res_path.read_text(encoding="utf-8"))
+        obj["cells"][0]["verdict"] = "fail"
+        res_path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        def _fake_local_backend() -> dict[str, str]:
+            ident = real_get_backend_identity()
+            ident["numpy_version"] = "2.5.1"
+            return ident
+
+        monkeypatch.setattr("bathos.parity.grader.get_backend_identity", _fake_local_backend)
+        with pytest.raises(ParityBackendVersionMismatchError) as exc_info:
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, verify=True)
+
+        exc = exc_info.value
+        assert exc.semantic_match is False
+        assert exc.recorded_backend["numpy_version"] == "2.5.5"
+        assert exc.local_backend["numpy_version"] == "2.5.1"
+        assert "2.5.5" in str(exc)
+        assert "2.5.1" in str(exc)
+        assert "semantic_match=False" in str(exc)
+
+    def test_verify_matching_backend_with_tampered_cell_raises_base_verify_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bathos.errors import ParityBackendVersionMismatchError
+        from bathos.parity.metrics import get_backend_identity as real_get_backend_identity
+
+        def _same_backend() -> dict[str, str]:
+            ident = real_get_backend_identity()
+            ident["numpy_version"] = "2.5.1"
+            return ident
+
+        repo, store, cat, decl_path, _res = self._setup_graded_record(
+            tmp_path, monkeypatch, recorded_numpy="2.5.1"
+        )
+        res_path = repo / "demo.parity.result.json"
+        obj = json.loads(res_path.read_text(encoding="utf-8"))
+        obj["cells"][0]["verdict"] = "fail"
+        res_path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        monkeypatch.setattr("bathos.parity.grader.get_backend_identity", _same_backend)
+        with pytest.raises(ParityVerifyError, match="regenerated bytes differ") as exc_info:
+            grade_parity_record(decl_path, parity_store=store, catalog_dir=cat, verify=True)
+        assert not isinstance(exc_info.value, ParityBackendVersionMismatchError)
+
+    def test_cli_grade_verify_backend_mismatch_exits_cleanly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from bathos.cli_cyclopts import app
+        from bathos.parity.metrics import get_backend_identity as real_get_backend_identity
+
+        _repo, store, cat, decl_path, _res = self._setup_graded_record(
+            tmp_path, monkeypatch, recorded_numpy="2.5.5"
+        )
+
+        def _fake_local_backend() -> dict[str, str]:
+            ident = real_get_backend_identity()
+            ident["numpy_version"] = "2.5.1"
+            return ident
+
+        monkeypatch.setattr("bathos.parity.grader.get_backend_identity", _fake_local_backend)
+        with pytest.raises(SystemExit) as sysexit:
+            app(
+                [
+                    "parity",
+                    "grade",
+                    str(decl_path),
+                    "--parity-store",
+                    str(store),
+                    "--catalog-dir",
+                    str(cat),
+                    "--verify",
+                    "--json",
+                ],
+                exit_on_error=False,
+            )
+        assert sysexit.value.code == 1
+        err_payload = json.loads(capsys.readouterr().out)
+        assert err_payload["ok"] is False
+        assert err_payload["error_code"] == "parity_backend_version_mismatch"
+        assert err_payload["semantic_match"] is True
+        assert err_payload["recorded_backend"]["numpy_version"] == "2.5.5"
+        assert err_payload["local_backend"]["numpy_version"] == "2.5.1"
+        assert "2.5.5" in err_payload["error"] and "2.5.1" in err_payload["error"]
+
+        with pytest.raises(SystemExit) as sysexit_txt:
+            app(
+                [
+                    "parity",
+                    "grade",
+                    str(decl_path),
+                    "--parity-store",
+                    str(store),
+                    "--catalog-dir",
+                    str(cat),
+                    "--verify",
+                ],
+                exit_on_error=False,
+            )
+        assert sysexit_txt.value.code == 1
+        stderr_txt = capsys.readouterr().err
+        assert "2.5.5" in stderr_txt and "2.5.1" in stderr_txt and "semantic_match=True" in stderr_txt
+
+
+class TestRing1Finding6AminxMultiRunSingleStore:
+    COMMIT_F530 = "f530f919" + "0" * 32
+    RUN_EARLY_CLEAN = "b822a73d000000000000000000000001"
+    RUN_MID_DIRTY = "1559f25c000000000000000000000002"
+    RUN_LATEST_CLEAN = "211bdde3000000000000000000000003"
+
+    def _setup_aminx_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[Path, Path, Path, Path, list[str]]:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "aminx"\n', encoding="utf-8")
+        store_dir = tmp_path / "parity-store"
+        cat_dir = tmp_path / "catalog"
+        init_catalog(cat_dir)
+
+        store = ParityStore(store_dir)
+        dump_bytes = encode_npz({"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)})
+        dump_sha = hashlib.sha256(dump_bytes).hexdigest()
+        dump_p = tmp_path / "frustrampnn_1ubq.npz"
+        dump_p.write_bytes(dump_bytes)
+        ingest_sealed_dump(dump_p, expected_sha256=dump_sha, store=store, stem="frustrampnn_1ubq")
+
+        raw_toml = render_declaration_scaffold("aminx-frustrampnn-score-v1", impl_name="aminx").replace(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            dump_sha,
+            1,
+        )
+        base_decl = tomllib.loads(raw_toml)
+        c0 = base_decl["cell_plan"][0]
+        raw_toml = raw_toml + (
+            "\n[[cell_plan]]\n"
+            f'use_id = "{c0["use_id"]}"\n'
+            f'component_id = "{c0["component_id"]}"\n'
+            "knob_setting = { k = 2 }\n"
+            'axis_value = { target = "2ptl" }\n'
+            'data_tier = "toy"\n'
+            'pairing = "fixture"\n'
+            'pooling_rule = "all_runs"\n'
+            f'tolerance_id = "{c0["tolerance_id"]}"\n'
+        )
+        decl_path = repo / "aminx-frustrampnn-score-v1.parity.bth.toml"
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        cids = [_cell_id_from_decl(decl, 0), _cell_id_from_decl(decl, 1)]
+
+        monkeypatch.setattr("bathos.parity.declare._capture_git_head", lambda _d: self.COMMIT_F530)
+        declare_parity_record(decl_path, parity_store=store_dir)
+
+        runs_spec = [
+            (self.RUN_EARLY_CLEAN, False, datetime(2026, 11, 25, 8, 0, tzinfo=UTC)),
+            (self.RUN_MID_DIRTY, True, datetime(2026, 11, 25, 9, 0, tzinfo=UTC)),
+            (self.RUN_LATEST_CLEAN, False, datetime(2026, 11, 25, 10, 0, tzinfo=UTC)),
+        ]
+        for rid, is_dirty, ts in runs_spec:
+            write_run(
+                Run(
+                    project_slug="aminx",
+                    command="bth run score_frustrampnn.py",
+                    argv=[],
+                    git_hash=self.COMMIT_F530,
+                    git_branch="main",
+                    git_dirty=is_dirty,
+                    id=rid,
+                    timestamp=ts,
+                    exit_code=0,
+                    status="completed",
+                    outcome="pass",
+                ),
+                cat_dir,
+            )
+            for cid in cids:
+                write_cell_evidence(
+                    store=store,
+                    record_id="aminx-frustrampnn-score-v1",
+                    cell_id=cid,
+                    run_id=rid,
+                    ours_arrays={"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)},
+                    reference_dump_sha256=dump_sha,
+                    input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+                )
+        return repo, store_dir, cat_dir, decl_path, cids
+
+    def test_coexisting_three_runs_no_edge_flags_dirty_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _repo, store_dir, cat_dir, decl_path, _cids = self._setup_aminx_store(tmp_path, monkeypatch)
+        graded = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        assert graded.result["has_dirty_evidence_run"] is True
+        assert graded.result["dirty_evidence_run_ids"] == [self.RUN_MID_DIRTY]
+        assert graded.result.get("superseded_run_ids", []) == []
+        assert all(c["verdict"] == "pass" for c in graded.result["cells"])
+        ev_by_id = {er["run_id"]: er for er in graded.result["evidence_runs"]}
+        assert set(ev_by_id) == {self.RUN_EARLY_CLEAN, self.RUN_MID_DIRTY, self.RUN_LATEST_CLEAN}
+        assert ev_by_id[self.RUN_MID_DIRTY]["git_dirty"] is True
+        assert ev_by_id[self.RUN_MID_DIRTY]["is_hidden"] is False
+
+    def test_valid_forward_supersession_hides_dirty_run_from_dirty_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bathos.supersession import add_supersession_edge
+
+        _repo, store_dir, cat_dir, decl_path, _cids = self._setup_aminx_store(tmp_path, monkeypatch)
+        compact(cat_dir)
+        add_supersession_edge(
+            "run",
+            self.RUN_MID_DIRTY,
+            "run",
+            self.RUN_LATEST_CLEAN,
+            "dirty working tree run replaced by clean rerun",
+            catalog_dir=cat_dir,
+        )
+        graded = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        assert graded.result["superseded_run_ids"] == [self.RUN_MID_DIRTY]
+        assert graded.result["cell_counts"]["superseded_runs"] == 1
+        assert graded.result["has_dirty_evidence_run"] is False
+        assert graded.result["dirty_evidence_run_ids"] == []
+        ev_by_id = {er["run_id"]: er for er in graded.result["evidence_runs"]}
+        assert ev_by_id[self.RUN_MID_DIRTY]["validity_state"] == "superseded"
+        assert ev_by_id[self.RUN_MID_DIRTY]["is_hidden"] is True
+
+        # Also supersede earlier ungraded clean run -> superseded_runs == 2
+        add_supersession_edge(
+            "run",
+            self.RUN_EARLY_CLEAN,
+            "run",
+            self.RUN_LATEST_CLEAN,
+            "superseded earlier ungraded run",
+            catalog_dir=cat_dir,
+        )
+        graded2 = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        assert graded2.result["superseded_run_ids"] == sorted([self.RUN_MID_DIRTY, self.RUN_EARLY_CLEAN])
+        assert graded2.result["cell_counts"]["superseded_runs"] == 2
+        assert graded2.result["has_dirty_evidence_run"] is False
+        assert graded2.result["dirty_evidence_run_ids"] == []
+
+    def test_invalid_supersession_edges_do_not_supersede_dirty_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bathos.supersession import add_supersession_edge
+
+        # 1. Empty reason does NOT supersede 1559f25c
+        sub1 = tmp_path / "empty_reason"
+        sub1.mkdir()
+        _r1, store1, cat1, decl1, _c1 = self._setup_aminx_store(sub1, monkeypatch)
+        compact(cat1)
+        add_supersession_edge("run", self.RUN_MID_DIRTY, "run", self.RUN_LATEST_CLEAN, "", catalog_dir=cat1)
+        g1 = grade_parity_record(
+            decl1, parity_store=store1, catalog_dir=cat1, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        assert g1.result.get("superseded_run_ids", []) == []
+        assert g1.result["has_dirty_evidence_run"] is True
+        assert g1.result["dirty_evidence_run_ids"] == [self.RUN_MID_DIRTY]
+
+        # 2. Reverse chronological direction (pointing from earlier 1559f25c to later 211bdde3) does NOT supersede
+        sub2 = tmp_path / "reverse_dir"
+        sub2.mkdir()
+        _r2, store2, cat2, decl2, _c2 = self._setup_aminx_store(sub2, monkeypatch)
+        compact(cat2)
+        add_supersession_edge(
+            "run",
+            self.RUN_LATEST_CLEAN,
+            "run",
+            self.RUN_MID_DIRTY,
+            "invalid reverse chronological edge",
+            catalog_dir=cat2,
+        )
+        add_supersession_edge(
+            "run",
+            self.RUN_MID_DIRTY,
+            "run",
+            self.RUN_EARLY_CLEAN,
+            "invalid backward edge to earlier run",
+            catalog_dir=cat2,
+        )
+        g2 = grade_parity_record(
+            decl2, parity_store=store2, catalog_dir=cat2, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        assert g2.result.get("superseded_run_ids", []) == []
+        assert g2.result["has_dirty_evidence_run"] is True
+        assert g2.result["dirty_evidence_run_ids"] == [self.RUN_MID_DIRTY]
+
+    def test_hidden_dirty_run_alongside_active_dirty_run_in_other_cell(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bathos.supersession import add_supersession_edge
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "aminx"\n', encoding="utf-8")
+        store_dir = tmp_path / "parity-store"
+        cat_dir = tmp_path / "catalog"
+        init_catalog(cat_dir)
+
+        store = ParityStore(store_dir)
+        dump_bytes = encode_npz({"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)})
+        dump_sha = hashlib.sha256(dump_bytes).hexdigest()
+        dump_p = tmp_path / "frustrampnn_1ubq.npz"
+        dump_p.write_bytes(dump_bytes)
+        ingest_sealed_dump(dump_p, expected_sha256=dump_sha, store=store, stem="frustrampnn_1ubq")
+
+        raw_toml = render_declaration_scaffold("aminx-frustrampnn-score-v1", impl_name="aminx").replace(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            dump_sha,
+            1,
+        )
+        base_decl = tomllib.loads(raw_toml)
+        c0 = base_decl["cell_plan"][0]
+        raw_toml = raw_toml + (
+            "\n[[cell_plan]]\n"
+            f'use_id = "{c0["use_id"]}"\n'
+            f'component_id = "{c0["component_id"]}"\n'
+            "knob_setting = { k = 2 }\n"
+            'axis_value = { target = "2ptl" }\n'
+            'data_tier = "toy"\n'
+            'pairing = "fixture"\n'
+            'pooling_rule = "all_runs"\n'
+            f'tolerance_id = "{c0["tolerance_id"]}"\n'
+        )
+        decl_path = repo / "aminx-frustrampnn-score-v1.parity.bth.toml"
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        cid0, cid1 = _cell_id_from_decl(decl, 0), _cell_id_from_decl(decl, 1)
+
+        monkeypatch.setattr("bathos.parity.declare._capture_git_head", lambda _d: self.COMMIT_F530)
+        declare_parity_record(decl_path, parity_store=store_dir)
+
+        r_hidden_dirty = "1559f25c000000000000000000000011"
+        r_clean_c0 = "211bdde3000000000000000000000012"
+        r_active_dirty_c1 = "1559f25c000000000000000000000013"
+        for rid, is_dirty, status, outcome, ts, cid in (
+            (r_hidden_dirty, True, "failed", "fail", datetime(2026, 11, 25, 8, 0, tzinfo=UTC), cid0),
+            (r_clean_c0, False, "completed", "pass", datetime(2026, 11, 25, 9, 0, tzinfo=UTC), cid0),
+            (r_active_dirty_c1, True, "completed", "pass", datetime(2026, 11, 25, 10, 0, tzinfo=UTC), cid1),
+        ):
+            write_run(
+                Run(
+                    project_slug="aminx",
+                    command="bth run score_frustrampnn.py",
+                    argv=[],
+                    git_hash=self.COMMIT_F530,
+                    git_branch="main",
+                    git_dirty=is_dirty,
+                    id=rid,
+                    timestamp=ts,
+                    exit_code=0 if status == "completed" else 1,
+                    status=status,
+                    outcome=outcome,
+                ),
+                cat_dir,
+            )
+            write_cell_evidence(
+                store=store,
+                record_id="aminx-frustrampnn-score-v1",
+                cell_id=cid,
+                run_id=rid,
+                ours_arrays={"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)},
+                reference_dump_sha256=dump_sha,
+                input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+            )
+        compact(cat_dir)
+        add_supersession_edge(
+            "run", r_hidden_dirty, "run", r_clean_c0, "failed dirty run retried cleanly", catalog_dir=cat_dir
+        )
+
+        graded = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        assert graded.result["superseded_run_ids"] == [r_hidden_dirty]
+        assert graded.result["has_dirty_evidence_run"] is True
+        assert graded.result["dirty_evidence_run_ids"] == [r_active_dirty_c1]
+        ev_by_id = {er["run_id"]: er for er in graded.result["evidence_runs"]}
+        assert ev_by_id[r_hidden_dirty]["is_hidden"] is True
+        assert ev_by_id[r_active_dirty_c1]["is_hidden"] is False
+
+    def test_partial_cell_supersession_keeps_shared_dirty_run_active_and_flagged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from bathos.supersession import add_supersession_edge
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+        (repo / ".bth.toml").write_text('[project]\nslug = "aminx"\n', encoding="utf-8")
+        store_dir = tmp_path / "parity-store"
+        cat_dir = tmp_path / "catalog"
+        init_catalog(cat_dir)
+
+        store = ParityStore(store_dir)
+        dump_bytes = encode_npz({"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)})
+        dump_sha = hashlib.sha256(dump_bytes).hexdigest()
+        dump_p = tmp_path / "frustrampnn_1ubq.npz"
+        dump_p.write_bytes(dump_bytes)
+        ingest_sealed_dump(dump_p, expected_sha256=dump_sha, store=store, stem="frustrampnn_1ubq")
+
+        raw_toml = render_declaration_scaffold("aminx-frustrampnn-score-v1", impl_name="aminx").replace(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            dump_sha,
+            1,
+        )
+        base_decl = tomllib.loads(raw_toml)
+        c0 = base_decl["cell_plan"][0]
+        raw_toml = raw_toml + (
+            "\n[[cell_plan]]\n"
+            f'use_id = "{c0["use_id"]}"\n'
+            f'component_id = "{c0["component_id"]}"\n'
+            "knob_setting = { k = 2 }\n"
+            'axis_value = { target = "2ptl" }\n'
+            'data_tier = "toy"\n'
+            'pairing = "fixture"\n'
+            'pooling_rule = "all_runs"\n'
+            f'tolerance_id = "{c0["tolerance_id"]}"\n'
+        )
+        decl_path = repo / "aminx-frustrampnn-score-v1.parity.bth.toml"
+        decl_path.write_text(raw_toml, encoding="utf-8")
+        decl = tomllib.loads(raw_toml)
+        cid0, cid1 = _cell_id_from_decl(decl, 0), _cell_id_from_decl(decl, 1)
+
+        monkeypatch.setattr("bathos.parity.declare._capture_git_head", lambda _d: self.COMMIT_F530)
+        declare_parity_record(decl_path, parity_store=store_dir)
+
+        # R_dirty runs both cid0 and cid1; R_clean only reruns cid0 and supersedes R_dirty
+        for rid, is_dirty, ts, cell_ids in (
+            (self.RUN_MID_DIRTY, True, datetime(2026, 11, 25, 9, 0, tzinfo=UTC), (cid0, cid1)),
+            (self.RUN_LATEST_CLEAN, False, datetime(2026, 11, 25, 10, 0, tzinfo=UTC), (cid0,)),
+        ):
+            write_run(
+                Run(
+                    project_slug="aminx",
+                    command="bth run score_frustrampnn.py",
+                    argv=[],
+                    git_hash=self.COMMIT_F530,
+                    git_branch="main",
+                    git_dirty=is_dirty,
+                    id=rid,
+                    timestamp=ts,
+                    exit_code=0,
+                    status="completed",
+                    outcome="pass",
+                ),
+                cat_dir,
+            )
+            for cid in cell_ids:
+                write_cell_evidence(
+                    store=store,
+                    record_id="aminx-frustrampnn-score-v1",
+                    cell_id=cid,
+                    run_id=rid,
+                    ours_arrays={"scores": np.array([1.0, 2.0, 3.0], dtype=np.float32)},
+                    reference_dump_sha256=dump_sha,
+                    input_sha256={"ours": ["a" * 64], "reference": ["b" * 64]},
+                )
+        compact(cat_dir)
+        add_supersession_edge(
+            "run",
+            self.RUN_MID_DIRTY,
+            "run",
+            self.RUN_LATEST_CLEAN,
+            "partial rerun for cell 0 only",
+            catalog_dir=cat_dir,
+        )
+
+        graded = grade_parity_record(
+            decl_path, parity_store=store_dir, catalog_dir=cat_dir, as_of="2026-11-25T11:00:00Z", track_run=False
+        )
+        cells_by_id = {c["cell_id"]: c for c in graded.result["cells"]}
+        assert cells_by_id[cid0].get("superseded_run_ids") == [self.RUN_MID_DIRTY]
+        assert "superseded_run_ids" not in cells_by_id[cid1]
+        assert any(rv["run_id"] == self.RUN_MID_DIRTY for rv in cells_by_id[cid1]["run_verdicts"])
+        assert graded.result["superseded_run_ids"] == [self.RUN_MID_DIRTY]
+        assert graded.result["cell_counts"]["superseded_runs"] == 1
+
+        ev_by_id = {er["run_id"]: er for er in graded.result["evidence_runs"]}
+        assert ev_by_id[self.RUN_MID_DIRTY]["is_hidden"] is False
+        assert ev_by_id[self.RUN_MID_DIRTY]["validity_state"] == "current"
+        assert graded.result["has_dirty_evidence_run"] is True
+        assert graded.result["dirty_evidence_run_ids"] == [self.RUN_MID_DIRTY]
+
+

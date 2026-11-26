@@ -31,7 +31,9 @@ import numpy as np
 from bathos.archived_items import read_archived_item_fragments
 from bathos.catalog import write_run
 from bathos.config import default_catalog_dir
+from bathos.errors import ParityBackendVersionMismatchError, ParityVerifyError
 from bathos.git import capture_git_state
+from bathos.index import connect_read
 from bathos.parity.axes import RING0_ACTIVE_G_CODES, compute_axes_and_clauses
 from bathos.parity.declare import (
     ParityDeclareError,
@@ -40,17 +42,21 @@ from bathos.parity.declare import (
     load_parsed_declaration,
 )
 from bathos.parity.evidence import (
+    VALID_EVIDENCE_LEVELS,
     CellEvidenceError,
     load_cell_evidence_for_record,
     validate_cell_evidence,
 )
+from bathos.parity.gate_ladder import load_parity_gate_stages
 from bathos.parity.metrics import compare_bitwise, compare_within_tolerance, get_backend_identity
 from bathos.parity.schema import (
     PARITY_KINDS_ORDER,
     STANDARD_VERSION,
+    WEIGHTS_CHECKPOINT_STATUSES,
     ParityValidationError,
     canonical_json,
     compute_cell_id,
+    is_sha256_hex,
     validate_declaration,
 )
 from bathos.parity.sealed_dump import SealedDumpError, load_sealed_dump_arrays
@@ -77,8 +83,93 @@ def register_overlay_hook(hook: CellOverlayHook) -> None:
         _REGISTERED_OVERLAY_HOOKS.append(hook)
 
 
-class ParityVerifyError(RuntimeError):
-    """Raised when ``bth parity grade --verify`` sees byte divergence on replay."""
+class ParityGradeError(RuntimeError):
+    """Raised when parity grading fails a mandatory precondition (e.g., weights artifact check)."""
+
+
+def _resolve_weights_artifact_path(decl_path: Path, raw_artifact_path: str) -> Path:
+    art = Path(raw_artifact_path)
+    if art.is_absolute():
+        return art.resolve()
+    ws = resolve_workspace(decl_path.parent)
+    return (ws.fs_root / art).resolve()
+
+
+def _verify_implementation_weights(
+    *,
+    declaration: Mapping[str, Any],
+    decl_path: Path,
+    manifests: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    impl = declaration.get("implementation")
+    if not isinstance(impl, Mapping):
+        raise ParityGradeError("Declaration missing [implementation] table")
+    loads_trained = impl.get("loads_trained_parameters") is True
+    manifest_reports_weights = any(
+        (m.get("weights_path") is not None) or (m.get("weights_sha256") is not None)
+        for m in manifests
+    )
+    weights_sec = impl.get("weights")
+    if weights_sec is None:
+        if loads_trained:
+            raise ParityGradeError(
+                "Declaration has implementation.loads_trained_parameters=true but is missing [implementation.weights]"
+            )
+        if manifest_reports_weights:
+            raise ParityGradeError(
+                "Graded cell evidence manifest reports weights_path or weights_sha256, requiring [implementation.weights]"
+            )
+        return None
+    if not isinstance(weights_sec, Mapping):
+        raise ParityGradeError("[implementation.weights] must be a table")
+
+    raw_art_path = weights_sec.get("artifact_path")
+    if not isinstance(raw_art_path, str) or not raw_art_path.strip():
+        raise ParityGradeError("[implementation.weights].artifact_path must be a non-empty string")
+    expected_sha = weights_sec.get("artifact_sha256")
+    if not is_sha256_hex(expected_sha):
+        raise ParityGradeError("[implementation.weights].artifact_sha256 must be a 64-char lowercase hex sha256")
+    status = weights_sec.get("source_checkpoint_status")
+    if not isinstance(status, str) or status not in WEIGHTS_CHECKPOINT_STATUSES:
+        raise ParityGradeError(
+            f"[implementation.weights].source_checkpoint_status invalid: {status!r} "
+            f"(expected one of {sorted(WEIGHTS_CHECKPOINT_STATUSES)})"
+        )
+    for opt_field in ("hf_repo", "hf_revision"):
+        if opt_field in weights_sec and weights_sec[opt_field] is not None:
+            opt_val = weights_sec[opt_field]
+            if not isinstance(opt_val, str) or not opt_val.strip():
+                raise ParityGradeError(f"[implementation.weights].{opt_field} must be a non-empty string")
+
+    art_p = _resolve_weights_artifact_path(decl_path, raw_art_path)
+    if not art_p.is_file():
+        raise ParityGradeError(
+            f"[implementation.weights] artifact_path does not exist: {art_p} (declared {raw_art_path!r})"
+        )
+    h = hashlib.sha256()
+    try:
+        with art_p.open("rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                h.update(chunk)
+    except OSError as exc:
+        raise ParityGradeError(f"[implementation.weights] failed to read {art_p}: {exc}") from exc
+    actual_sha = h.hexdigest()
+    if actual_sha != expected_sha:
+        raise ParityGradeError(
+            f"[implementation.weights] artifact_sha256 mismatch for {art_p}: "
+            f"expected {expected_sha}, got {actual_sha}"
+        )
+
+    verified: dict[str, Any] = {
+        "artifact_path": raw_art_path,
+        "artifact_sha256": expected_sha,
+        "source_checkpoint_status": status,
+    }
+    if weights_sec.get("hf_repo") is not None:
+        verified["hf_repo"] = str(weights_sec["hf_repo"])
+    if weights_sec.get("hf_revision") is not None:
+        verified["hf_revision"] = str(weights_sec["hf_revision"])
+    return verified
 
 
 @dataclass(frozen=True)
@@ -102,18 +193,32 @@ def _package_version() -> str:
 
 
 def _resolve_record_project_slug(dpath: Path, declaration: Mapping[str, Any]) -> str:
+    """Resolve the owning bathos project slug from ``.bth.toml`` or ``BTH_PROJECT_SLUG`` (no silent fallback)."""
     from bathos.config import find_project_config
 
+    _ = declaration
     cfg_path = find_project_config(dpath.parent)
-    if cfg_path is not None and cfg_path.is_file():
+    if cfg_path is not None:
+        if not cfg_path.is_file():
+            raise ParityDeclareError(f"Project config {cfg_path} is not a readable file")
         try:
             cfg = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
-            slug = str(cfg.get("project", {}).get("slug", "")).strip()
-            if slug:
-                return slug
-        except Exception:
-            pass
-    return str(declaration.get("implementation", {}).get("name", "")).strip()
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ParityDeclareError(f"Failed to read project config {cfg_path}: {exc}") from exc
+        proj = cfg.get("project")
+        if not isinstance(proj, Mapping):
+            raise ParityDeclareError(f"Project config {cfg_path} missing [project] table")
+        slug = str(proj.get("slug", "")).strip()
+        if not slug:
+            raise ParityDeclareError(f"Project config {cfg_path} missing non-empty [project].slug")
+        return slug
+
+    env_slug = os.environ.get("BTH_PROJECT_SLUG", "").strip()
+    if env_slug:
+        return env_slug
+    raise ParityDeclareError(
+        f"Cannot resolve project slug for {dpath}: no .bth.toml found and BTH_PROJECT_SLUG is unset"
+    )
 
 
 def _derive_cell_evidence_level(
@@ -177,6 +282,90 @@ def _load_runs_by_id(catalog_dir: Path | None, run_ids: Sequence[str]) -> dict[s
         if run is not None and run.id == rid:
             by_id[rid] = run
     return by_id
+
+
+def _parse_iso_utc(raw_ts: datetime | str) -> datetime:
+    if isinstance(raw_ts, datetime):
+        dt = raw_ts
+    else:
+        dt = datetime.fromisoformat(str(raw_ts).strip().replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _is_strictly_later(later_run: Run, earlier_run: Run) -> bool:
+    try:
+        return _parse_iso_utc(later_run.timestamp) > _parse_iso_utc(earlier_run.timestamp)
+    except ValueError:
+        return False
+
+
+def _load_run_supersession_edges(catalog_dir: Path | None) -> list[tuple[str, str, str]]:
+    """Return all ``(entity_id, superseded_by_id, reason)`` run->run supersession edges from catalog."""
+    if catalog_dir is None or not catalog_dir.exists():
+        return []
+    backend = _resolve_backend(catalog_dir)
+    if backend == "index":
+        _fold_once(catalog_dir, {})
+    con = connect_read(catalog_dir, missing="empty")
+    try:
+        tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
+        if "supersession_edges" not in tables:
+            return []
+        cols = [c[1] for c in con.execute("PRAGMA table_info('supersession_edges')").fetchall()]
+        if "entity_type" in cols:
+            rows = con.execute(
+                "SELECT entity_id, superseded_by_id, COALESCE(reason, '') "
+                "FROM supersession_edges "
+                "WHERE entity_type = 'run' AND superseded_by_type = 'run'"
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT from_id, to_id, COALESCE(reason, '') "
+                "FROM supersession_edges "
+                "WHERE from_type = 'run' AND to_type = 'run'"
+            ).fetchall()
+        return [(str(eid), str(sid), str(reason)) for eid, sid, reason in rows]
+    finally:
+        con.close()
+
+
+def _qualifying_superseded_runs_for_cell(
+    *,
+    cell_all_run_ids: set[str],
+    run_supersession_edges: Sequence[tuple[str, str, str]],
+    runs_by_id: Mapping[str, Run],
+    validity_by_id: Mapping[str, ValidityResult],
+    expected_slug_norm: str,
+) -> set[str]:
+    """Identify runs of *this cell* superseded by a strictly later run of *this cell* with a non-empty reason."""
+    if not cell_all_run_ids or not run_supersession_edges:
+        return set()
+    adj: dict[str, list[str]] = {}
+    for entity_id, superseded_by_id, reason in run_supersession_edges:
+        if not reason.strip():
+            continue
+        if entity_id not in cell_all_run_ids or superseded_by_id not in cell_all_run_ids:
+            continue
+        if entity_id == superseded_by_id:
+            continue
+        old_run = runs_by_id.get(entity_id)
+        new_run = runs_by_id.get(superseded_by_id)
+        if old_run is None or new_run is None:
+            continue
+        if old_run.project_slug.strip().lower() != expected_slug_norm:
+            continue
+        if new_run.project_slug.strip().lower() != expected_slug_norm:
+            continue
+        new_val = validity_by_id.get(superseded_by_id)
+        if new_val is not None and new_val.is_hidden and new_val.state != "superseded":
+            continue
+        if not _is_strictly_later(new_run, old_run):
+            continue
+        adj.setdefault(entity_id, []).append(superseded_by_id)
+
+    return set(adj.keys())
 
 
 def _load_bundle_arrays(store: ParityStore, bundle_sha: str) -> dict[str, np.ndarray]:
@@ -351,6 +540,15 @@ def _evaluate_single_manifest(
 ) -> dict[str, Any]:
     rid = str(manifest["run_id"])
     m_sha = manifest.get("manifest_sha256")
+    raw_ev_level = manifest.get("evidence_level")
+    if raw_ev_level is None:
+        manifest_ev_level = "self_reported"
+    else:
+        manifest_ev_level = str(raw_ev_level).strip()
+        if manifest_ev_level not in VALID_EVIDENCE_LEVELS:
+            raise CellEvidenceError(
+                f"Evidence manifest {m_sha or rid} has invalid evidence_level {raw_ev_level!r}"
+            )
     inp = manifest.get("input_sha256", {"ours": [], "reference": []})
     input_key = (
         tuple(sorted(str(x) for x in inp.get("ours", []))),
@@ -381,6 +579,7 @@ def _evaluate_single_manifest(
             "input_key": input_key,
             "input_sha256": inp,
             "reference_source": ref_source,
+            "evidence_level": manifest_ev_level,
         }
 
     ours_arrays: dict[str, np.ndarray] = {}
@@ -477,6 +676,7 @@ def _evaluate_single_manifest(
             "input_key": input_key,
             "input_sha256": inp,
             "reference_source": ref_source,
+            "evidence_level": manifest_ev_level,
         }
 
     missing_ref = [k for k in ours_arrays if k not in ref_arrays]
@@ -498,6 +698,7 @@ def _evaluate_single_manifest(
             "input_key": input_key,
             "input_sha256": inp,
             "reference_source": ref_source,
+            "evidence_level": manifest_ev_level,
         }
 
     if declared_kind not in ("bitwise", "within_tolerance"):
@@ -518,6 +719,7 @@ def _evaluate_single_manifest(
             "input_key": input_key,
             "input_sha256": inp,
             "reference_source": ref_source,
+            "evidence_level": manifest_ev_level,
         }
 
     all_bitwise = True
@@ -647,6 +849,7 @@ def _evaluate_single_manifest(
         "input_key": input_key,
         "input_sha256": inp,
         "reference_source": ref_source,
+        "evidence_level": manifest_ev_level,
     }
 
 
@@ -709,6 +912,7 @@ def _evaluate_cell(
     manifests_by_cell: Mapping[str, list[dict[str, Any]]],
     runs_by_id: Mapping[str, Run],
     validity_by_id: Mapping[str, ValidityResult],
+    run_supersession_edges: Sequence[tuple[str, str, str]],
     declared_cell_runs: Mapping[str, Sequence[str]],
     expected_project_slug: str,
     sealed_dump_cache: dict[str, dict[str, np.ndarray]],
@@ -757,18 +961,30 @@ def _evaluate_cell(
     evidence_run_ids: list[str] = []
 
     expected_slug_norm = expected_project_slug.strip().lower()
+    if not expected_slug_norm:
+        raise ValueError("expected_project_slug must be non-empty")
     manifest_run_ids = [str(m["run_id"]) for m in cell_manifests]
+    cell_all_run_ids = set(manifest_run_ids) | {str(r) for r in explicit_runs}
+    qualifying_superseded = _qualifying_superseded_runs_for_cell(
+        cell_all_run_ids=cell_all_run_ids,
+        run_supersession_edges=run_supersession_edges,
+        runs_by_id=runs_by_id,
+        validity_by_id=validity_by_id,
+        expected_slug_norm=expected_slug_norm,
+    )
     for m in cell_manifests:
         rid = str(m["run_id"])
         evidence_run_ids.append(rid)
+        if rid in qualifying_superseded:
+            continue
         run = runs_by_id.get(rid)
         val = validity_by_id.get(rid)
-        if val is not None and val.is_hidden:
+        if val is not None and val.is_hidden and val.state != "superseded":
             continue
         if run is None:
             saw_unknown_run = True
             continue
-        if expected_slug_norm and run.project_slug.strip().lower() != expected_slug_norm:
+        if run.project_slug.strip().lower() != expected_slug_norm:
             saw_wrong_project = True
             continue
         if run.outcome == "invariant_fail":
@@ -786,14 +1002,16 @@ def _evaluate_cell(
     for rid in explicit_runs:
         if rid not in evidence_run_ids:
             evidence_run_ids.append(rid)
+        if rid in qualifying_superseded:
+            continue
         val = validity_by_id.get(rid)
-        if val is not None and val.is_hidden:
+        if val is not None and val.is_hidden and val.state != "superseded":
             continue
         run = runs_by_id.get(rid)
         if run is None:
             saw_unknown_run = True
             continue
-        if expected_slug_norm and run.project_slug.strip().lower() != expected_slug_norm:
+        if run.project_slug.strip().lower() != expected_slug_norm:
             saw_wrong_project = True
             continue
         if run.outcome == "invariant_fail":
@@ -844,6 +1062,8 @@ def _evaluate_cell(
         "flags": [],
         "verdict": "not_run",
     }
+    if qualifying_superseded:
+        base_row["superseded_run_ids"] = sorted(qualifying_superseded)
 
     per_run_evals: list[dict[str, Any]] = []
     # G04 evidence-absence, terminal-status, and invariant rules take precedence before G10
@@ -966,6 +1186,7 @@ def _evaluate_cell(
 def _build_result_payload(
     *,
     declaration: Mapping[str, Any],
+    decl_path: Path,
     decl_sha: str,
     impl_rev: str,
     baseline_sha: str | None,
@@ -1062,27 +1283,13 @@ def _build_result_payload(
                         is_hidden=True,
                     )
 
+    run_supersession_edges = _load_run_supersession_edges(catalog_dir)
+
     manifest_decl_sha_by_run: dict[str, str] = {}
     for m in manifests:
         rid = str(m.get("run_id", ""))
         if rid and isinstance(m.get("declaration_blob_sha256"), str) and m["declaration_blob_sha256"]:
             manifest_decl_sha_by_run[rid] = str(m["declaration_blob_sha256"])
-
-    evidence_runs_summary: list[dict[str, Any]] = []
-    for rid in referenced_run_ids:
-        run = runs_by_id.get(rid)
-        val = validity_by_id.get(rid)
-        evidence_runs_summary.append(
-            {
-                "run_id": rid,
-                "status": run.status if run else "unknown",
-                "outcome": run.outcome if run else "",
-                "validity_state": val.state if val else ("current" if run else "unknown"),
-                "is_hidden": bool(val.is_hidden) if val else False,
-                "env_blob_sha256": None,
-                "declaration_blob_sha256": manifest_decl_sha_by_run.get(rid, decl_sha),
-            }
-        )
 
     all_hooks = [*_REGISTERED_OVERLAY_HOOKS, *overlay_hooks]
     sealed_dump_cache: dict[str, dict[str, np.ndarray]] = {}
@@ -1099,6 +1306,7 @@ def _build_result_payload(
                 manifests_by_cell=manifests_by_cell,
                 runs_by_id=runs_by_id,
                 validity_by_id=validity_by_id,
+                run_supersession_edges=run_supersession_edges,
                 declared_cell_runs=declared_cell_runs,
                 expected_project_slug=expected_project_slug,
                 sealed_dump_cache=sealed_dump_cache,
@@ -1106,6 +1314,93 @@ def _build_result_payload(
             )
         )
     evaluated_cells.sort(key=lambda c: str(c["cell_id"]))
+
+    all_superseded_runs = sorted(
+        {str(rid) for c in evaluated_cells for rid in c.get("superseded_run_ids", [])}
+    )
+    superseded_set = set(all_superseded_runs)
+    cell_superseded_by_cell: dict[str, set[str]] = {
+        str(c["cell_id"]): {str(r) for r in c.get("superseded_run_ids", [])}
+        for c in evaluated_cells
+    }
+    active_run_ids: set[str] = set()
+    for c in evaluated_cells:
+        c_sup = cell_superseded_by_cell[str(c["cell_id"])]
+        for rid in c.get("evidence_run_ids", []):
+            s_rid = str(rid)
+            if s_rid in c_sup:
+                continue
+            val = validity_by_id.get(s_rid)
+            if val is not None and val.is_hidden and val.state != "superseded":
+                continue
+            active_run_ids.add(s_rid)
+    globally_superseded_set = superseded_set - active_run_ids
+
+    planned_cell_ids = {
+        compute_cell_id(
+            str(pc["component_id"]),
+            str(pc["use_id"]),
+            pc["knob_setting"],
+            pc["axis_value"],
+            str(pc["data_tier"]),
+            str(pc["pairing"]),
+        )
+        for pc in declaration.get("cell_plan", [])
+    }
+    graded_manifests = [
+        m
+        for m in manifests
+        if str(m.get("cell_id", "")) in planned_cell_ids
+        and str(m.get("run_id", "")) not in cell_superseded_by_cell.get(str(m.get("cell_id", "")), set())
+        and not (
+            (val := validity_by_id.get(str(m.get("run_id", "")))) is not None
+            and val.is_hidden
+            and val.state != "superseded"
+        )
+    ]
+    verified_weights = _verify_implementation_weights(
+        declaration=declaration,
+        decl_path=decl_path,
+        manifests=graded_manifests,
+    )
+
+    evidence_runs_summary: list[dict[str, Any]] = []
+    for rid in referenced_run_ids:
+        run = runs_by_id.get(rid)
+        val = validity_by_id.get(rid)
+        if val is None:
+            eff_state = "superseded" if rid in globally_superseded_set else ("current" if run else "unknown")
+            eff_hidden = rid in globally_superseded_set
+        elif val.state == "superseded":
+            eff_state = "superseded" if rid in globally_superseded_set else "current"
+            eff_hidden = rid in globally_superseded_set
+        else:
+            eff_state = val.state
+            eff_hidden = bool(val.is_hidden)
+        if run is None:
+            run_dirty = False
+        elif isinstance(run, Mapping):
+            run_dirty = bool(run.get("git_dirty", False))
+        else:
+            run_dirty = bool(getattr(run, "git_dirty", False))
+        evidence_runs_summary.append(
+            {
+                "run_id": rid,
+                "status": run.status if run else "unknown",
+                "outcome": run.outcome if run else "",
+                "validity_state": eff_state,
+                "is_hidden": eff_hidden,
+                "git_dirty": run_dirty,
+                "env_blob_sha256": None,
+                "declaration_blob_sha256": manifest_decl_sha_by_run.get(rid, decl_sha),
+            }
+        )
+    dirty_evidence_run_ids = sorted(
+        str(er["run_id"])
+        for er in evidence_runs_summary
+        if er.get("git_dirty") and not er.get("is_hidden")
+    )
+    has_dirty_evidence_run = bool(dirty_evidence_run_ids)
 
     clauses, gates, cell_counts = compute_axes_and_clauses(
         declaration=declaration,
@@ -1120,6 +1415,8 @@ def _build_result_payload(
         knobs_covered=None,
         accounted_differences=False,
     )
+    if all_superseded_runs:
+        cell_counts["superseded_runs"] = len(all_superseded_runs)
 
     # Dual display: whenever graded declaration differs from first declaration (§3.17.3, WP05d)
     dual_display_result: dict[str, Any] | None = None
@@ -1139,6 +1436,7 @@ def _build_result_payload(
                     manifests_by_cell=manifests_by_cell,
                     runs_by_id=runs_by_id,
                     validity_by_id=validity_by_id,
+                    run_supersession_edges=run_supersession_edges,
                     declared_cell_runs=declared_cell_runs,
                     expected_project_slug=expected_project_slug,
                     sealed_dump_cache=sealed_dump_cache,
@@ -1157,6 +1455,9 @@ def _build_result_payload(
             knobs_uncovered=None,
             accounted_differences=False,
         )
+        first_sup = sorted({str(rid) for c in first_cells for rid in c.get("superseded_run_ids", [])})
+        if first_sup:
+            first_counts["superseded_runs"] = len(first_sup)
         dual_display_result = {
             "basis": "first_declared",
             "declaration_sha256": baseline_sha,
@@ -1190,7 +1491,7 @@ def _build_result_payload(
         "overlay_hooks": [_hook_identity(h) for h in all_hooks],
     }
 
-    return {
+    payload: dict[str, Any] = {
         "schema_version": "parity_result.v1",
         "standard_version": STANDARD_VERSION,
         "record_id": record_id,
@@ -1201,6 +1502,9 @@ def _build_result_payload(
         "parity_store": store_meta,
         "grade_inputs": grade_inputs,
         "evidence_runs": evidence_runs_summary,
+        "has_dirty_evidence_run": has_dirty_evidence_run,
+        "dirty_evidence_run_ids": dirty_evidence_run_ids,
+        **({"implementation_weights": verified_weights} if verified_weights is not None else {}),
         "cells": evaluated_cells,
         "components": [],
         "supplementary": [],
@@ -1213,12 +1517,53 @@ def _build_result_payload(
         "prior_records_on_pair": prior_records_count,
         "bundle_sha256": None,
     }
+    if all_superseded_runs:
+        payload["superseded_run_ids"] = all_superseded_runs
+    return payload
 
 
 def serialize_result(result: Mapping[str, Any]) -> bytes:
     """Deterministically serialize a result dictionary to UTF-8 JSON bytes."""
     text = json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n"
     return text.encode("utf-8")
+
+
+def _format_backend_mismatch_message(
+    *,
+    out_p: Path,
+    recorded_backend: Mapping[str, Any],
+    local_backend: Mapping[str, Any],
+    semantic_match: bool,
+) -> str:
+    """Format a diagnostic message for comparison_backend divergence during --verify."""
+    rec_np = recorded_backend.get("numpy_version", "<missing>")
+    loc_np = local_backend.get("numpy_version", "<missing>")
+    diff_keys = sorted(
+        k
+        for k in set(recorded_backend.keys()) | set(local_backend.keys())
+        if recorded_backend.get(k) != local_backend.get(k)
+    )
+    other_diffs = [
+        f"{k}: recorded={recorded_backend.get(k)!r} vs local={local_backend.get(k)!r}"
+        for k in diff_keys
+        if k != "numpy_version"
+    ]
+    other_suffix = f" (other differing backend fields: {', '.join(other_diffs)})" if other_diffs else ""
+    if semantic_match:
+        semantic_summary = (
+            "All graded cells, metrics, and verdicts matched identically under the recorded backend "
+            "(semantic_match=True)."
+        )
+    else:
+        semantic_summary = (
+            "Graded cells, metrics, verdicts, or other fields ALSO diverged from the recorded result "
+            "(semantic_match=False)."
+        )
+    return (
+        f"Result verification failed for {out_p} due to comparison_backend version mismatch: "
+        f"numpy_version recorded={rec_np!r} vs local={loc_np!r}{other_suffix}. "
+        f"{semantic_summary}"
+    )
 
 
 def _default_result_path(decl_path: Path) -> Path:
@@ -1232,6 +1577,7 @@ def grade_parity_record(
     *,
     parity_store: Path | str | None = None,
     catalog_dir: Path | str | None = None,
+    mode_state_dir: Path | str | None = None,
     evidence_run_ids: Sequence[str] | None = None,
     cell_runs: Mapping[str, Sequence[str]] | None = None,
     as_of: str | None = None,
@@ -1268,6 +1614,14 @@ def grade_parity_record(
     baseline_sha = str(first_meta["declaration_sha256"])
     impl_rev = _resolve_decl_revision(store, record_id, decl_sha, first_meta)
     expected_project_slug = _resolve_record_project_slug(dpath, declaration)
+    discovered_stages = load_parity_gate_stages(
+        mode_state_dir=mode_state_dir,
+        start_dir=dpath.parent,
+    )
+    effective_gate_stages = {
+        code: discovered_stages.get(code, "shadow")
+        for code in RING0_ACTIVE_G_CODES
+    }
 
     if verify:
         if not out_p.is_file():
@@ -1284,7 +1638,7 @@ def grade_parity_record(
             raise ParityVerifyError(f"Result JSON at {out_p} missing grade_inputs.as_of")
         replay_as_of = str(recorded_inputs["as_of"])
         # Always recompute gate_stages and comparison_backend; never trust recorded values on verify.
-        replay_gate_stages = {code: "shadow" for code in RING0_ACTIVE_G_CODES}
+        replay_gate_stages = effective_gate_stages
         replay_backend = get_backend_identity()
         # Discover runs fresh from store (respecting only caller-passed evidence_run_ids).
         replay_ev_runs = evidence_run_ids
@@ -1301,6 +1655,7 @@ def grade_parity_record(
 
         replayed = _build_result_payload(
             declaration=declaration,
+            decl_path=dpath,
             decl_sha=decl_sha,
             impl_rev=impl_rev,
             baseline_sha=baseline_sha,
@@ -1318,6 +1673,38 @@ def grade_parity_record(
         )
         replayed_bytes = serialize_result(replayed)
         if replayed_bytes != existing_bytes:
+            recorded_backend = recorded_inputs.get("comparison_backend")
+            if isinstance(recorded_backend, Mapping) and dict(recorded_backend) != dict(replay_backend):
+                semantic_replayed = _build_result_payload(
+                    declaration=declaration,
+                    decl_path=dpath,
+                    decl_sha=decl_sha,
+                    impl_rev=impl_rev,
+                    baseline_sha=baseline_sha,
+                    first_decl=first_decl,
+                    store=store,
+                    store_res=store_res,
+                    catalog_dir=cat_dir,
+                    evidence_run_ids=replay_ev_runs,
+                    declared_cell_runs=replay_cell_runs,
+                    expected_project_slug=expected_project_slug,
+                    as_of=replay_as_of,
+                    gate_stages=replay_gate_stages,
+                    comparison_backend=recorded_backend,
+                    overlay_hooks=overlay_hooks,
+                )
+                semantic_match = serialize_result(semantic_replayed) == existing_bytes
+                raise ParityBackendVersionMismatchError(
+                    _format_backend_mismatch_message(
+                        out_p=out_p,
+                        recorded_backend=recorded_backend,
+                        local_backend=replay_backend,
+                        semantic_match=semantic_match,
+                    ),
+                    recorded_backend=dict(recorded_backend),
+                    local_backend=dict(replay_backend),
+                    semantic_match=semantic_match,
+                )
             raise ParityVerifyError(
                 f"Result verification failed: regenerated bytes differ from {out_p}"
             )
@@ -1332,6 +1719,7 @@ def grade_parity_record(
     effective_as_of = as_of or datetime.now(UTC).isoformat()
     payload = _build_result_payload(
         declaration=declaration,
+        decl_path=dpath,
         decl_sha=decl_sha,
         impl_rev=impl_rev,
         baseline_sha=baseline_sha,
@@ -1343,7 +1731,7 @@ def grade_parity_record(
         declared_cell_runs=cell_runs or {},
         expected_project_slug=expected_project_slug,
         as_of=effective_as_of,
-        gate_stages={code: "shadow" for code in RING0_ACTIVE_G_CODES},
+        gate_stages=effective_gate_stages,
         comparison_backend=get_backend_identity(),
         overlay_hooks=overlay_hooks,
     )

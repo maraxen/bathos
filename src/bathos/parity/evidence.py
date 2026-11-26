@@ -26,6 +26,9 @@ CELL_EVIDENCE_SCHEMA_VERSION = "cell_evidence.v1"
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
+VALID_EVIDENCE_LEVELS = frozenset({"self_reported", "reexecuted"})
+
+
 class CellEvidenceError(ValueError):
     """Raised when ``cell_evidence.v1`` writing or ingest validation fails."""
 
@@ -101,6 +104,7 @@ def write_cell_evidence(
     witnesses: dict[str, Any] | None = None,
     ref_env_blob_sha256: str | None = None,
     input_transforms: list[dict[str, Any]] | None = None,
+    evidence_level: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Write cell arrays (`.npz`) and a validated ``cell_evidence.v1`` manifest to *store*.
 
@@ -152,6 +156,8 @@ def write_cell_evidence(
         manifest["witnesses"] = dict(witnesses)
     if ref_env_blob_sha256 is not None:
         manifest["ref_env_blob_sha256"] = str(ref_env_blob_sha256)
+    if evidence_level is not None:
+        manifest["evidence_level"] = str(evidence_level)
 
     errors = validate_cell_evidence(manifest, store=parity_store)
     if errors:
@@ -327,6 +333,12 @@ def validate_cell_evidence(
             errors.append("missing adapter.name")
         if not isinstance(adapter.get("version"), str) or not str(adapter["version"]).strip():
             errors.append("missing adapter.version")
+
+    ev_level = manifest.get("evidence_level")
+    if ev_level is not None and (not isinstance(ev_level, str) or ev_level not in VALID_EVIDENCE_LEVELS):
+        errors.append(
+            f"invalid 'evidence_level': {ev_level!r} (expected one of {sorted(VALID_EVIDENCE_LEVELS)})"
+        )
 
     return errors
 
