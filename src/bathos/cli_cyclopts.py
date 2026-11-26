@@ -79,6 +79,8 @@ wire(
         "backfill_declarations",
         "check",
         "sync",
+        "bundle_export",
+        "bundle_import",
         "init",
         "log_restore",
         "run",
@@ -165,6 +167,10 @@ wire(
 if "findings" in app._commands:
     # app[...] resolves to the App (typed); _commands values are `App | CommandSpec`, which no overload accepts.
     app.command(app["findings"], name="finding")
+
+if "bundle" in app._commands:
+    # CLI-only top-level `bth import` alias (spec 261125 §6; no duplicate MCP tool).
+    app.command(app["bundle"]["import"], name="import")
 
 del _bathos_mcp
 
@@ -1345,6 +1351,30 @@ def submit(
     if then_sync:
         try:
             sync_catalog(cluster.remote, config, cat_dir, pull=True)
+            from bathos.runlog.ingest import run_ingest
+            from bathos.runlog.mode import is_log_mode
+            from bathos.runlog.project_id import read_project_id
+            from bathos.runlog.resolve import resolve_log_root
+            from bathos.sync import pull_cluster_log
+
+            if is_log_mode(cat_dir):
+                resolution = resolve_log_root(Path.cwd())
+                if not resolution.unaffiliated:
+                    pid = read_project_id(resolution.main_root / ".bth.toml")
+                    pull_res = pull_cluster_log(
+                        cluster.remote, config, resolution.main_root, pid
+                    )
+                    for failure in pull_res.failures:
+                        print(
+                            f"Warning: cluster log {failure['label']} pull failed: {failure['error']}",
+                            file=sys.stderr,
+                        )
+                ingest_report = run_ingest(cat_dir)
+                if ingest_report.quarantined:
+                    print(
+                        f"Warning: {ingest_report.quarantined} event(s) quarantined during ingest",
+                        file=sys.stderr,
+                    )
         except (ValueError, RuntimeError) as e:
             print(str(e), file=sys.stderr)
             raise SystemExit(1) from None

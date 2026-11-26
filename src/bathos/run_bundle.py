@@ -202,6 +202,7 @@ def _probe_sidecar_bytes(
 
     candidates.extend(
         [
+            Path.home() / ".bth" / "sidecar-cache" / sidecar_sha256[:2] / f"{sidecar_sha256}.bth.toml",
             Path.home() / ".bth" / "sidecar-cache" / f"{sidecar_sha256}.bth.toml",
             catalog_dir / "imported_sidecars" / run_id / f"{sidecar_sha256}.bth.toml",
             catalog_dir / "sidecars" / "snapshots" / f"{sidecar_sha256}.bth.toml",
@@ -1421,19 +1422,23 @@ def _run_end_outputs_signature(ev: dict[str, Any]) -> bytes:
     )
 
 
-def _check_equivocation(
-    cd: Path, vb: _VerifiedBundle
+def _check_events_equivocation(
+    cd: Path,
+    *,
+    run_id: str,
+    events: list[dict[str, Any]],
+    event_digests: dict[str, str],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    eids = [str(ev["eid"]) for ev in vb.events]
+    eids = [str(ev["eid"]) for ev in events]
     existing_digests, existing_run_events = _load_catalog_events_for_equivocation(
-        cd, eids, vb.run_id
+        cd, eids, run_id
     )
 
     new_events: list[dict[str, Any]] = []
     skipped_eids: list[str] = []
-    for ev in vb.events:
+    for ev in events:
         eid = str(ev["eid"])
-        digest = vb.event_digests[eid]
+        digest = event_digests[eid]
         prior = existing_digests.get(eid)
         if prior is not None:
             if prior != digest:
@@ -1449,11 +1454,11 @@ def _check_equivocation(
 
     existing_by_kind: dict[str, list[dict[str, Any]]] = {}
     for ev in existing_run_events:
-        if ev.get("entity") == [vb.run_id]:
+        if ev.get("entity") == [run_id]:
             existing_by_kind.setdefault(str(ev.get("kind")), []).append(ev)
 
     for ev in new_events:
-        if ev.get("entity") != [vb.run_id]:
+        if ev.get("entity") != [run_id]:
             continue
         kind = ev.get("kind")
 
@@ -1466,11 +1471,11 @@ def _check_equivocation(
                     "sidecar_sha256"
                 ):
                     raise RunImportConflictError(
-                        f"Incoming run.started sidecar_sha256 conflicts with remote_dispatched stub for {vb.run_id}"
+                        f"Incoming run.started sidecar_sha256 conflicts with remote_dispatched stub for {run_id}"
                     )
                 if st_d.get("git_hash") and st_d.get("git_hash") != inc_d.get("git_hash"):
                     raise RunImportConflictError(
-                        f"Incoming run.started git_hash conflicts with remote_dispatched stub for {vb.run_id}"
+                        f"Incoming run.started git_hash conflicts with remote_dispatched stub for {run_id}"
                     )
 
         # Distinct-eid genesis equivocation
@@ -1479,7 +1484,7 @@ def _check_equivocation(
             for ex in existing_by_kind["run.started"]:
                 if _genesis_signature(ex) != inc_sig:
                     raise RunImportConflictError(
-                        f"Conflicting run.started genesis event for run {vb.run_id}"
+                        f"Conflicting run.started genesis event for run {run_id}"
                     )
 
         # Distinct-eid terminal equivocation
@@ -1488,7 +1493,7 @@ def _check_equivocation(
             for ex in existing_by_kind["run.finished"]:
                 if _terminal_signature(ex) != inc_term:
                     raise RunImportConflictError(
-                        f"Conflicting run.finished terminal event for run {vb.run_id}"
+                        f"Conflicting run.finished terminal event for run {run_id}"
                     )
 
         # Distinct-eid run_end outputs equivocation
@@ -1506,10 +1511,21 @@ def _check_equivocation(
                 for ex in existing_run_end:
                     if _run_end_outputs_signature(ex) != inc_out:
                         raise RunImportConflictError(
-                            f"Conflicting run.outputs_hashed (phase='run_end') event for run {vb.run_id}"
+                            f"Conflicting run.outputs_hashed (phase='run_end') event for run {run_id}"
                         )
 
     return new_events, skipped_eids
+
+
+def _check_equivocation(
+    cd: Path, vb: _VerifiedBundle
+) -> tuple[list[dict[str, Any]], list[str]]:
+    return _check_events_equivocation(
+        cd,
+        run_id=vb.run_id,
+        events=vb.events,
+        event_digests=vb.event_digests,
+    )
 
 
 def _check_parent_dirs_no_symlink(dest_dir: Path, relpath: str) -> None:

@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import uuid
 from contextlib import suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -1178,6 +1179,47 @@ def _portable_sidecar_path(path: Path, cwd: Path) -> str:
     return str(path)
 
 
+def _is_remote_launch_context(cwd: Path) -> bool:
+    """True when running under a remote launch context requiring runtime output binding."""
+    if os.environ.get("BTH_REMOTE_LAUNCH") == "1" or os.environ.get("BTH_REQUIRE_OUTPUTS") == "1":
+        return True
+    if (cwd / ".bth" / "remote_launch").exists():
+        return True
+    try:
+        from bathos.workspace import resolve_workspace
+
+        ws_root = resolve_workspace(cwd).fs_root
+        if (ws_root / ".bth" / "remote_launch").exists():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _cache_sidecar_bytes(sidecar_path: Path, sidecar_sha256: str) -> None:
+    """Best-effort content-addressed cache of raw sidecar TOML under ~/.bth/sidecar-cache/<sha[:2]>/."""
+    if not sidecar_sha256:
+        return
+    try:
+        cache_dir = Path.home() / ".bth" / "sidecar-cache" / sidecar_sha256[:2]
+        cache_file = cache_dir / f"{sidecar_sha256}.bth.toml"
+        if cache_file.is_file():
+            return
+        raw = sidecar_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != sidecar_sha256:
+            return
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_name(f".{cache_file.name}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_bytes(raw)
+            os.replace(tmp, cache_file)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    except OSError:
+        pass
+
+
 def run_script(
     argv: list[str],
     project_slug: str,
@@ -1195,6 +1237,7 @@ def run_script(
     component_sidecar_sha256: str | None = None,
     seed: int | None = None,
     from_observation: str | None = None,
+    allow_unbound_outputs: bool = False,
 ) -> int:
     """Public entry point: one call is one `bth run` unit of work (runlog
     Mode section). `unit_of_work()` fixes the log-mode flag for the whole
@@ -1223,6 +1266,7 @@ def run_script(
             component_sidecar_sha256=component_sidecar_sha256,
             seed=seed,
             from_observation=from_observation,
+            allow_unbound_outputs=allow_unbound_outputs,
         )
     return exit_code
 
@@ -1244,6 +1288,7 @@ def _run_script_impl(
     component_sidecar_sha256: str | None = None,
     seed: int | None = None,
     from_observation: str | None = None,
+    allow_unbound_outputs: bool = False,
 ) -> int:
     cwd = Path.cwd() if cwd is None else cwd
     # Resolve the lock/ignore settings FIRST, before any run record or event is written: a malformed config or an
@@ -1651,6 +1696,21 @@ def _run_script_impl(
             except Exception:
                 pass
 
+    # Option E (spec 261125 §8.1): remote launches refuse to start without declared outputs unless
+    # --bth-allow-unbound-outputs is explicitly passed.
+    remote_strict_outputs = _is_remote_launch_context(cwd) and not allow_unbound_outputs
+    declared_sidecar_roots = list(sidecar.outputs.roots) if sidecar and sidecar.outputs else []
+    caller_bth_output_dir = bool(os.environ.get("BTH_OUTPUT_DIR", "").strip())
+    if remote_strict_outputs and not (
+        declared_sidecar_roots or output_paths or caller_bth_output_dir
+    ):
+        from bathos.errors import RemoteOutputsUndeclaredError
+
+        raise RemoteOutputsUndeclaredError(
+            "Remote launch requires declared outputs ([outputs] roots in sidecar, --output-paths, "
+            "or BTH_OUTPUT_DIR); pass --bth-allow-unbound-outputs to override."
+        )
+
     # Probe only once the gates have let the run through: a refused run must not first spend
     # up to PROBE_TIMEOUT_S (or a `uv run` sync) describing an environment it will never use.
     # capture_dependency_provenance never raises.
@@ -1933,6 +1993,9 @@ def _run_script_impl(
             event("run.error", phase="persist", exc_type=type(e).__name__, exc_msg=str(e))
             print(f"Error: {e}", file=sys.stderr)
             return 1
+
+    if bundle and bundle.found and bundle.path and bundle.sha256:
+        _cache_sidecar_bytes(bundle.path, bundle.sha256)
 
     results_temp_dir = Path(tempfile.gettempdir())
 
@@ -2572,11 +2635,22 @@ def _run_script_impl(
                 code=outputs_payload["refused"],
                 detail=outputs_payload.get("refused_detail"),
             )
-            print(
-                f"warning: output roots refused ({outputs_payload['refused']}: "
-                f"{outputs_payload.get('refused_detail')}); this run has no reference hash set",
-                file=sys.stderr,
-            )
+            if remote_strict_outputs:
+                print(
+                    f"Error: remote_outputs_undeclared: output roots refused ({outputs_payload['refused']}: "
+                    f"{outputs_payload.get('refused_detail')})",
+                    file=sys.stderr,
+                )
+                if exit_code == 0:
+                    exit_code = 1
+                run.exit_code = exit_code
+                run.status = "failed"
+            else:
+                print(
+                    f"warning: output roots refused ({outputs_payload['refused']}: "
+                    f"{outputs_payload.get('refused_detail')}); this run has no reference hash set",
+                    file=sys.stderr,
+                )
         try:
             emit_event(
                 kind="run.outputs_hashed",

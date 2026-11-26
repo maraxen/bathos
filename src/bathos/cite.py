@@ -147,21 +147,29 @@ def format_citation(run: Run, fmt: str = "markdown") -> str:
     manifest_path_display = run.manifest_path if run.manifest_path else "not recorded — pre-v0.6"
     sidecar_hash = run.sidecar_sha256 if run.sidecar_sha256 else "not recorded — pre-v0.6"
 
+    imported_host = getattr(run, "imported_from_host", None)
+    imp_method = getattr(run, "import_method", None) or "imported"
+    bundle_sha = getattr(run, "bundle_sha256", None) or ""
+    sha_disp = bundle_sha[:12] if bundle_sha else "—"
+
     if fmt == "json":
-        return json.dumps(
-            {
-                "run_id": run.id,
-                "project_slug": run.project_slug,
-                "command": run.command,
-                "sidecar_sha256": sidecar_hash,
-                "manifest_sha256": run.manifest_sha256,
-                "manifest_path": run.manifest_path,
-                "git_sha": run.git_hash,
-                "outcome": run.outcome or "unknown",
-                "timestamp": str(run.timestamp),
-            },
-            indent=2,
-        )
+        payload = {
+            "run_id": run.id,
+            "project_slug": run.project_slug,
+            "command": run.command,
+            "sidecar_sha256": sidecar_hash,
+            "manifest_sha256": run.manifest_sha256,
+            "manifest_path": run.manifest_path,
+            "git_sha": run.git_hash,
+            "outcome": run.outcome or "unknown",
+            "timestamp": str(run.timestamp),
+        }
+        if imported_host:
+            payload["imported_from_host"] = imported_host
+            payload["import_method"] = imp_method
+            payload["imported_at"] = getattr(run, "imported_at", None)
+            payload["bundle_sha256"] = bundle_sha or None
+        return json.dumps(payload, indent=2)
 
     # markdown (default)
     lines = [
@@ -174,6 +182,8 @@ def format_citation(run: Run, fmt: str = "markdown") -> str:
         f"  Outcome:          {run.outcome or 'unknown'}",
         f"  Timestamp:        {run.timestamp}",
     ]
+    if imported_host:
+        lines.append(f"  Imported from:    {imported_host} ({imp_method}, bundle {sha_disp})")
     return "\n".join(lines)
 
 

@@ -86,14 +86,32 @@ def require_project_config_path() -> Path:
 
 
 def parse_since(since: str | None) -> datetime | None:
-    """Parse a relative-time filter like '7d' or '24h' into a UTC datetime."""
-    if since is None:
+    """Parse a relative-time filter ('7d', '24h', '30m', '2w') or ISO-8601 timestamp into a UTC datetime."""
+    if not since:
         return None
-    if since.endswith("d"):
-        return datetime.now(UTC) - timedelta(days=float(since[:-1]))
-    if since.endswith("h"):
-        return datetime.now(UTC) - timedelta(hours=float(since[:-1]))
-    return None
+    s = since.strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("d"):
+            return datetime.now(UTC) - timedelta(days=float(s[:-1]))
+        if s.endswith("h"):
+            return datetime.now(UTC) - timedelta(hours=float(s[:-1]))
+        if s.endswith("m"):
+            return datetime.now(UTC) - timedelta(minutes=float(s[:-1]))
+        if s.endswith("w"):
+            return datetime.now(UTC) - timedelta(weeks=float(s[:-1]))
+        if s.endswith("s"):
+            return datetime.now(UTC) - timedelta(seconds=float(s[:-1]))
+    except ValueError:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except ValueError:
+        return None
 
 
 def soft_project_slug() -> str | None:

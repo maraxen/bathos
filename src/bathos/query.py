@@ -1228,6 +1228,8 @@ def resolve_local_sidecar_path(
             return imported_cached.resolve()
 
         for snap in (
+            Path.home() / ".bth" / "sidecar-cache" / expected_sha[:2] / f"{expected_sha}.bth.toml",
+            Path.home() / ".bth" / "sidecar-cache" / f"{expected_sha}.bth.toml",
             cd / "sidecars" / "snapshots" / f"{expected_sha}.bth.toml",
             cd / "sidecars" / "snapshots" / f"{run.id}.bth.toml",
         ):

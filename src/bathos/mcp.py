@@ -658,6 +658,19 @@ def get_run_tool(
         "sidecar_path": run.sidecar_path,
         "sidecar_sha256": run.sidecar_sha256,
     }
+    from bathos.query import latest_import_receipt, resolve_local_sidecar_path
+
+    resolved_sc = resolve_local_sidecar_path(run, cat_dir)
+    run_dict["resolved_sidecar_path"] = str(resolved_sc) if resolved_sc else None
+    imported_host = getattr(run, "imported_from_host", None)
+    if imported_host:
+        run_dict["imported_from_host"] = imported_host
+        run_dict["imported_at"] = getattr(run, "imported_at", None)
+        run_dict["import_method"] = getattr(run, "import_method", None)
+        run_dict["bundle_sha256"] = getattr(run, "bundle_sha256", None)
+        receipt = latest_import_receipt(run.id, cat_dir)
+        if receipt and receipt.get("local_worktree_root"):
+            run_dict["local_worktree_root"] = receipt["local_worktree_root"]
     from bathos.validity import resolve_validity
 
     v_map = resolve_validity([run.id], cat_dir)
@@ -2299,6 +2312,7 @@ def reap_tool(
     apply: bool = False,
     revert: bool = False,
     revert_ids: str = "",
+    include_remote: bool = False,
 ) -> dict:
     """Reap orphaned runs by marking them abandoned.
 
@@ -2309,6 +2323,7 @@ def reap_tool(
         apply: Actually write reaped runs (default False)
         revert: Restore prior_status instead of marking abandoned
         revert_ids: Comma-separated run IDs to revert (only with --revert)
+        include_remote: Also reap stale non-SLURM runs from remote hosts (default False)
 
     Returns:
         Dict with reap results
@@ -2326,6 +2341,7 @@ def reap_tool(
             apply=apply,
             revert=revert,
             revert_ids=revert_ids_list if revert else None,
+            include_remote=include_remote,
         )
     except ReapError as e:
         return {
@@ -2757,11 +2773,113 @@ def capability_probe_tool(catalog_dir: str = "") -> dict:
     }
 
 
+def _bundle_tool_error(exc: Exception) -> dict:
+    from bathos.errors import EXCEPTION_TO_CODE
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.query import AmbiguousRunId
+
+    if isinstance(exc, OutputTierError):
+        return _output_tier_error_result(exc)
+    if isinstance(exc, AmbiguousRunId):
+        code = BathosErrorCode.RUN_PREFIX_AMBIGUOUS
+    else:
+        code = EXCEPTION_TO_CODE.get(type(exc).__name__, BathosErrorCode.INVALID_PARAM)
+    return {
+        "ok": False,
+        "error": str(exc),
+        "error_code": code.value,
+        "resolution_hint": RESOLUTION_HINTS.get(code, ""),
+    }
+
+
+@cisternal.tool(registry="bathos-cli", name="bundle_export", cli_group="bundle", cli_name="export")
+def bundle_export_tool(
+    run_id: str = "",
+    output_path: str = "",
+    project: str = "",
+    include_outputs: bool = False,
+    include_git: bool = False,
+    with_campaign: bool = False,
+    allow_missing_sidecar: bool = False,
+    max_output_bytes: int = 512 * 1024 * 1024,
+    catalog_dir: str = "",
+) -> dict:
+    """Export a single run and its causal closure into a verifiable ``bathos.bundle.v1`` archive."""
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.query import AmbiguousRunId
+    from bathos.run_bundle import export_run_bundle
+
+    if not run_id:
+        return {"error": "run_id parameter is required"}
+    if not output_path:
+        return {"error": "output_path (-o/--out/--output-path) is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        return export_run_bundle(
+            run_id,
+            output_path,
+            project=project or None,
+            include_outputs=include_outputs,
+            include_git=include_git,
+            with_campaign=with_campaign,
+            allow_missing_sidecar=allow_missing_sidecar,
+            max_output_bytes=max_output_bytes,
+            catalog_dir=cat_dir,
+        )
+    except (BathosError, OutputTierError, AmbiguousRunId, ValueError, OSError) as exc:
+        return _bundle_tool_error(exc)
+
+
+bundle_export_tool.__annotations__["output_path"] = Annotated[
+    str, cyclopts.Parameter(name=["--out", "-o", "--output-path"])
+]
+
+
+@cisternal.tool(registry="bathos-cli", name="bundle_import", cli_group="bundle", cli_name="import")
+def bundle_import_tool(
+    bundle_path: str = "",
+    worktree_root: str = "",
+    extract_outputs: str = "",
+    overwrite_outputs: bool = False,
+    allow_missing_sidecar: bool = False,
+    max_output_bytes: int = 512 * 1024 * 1024,
+    dry_run: bool = False,
+    catalog_dir: str = "",
+) -> dict:
+    """Verify and import a ``bathos.bundle.v1`` archive into the local catalog."""
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.run_bundle import import_run_bundle
+
+    if not bundle_path:
+        return {"error": "bundle_path parameter is required"}
+    cat_dir = _get_catalog_dir(catalog_dir or None)
+    try:
+        return import_run_bundle(
+            bundle_path,
+            worktree_root=worktree_root or None,
+            extract_outputs=extract_outputs or None,
+            overwrite_outputs=overwrite_outputs,
+            allow_missing_sidecar=allow_missing_sidecar,
+            max_output_bytes=max_output_bytes,
+            dry_run=dry_run,
+            catalog_dir=cat_dir,
+        )
+    except (BathosError, OutputTierError, ValueError, OSError) as exc:
+        return _bundle_tool_error(exc)
+
+
 @cisternal.tool(registry="bathos-cli", name="sync", cli_name="sync")
 def sync_tool(
     remote_name: str = "",
     pull: bool = False,
     catalog_dir: str = "",
+    run_ids: list[str] | None = None,
+    project: str = "",
+    since: str = "",
+    include_outputs: bool = False,
+    with_campaign: bool = False,
+    allow_missing_sidecar: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """Sync catalog to/from remote.
 
@@ -2769,17 +2887,21 @@ def sync_tool(
         catalog_dir: Catalog directory (empty = use default)
         remote_name: Remote name from .bth.toml (auto-selected if only one configured)
         pull: Pull from remote (default: push to remote)
+        run_ids: Specific run ID(s) or prefixes to selectively pull
+        project: Project slug filter for selective pull
+        since: Time cutoff (e.g. '24h', '7d', or ISO-8601) for selective pull
+        include_outputs: Include output blobs when pulling run bundles
+        with_campaign: Include campaign events when pulling run bundles
+        allow_missing_sidecar: Allow pulling runs whose raw sidecar bytes are absent
+        dry_run: Resolve matching selective-pull runs with zero local writes
 
     Returns:
-        Dict with sync result. With `pull=True` in log mode, also carries
-        `cluster_log_pulled` (bool: at least one of the log/fallback/mirror
-        sub-pulls actually succeeded -- NOT merely "no exception raised";
-        False when the installed myxcel predates `pull-path`, myxcel
-        backlog #5880) and, when anything
-        failed, `cluster_log_pull_failures` (list of per-subpath reasons) or
-        `cluster_log_pull_error` (a single top-level failure, e.g. an
-        unconfigured remote).
+        Dict with sync result.
     """
+    from bathos.output_tiers.reference import OutputTierError
+    from bathos.query import AmbiguousRunId
+    from bathos.sync import selective_pull_runs
+
     cat_dir = _get_catalog_dir(catalog_dir or None)
     # Load ProjectConfig from .bth.toml in project root
     config_path = find_project_config(Path.cwd())
@@ -2797,8 +2919,41 @@ def sync_tool(
             names = ", ".join(f"'{r}'" for r in sorted(remotes))
             return {"error": f"Multiple remotes configured ({names}). Specify one explicitly."}
 
+    selective = bool(
+        run_ids
+        or project
+        or since
+        or include_outputs
+        or with_campaign
+        or allow_missing_sidecar
+        or dry_run
+    )
+    if selective:
+        if not pull:
+            return {
+                "error": "Selective pull options (--run, --project, --since, --with-outputs, --with-campaign, --dry-run) require --pull"
+            }
+        try:
+            return selective_pull_runs(
+                remote_name,
+                config,
+                cat_dir,
+                run_ids=run_ids,
+                project=project,
+                since=since,
+                include_outputs=include_outputs,
+                with_campaign=with_campaign,
+                allow_missing_sidecar=allow_missing_sidecar,
+                dry_run=dry_run,
+                project_root=config_path.parent,
+            )
+        except (BathosError, OutputTierError, AmbiguousRunId) as exc:
+            return _bundle_tool_error(exc)
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}
+
     result = sync_catalog(remote_name, config, cat_dir, pull=pull)
-    result_dict = {
+    result_dict: dict[str, Any] = {
         "transferred": result.transferred,
         "duration_s": result.duration_s,
         "remote": result.remote,
@@ -2812,6 +2967,7 @@ def sync_tool(
         from bathos.runlog.mode import is_log_mode
 
         if is_log_mode(cat_dir):
+            from bathos.runlog.ingest import run_ingest
             from bathos.runlog.project_id import read_project_id
             from bathos.runlog.resolve import resolve_log_root
             from bathos.sync import pull_cluster_log
@@ -2827,17 +2983,26 @@ def sync_tool(
                     result_dict["cluster_log_pulled"] = False
                     result_dict["cluster_log_pull_error"] = str(e)
                 else:
-                    # A normal return is NOT success: pull_cluster_log catches
-                    # each of the three sub-pulls individually and always
-                    # returns, even when every one of them failed (e.g. an
-                    # installed myxcel that predates `pull-path`). Report
-                    # honestly from the per-subpath result, not from the
-                    # absence of a raised exception.
                     result_dict["cluster_log_pulled"] = pull_result.any_pulled
                     if pull_result.failures:
                         result_dict["cluster_log_pull_failures"] = pull_result.failures
+            report = run_ingest(cat_dir)
+            result_dict["ingest_report"] = {
+                "new_events": report.new_events,
+                "skipped_existing": report.skipped_existing,
+                "quarantined": report.quarantined,
+                "entities_refolded": report.entities_refolded,
+            }
 
     return result_dict
+
+
+sync_tool.__annotations__["run_ids"] = Annotated[
+    list[str] | None, cyclopts.Parameter(name=["--run", "--run-id"])
+]
+sync_tool.__annotations__["include_outputs"] = Annotated[
+    bool, cyclopts.Parameter(name=["--with-outputs", "--include-outputs"])
+]
 
 
 @cisternal.tool(registry="bathos-cli", name="init", cli_name="init")
@@ -2996,6 +3161,7 @@ def run_tool(
     component_sidecar_sha256: str = "",
     seed: int | None = None,
     from_observation: str = "",
+    allow_unbound_outputs: bool = False,
 ) -> dict:
     """Run a script and record provenance.
 
@@ -3076,6 +3242,7 @@ def run_tool(
     # run_script (invalid sidecar, gate-check failure) bail before a Run is ever
     # constructed/persisted, and thus never touch run_uuid_var themselves — without
     # this reset a failed call in the same context could report a prior call's ID.
+    from bathos.errors import RemoteOutputsUndeclaredError
     from bathos.runner import run_outcome_var
 
     run_uuid_var.set(None)
@@ -3104,8 +3271,16 @@ def run_tool(
             component_sidecar_sha256=component_sidecar_sha256 or None,
             seed=seed,
             from_observation=from_observation or None,
+            allow_unbound_outputs=allow_unbound_outputs,
         )
         outcome_pair = run_outcome_var.get(None)
+    except RemoteOutputsUndeclaredError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "error_code": BathosErrorCode.REMOTE_OUTPUTS_UNDECLARED.value,
+            "resolution_hint": RESOLUTION_HINTS[BathosErrorCode.REMOTE_OUTPUTS_UNDECLARED],
+        }
     finally:
         run_advisories_var.reset(advisories_token)
         run_outcome_var.reset(outcome_token)
@@ -3153,6 +3328,7 @@ def run_cli_tool(
     component_sidecar_sha256: str = "",
     bth_seed: int | None = None,
     from_observation: str = "",
+    bth_allow_unbound_outputs: bool = False,
 ) -> dict:
     """CLI-facing wrapper over run_tool: propagates the run script's own exit
     code as the `bth run` process's exit code (matching the shipped Typer
@@ -3189,6 +3365,7 @@ def run_cli_tool(
         component_sidecar_sha256=component_sidecar_sha256,
         seed=bth_seed,
         from_observation=from_observation,
+        allow_unbound_outputs=bth_allow_unbound_outputs,
     )
     print(json.dumps(result, indent=2, default=str))
     raise SystemExit(1 if result.get("error") else result.get("exit_code", 0))
@@ -4460,6 +4637,7 @@ async def mcp_reap_tool(
     apply: bool = False,
     revert: bool = False,
     revert_ids: str = "",
+    include_remote: bool = False,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Reap orphaned runs by marking them abandoned.
@@ -4472,6 +4650,7 @@ async def mcp_reap_tool(
         apply=apply,
         revert=revert,
         revert_ids=revert_ids,
+        include_remote=include_remote,
     )
 
 
@@ -4534,6 +4713,62 @@ async def mcp_capability_probe_tool(
     return capability_probe_tool(catalog_dir=catalog_dir)
 
 
+@cisternal.tool(registry="bathos", name="bundle_export")
+@traced_tool
+async def mcp_bundle_export_tool(
+    run_id: str = "",
+    output_path: str = "",
+    project: str = "",
+    include_outputs: bool = False,
+    include_git: bool = False,
+    with_campaign: bool = False,
+    allow_missing_sidecar: bool = False,
+    max_output_bytes: int = 512 * 1024 * 1024,
+    catalog_dir: str = "",
+) -> dict:
+    """Export a single run and its causal closure into a verifiable ``bathos.bundle.v1`` archive."""
+    return bundle_export_tool(
+        run_id=run_id,
+        output_path=output_path,
+        project=project,
+        include_outputs=include_outputs,
+        include_git=include_git,
+        with_campaign=with_campaign,
+        allow_missing_sidecar=allow_missing_sidecar,
+        max_output_bytes=max_output_bytes,
+        catalog_dir=catalog_dir,
+    )
+
+
+@cisternal.tool(registry="bathos", name="bundle_import")
+@traced_tool
+@require_write_token
+async def mcp_bundle_import_tool(
+    bundle_path: str = "",
+    worktree_root: str = "",
+    extract_outputs: str = "",
+    overwrite_outputs: bool = False,
+    allow_missing_sidecar: bool = False,
+    max_output_bytes: int = 512 * 1024 * 1024,
+    dry_run: bool = False,
+    catalog_dir: str = "",
+    token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
+) -> dict:
+    """Verify and import a ``bathos.bundle.v1`` archive into the local catalog.
+
+    Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
+    return bundle_import_tool(
+        bundle_path=bundle_path,
+        worktree_root=worktree_root,
+        extract_outputs=extract_outputs,
+        overwrite_outputs=overwrite_outputs,
+        allow_missing_sidecar=allow_missing_sidecar,
+        max_output_bytes=max_output_bytes,
+        dry_run=dry_run,
+        catalog_dir=catalog_dir,
+    )
+
+
 @cisternal.tool(registry="bathos", name="sync")
 @traced_tool
 @require_write_token
@@ -4541,12 +4776,30 @@ async def mcp_sync_tool(
     catalog_dir: str = "",
     remote_name: str = "",
     pull: bool = False,
+    run_ids: list[str] | None = None,
+    project: str = "",
+    since: str = "",
+    include_outputs: bool = False,
+    with_campaign: bool = False,
+    allow_missing_sidecar: bool = False,
+    dry_run: bool = False,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Sync catalog to/from remote.
 
     Requires token= (~/.bth/mcp_token) except over stdio (debt #619, #2841)."""
-    return sync_tool(catalog_dir=catalog_dir, remote_name=remote_name, pull=pull)
+    return sync_tool(
+        catalog_dir=catalog_dir,
+        remote_name=remote_name,
+        pull=pull,
+        run_ids=run_ids,
+        project=project,
+        since=since,
+        include_outputs=include_outputs,
+        with_campaign=with_campaign,
+        allow_missing_sidecar=allow_missing_sidecar,
+        dry_run=dry_run,
+    )
 
 
 @cisternal.tool(registry="bathos", name="init")
@@ -4603,6 +4856,7 @@ async def mcp_run_tool(
     no_sidecar: bool = False,
     sidecar: str = "",
     from_observation: str = "",
+    allow_unbound_outputs: bool = False,
     token: str = "",  # noqa: ARG001 — consumed by @require_write_token, not the tool body
 ) -> dict:
     """Run a script and record provenance.
@@ -4621,6 +4875,7 @@ async def mcp_run_tool(
         no_sidecar=no_sidecar,
         sidecar=sidecar,
         from_observation=from_observation,
+        allow_unbound_outputs=allow_unbound_outputs,
     )
 
 
@@ -6310,6 +6565,8 @@ async def mcp_outputs_adopt_tool(
     reason: str = "",
     retract: str = "",
     worktree_root: str = "",
+    allow_external_root: bool = False,
+    relpath_base: str = "",
     dry_run: bool = False,
     catalog_dir: str | None = None,
 ) -> dict:
@@ -6320,6 +6577,8 @@ async def mcp_outputs_adopt_tool(
         reason=reason,
         retract=retract,
         worktree_root=worktree_root,
+        allow_external_root=allow_external_root,
+        relpath_base=relpath_base,
         dry_run=dry_run,
         catalog_dir=catalog_dir or "",
     )
@@ -6359,6 +6618,8 @@ def outputs_adopt_tool(
     reason: str = "",
     retract: str = "",
     worktree_root: str = "",
+    allow_external_root: bool = False,
+    relpath_base: str = "",
     dry_run: bool = False,
     catalog_dir: str = "",
 ) -> dict:
@@ -6388,6 +6649,8 @@ def outputs_adopt_tool(
             list(root or []),
             reason,
             worktree_root=worktree_root or None,
+            allow_external_root=allow_external_root,
+            relpath_base=relpath_base or None,
             dry_run=dry_run,
         )
     except (OutputTierError, RunNotLaunchedError) as e:
@@ -8556,6 +8819,8 @@ _WIRED = wire(
         "check",
         "capability_probe",
         "sync",
+        "bundle_export",
+        "bundle_import",
         "init",
         "log_restore",
         "run",

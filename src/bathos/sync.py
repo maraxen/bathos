@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from bathos.catalog import iter_run_fragments
 from bathos.cluster_catalog import ensure_remote_catalog_dir, remote_catalog_path
@@ -536,3 +542,749 @@ def _parse_transferred_count(rsync_output: str) -> int:
                 except (ValueError, IndexError):
                     pass
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Option A: Selective pull via remote `bth bundle export` + `pull_path`,
+# with mirror fallback (`sync_pull_mirror_unverified`). Never imports myxcel
+# and never streams binary archive bytes over SSH stdout (NC-10).
+# ---------------------------------------------------------------------------
+
+_SSH_BASE = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+
+_REMOTE_SELECTIVE_EXPORT_PY = r"""
+import json, os, shutil, subprocess, sys, uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+cfg = json.loads(sys.argv[1])
+bth_bin = shutil.which("bth")
+if not bth_bin:
+    cand = Path.home() / ".local" / "bin" / "bth"
+    if cand.is_file():
+        bth_bin = str(cand)
+if not bth_bin:
+    print(json.dumps({"mode": "no_bundle_cmd", "reason": "bth not found"}))
+    sys.exit(0)
+
+probe = subprocess.run([bth_bin, "bundle", "export", "--help"], capture_output=True, text=True)
+probe_txt = (probe.stdout + "\n" + probe.stderr).lower()
+if probe.returncode != 0 or any(m in probe_txt for m in ("no such command", "unknown", "unused tokens")):
+    print(json.dumps({"mode": "no_bundle_cmd", "reason": "bth bundle export unavailable"}))
+    sys.exit(0)
+
+run_ids = cfg.get("run_ids") or []
+project = cfg.get("project") or ""
+since_iso = cfg.get("since_iso") or ""
+include_outputs = bool(cfg.get("include_outputs"))
+with_campaign = bool(cfg.get("with_campaign"))
+allow_missing_sidecar = bool(cfg.get("allow_missing_sidecar"))
+dry_run = bool(cfg.get("dry_run"))
+
+def _parse_ts(raw):
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+since_dt = _parse_ts(since_iso)
+
+matched = []
+if since_dt is not None or not run_ids or dry_run:
+    find_cmd = [bth_bin, "find", "--include-superseded"]
+    if project:
+        find_cmd.extend(["--project", project])
+    res = subprocess.run(find_cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        sys.stderr.write(res.stderr or res.stdout)
+        sys.exit(res.returncode or 1)
+    try:
+        payload = json.loads(res.stdout)
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"Invalid JSON from remote bth find: {exc}\n")
+        sys.exit(1)
+    runs = payload.get("runs") or []
+    if since_dt is not None:
+        filtered = []
+        for r in runs:
+            rt = _parse_ts(r.get("timestamp"))
+            if rt is not None and rt >= since_dt:
+                filtered.append(r)
+        runs = filtered
+    if run_ids:
+        selected = []
+        seen = set()
+        for prefix in run_ids:
+            hits = [r for r in runs if str(r.get("id", "")).startswith(prefix)]
+            if not hits:
+                sys.stderr.write(f"run_not_found: {prefix}\n")
+                sys.exit(2)
+            if len(hits) > 1:
+                sys.stderr.write(f"run_prefix_ambiguous: {prefix} matches {len(hits)} runs\n")
+                sys.exit(2)
+            rid = hits[0]["id"]
+            if rid not in seen:
+                seen.add(rid)
+                selected.append(rid)
+        matched = selected
+    else:
+        matched = [str(r["id"]) for r in runs if r.get("id")]
+else:
+    matched = list(dict.fromkeys(run_ids))
+
+if dry_run:
+    print(json.dumps({"mode": "bundle", "dry_run": True, "matched_runs": matched, "staged_dir": None, "staged_files": [], "exports": []}))
+    sys.exit(0)
+
+if not matched:
+    print(json.dumps({"mode": "bundle", "dry_run": False, "matched_runs": [], "staged_dir": None, "staged_files": [], "exports": []}))
+    sys.exit(0)
+
+batch_name = "sync-" + uuid.uuid4().hex[:12]
+staged_abs = Path.home() / ".bth" / "tmp" / batch_name
+staged_abs.mkdir(parents=True, exist_ok=True)
+staged_rel = f"~/.bth/tmp/{batch_name}"
+
+exports = []
+staged_files = []
+resolved_ids = []
+try:
+    for idx, rid in enumerate(matched):
+        out_name = f"{idx:04d}.bthbundle"
+        out_abs = staged_abs / out_name
+        cmd = [bth_bin, "bundle", "export", rid, "-o", str(out_abs)]
+        if project:
+            cmd.extend(["--project", project])
+        if include_outputs:
+            cmd.append("--include-outputs")
+        if with_campaign:
+            cmd.append("--with-campaign")
+        if allow_missing_sidecar:
+            cmd.append("--allow-missing-sidecar")
+        exp = subprocess.run(cmd, capture_output=True, text=True)
+        if exp.returncode != 0:
+            raise RuntimeError((exp.stderr or exp.stdout or f"bundle export failed for {rid}").strip())
+        exp_json = json.loads(exp.stdout)
+        if exp_json.get("error"):
+            raise RuntimeError(str(exp_json["error"]))
+        exports.append(exp_json)
+        staged_files.append(f"{staged_rel}/{out_name}")
+        resolved_ids.append(str(exp_json.get("run_id") or rid))
+except Exception as exc:
+    shutil.rmtree(staged_abs, ignore_errors=True)
+    sys.stderr.write(f"{exc}\n")
+    sys.exit(1)
+
+print(json.dumps({
+    "mode": "bundle",
+    "dry_run": False,
+    "batch_name": batch_name,
+    "matched_runs": resolved_ids,
+    "staged_dir": staged_rel,
+    "staged_files": staged_files,
+    "exports": exports,
+}))
+""".strip()
+
+
+def _parse_since_timestamp(since: str) -> datetime | None:
+    if not since or not since.strip():
+        return None
+    from bathos.cli_common import parse_since
+
+    dt = parse_since(since)
+    if dt is None:
+        raise ValueError(
+            f"Invalid --since value {since!r}: expected duration (e.g. '24h', '7d') or ISO-8601 timestamp"
+        )
+    return dt
+
+
+def _parse_event_ts(raw: object) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _collect_staged_causal_closure(
+    all_events: list[dict[str, Any]],
+    run_id: str,
+    run_row: dict[str, Any],
+    *,
+    with_campaign: bool,
+) -> list[dict[str, Any]]:
+    """Select the causal closure for ``run_id`` from an in-memory pool of staged mirror/log events."""
+    from bathos.run_bundle import _CAMPAIGN_EVENT_KINDS  # noqa: PLC2701
+
+    sc_path = run_row.get("sidecar_path") or ""
+    sc_sha = run_row.get("sidecar_sha256") or ""
+    slurm_job_id = run_row.get("slurm_job_id") or ""
+    slug = run_row.get("project_slug") or ""
+    cmd = run_row.get("command") or ""
+    campaign_id = run_row.get("campaign_id") or ""
+    derived_obs_id: str | None = None
+    raw_meta = run_row.get("metadata")
+    if isinstance(raw_meta, str) and raw_meta.strip():
+        with contextlib.suppress(json.JSONDecodeError):
+            parsed = json.loads(raw_meta)
+            if isinstance(parsed, dict) and parsed.get("derived_from_observation"):
+                derived_obs_id = str(parsed["derived_from_observation"])
+    elif isinstance(raw_meta, dict) and raw_meta.get("derived_from_observation"):
+        derived_obs_id = str(raw_meta["derived_from_observation"])
+
+    selected: dict[str, dict[str, Any]] = {}
+
+    def _keep(ev: dict[str, Any]) -> None:
+        eid = str(ev.get("eid") or "")
+        if eid and eid not in selected:
+            selected[eid] = ev
+
+    for ev in all_events:
+        kind = str(ev.get("kind") or "")
+        entity = ev.get("entity") or []
+        data = ev.get("data") or {}
+
+        if entity == [run_id]:
+            _keep(ev)
+        elif kind.startswith("anchor.") and sc_path and sc_sha:
+            if data.get("path") == sc_path and data.get("sha256") == sc_sha:
+                _keep(ev)
+        elif kind.startswith("output_copy.") and len(entity) == 2 and entity[0] == run_id:
+            _keep(ev)
+        elif kind.startswith("submit."):
+            if (slurm_job_id and data.get("slurm_job_id") == slurm_job_id) or (
+                not slurm_job_id
+                and slug
+                and sc_sha
+                and cmd
+                and data.get("project_slug") == slug
+                and data.get("sidecar_sha256") == sc_sha
+                and data.get("command") == cmd
+            ):
+                _keep(ev)
+        elif kind.startswith("edge.") and len(entity) == 3 and entity[2] == "run":
+            if run_id in (entity[0], entity[1]):
+                _keep(ev)
+        elif kind.startswith("supersession."):
+            if (data.get("entity_type") == "run" and data.get("entity_id") == run_id) or (
+                data.get("superseded_by_type") == "run" and data.get("superseded_by_id") == run_id
+            ):
+                _keep(ev)
+        elif kind.startswith("blast_radius."):
+            if (data.get("entity_type") == "run" and data.get("entity_id") == run_id) or (
+                sc_sha and data.get("entity_type") == "sidecar" and data.get("anchor_value") == sc_sha
+            ):
+                _keep(ev)
+        elif kind.startswith("trust_ledger.") and data.get("run_id") == run_id:
+            _keep(ev)
+        elif kind.startswith("archived_item."):
+            rids = data.get("run_ids")
+            if isinstance(rids, list) and run_id in rids:
+                _keep(ev)
+        elif kind.startswith("observation."):
+            if data.get("run_id") == run_id or (derived_obs_id and entity == [derived_obs_id]):
+                _keep(ev)
+        elif kind in ("validity.acknowledged", "validity.estimand_override_recorded"):
+            rids = data.get("run_ids")
+            if isinstance(rids, list) and run_id in rids:
+                _keep(ev)
+        elif with_campaign and campaign_id and (
+            entity in ([campaign_id], [campaign_id, run_id])
+            or (
+                kind.startswith("campaign_edge.")
+                and len(entity) == 3
+                and entity[2] == "campaign"
+                and campaign_id in (entity[0], entity[1])
+            )
+        ):
+            _keep(ev)
+
+    if not with_campaign:
+        filtered = {
+            eid: ev
+            for eid, ev in selected.items()
+            if ev.get("kind")
+            not in (_CAMPAIGN_EVENT_KINDS | {"campaign.run_added", "campaign_run.imported"})
+        }
+        selected = filtered
+
+    return sorted(selected.values(), key=lambda e: (e.get("ts", ""), e.get("eid", "")))
+
+
+def _mirror_fallback_selective_pull(
+    *,
+    remote_name: str,
+    host: str,
+    remote_root: str,
+    config: ProjectConfig,
+    catalog_dir: Path,
+    run_ids: list[str],
+    project: str,
+    since_dt: datetime | None,
+    with_campaign: bool,
+    allow_missing_sidecar: bool,
+    dry_run: bool,
+    project_root: Path | None,
+    worktree_root: str | Path | None,
+) -> dict[str, Any]:
+    """Fallback when remote lacks `bth bundle export`: pull mirror/log into temp staging,
+    filter causal closure, enforce guards, write `sync_pull_mirror_unverified`, and ingest."""
+    from bathos.cluster import pull_path
+    from bathos.errors import RunBundleInvalidError, RunImportConflictError
+    from bathos.output_tiers.reference import RUN_NOT_FOUND, OutputTierError
+    from bathos.query import AmbiguousRunId
+    from bathos.run_bundle import (
+        _atomic_write_bytes,
+        _canonical_bytes_strict,
+        _check_events_equivocation,
+        _check_git_commit_local,
+        _compute_digest_strict,
+        _loads_strict,
+        _now_utc_iso,
+        _probe_sidecar_bytes,
+        _resolve_local_project_roots,
+        _sanitize_path_segment,
+        _sha256_bytes,
+    )
+    from bathos.runlog.fold_runs import fold_run
+    from bathos.runlog.ingest import _RUN_KINDS, _validate_envelope, run_ingest
+    from bathos.runlog.project_id import read_project_id, register_main_root
+    from bathos.runlog.resolve import resolve_log_root
+
+    slug = project or config.slug
+    project_id: str | None = None
+    search_root = project_root or Path.cwd()
+    with contextlib.suppress(Exception):
+        lr = resolve_log_root(search_root)
+        if not lr.unaffiliated:
+            project_id = read_project_id(lr.main_root / ".bth.toml")
+    if project_id is None and config.root is not None:
+        with contextlib.suppress(Exception):
+            project_id = read_project_id(Path(config.root) / ".bth.toml")
+
+    with tempfile.TemporaryDirectory(prefix="bth-sync-mirror-") as tmp_str:
+        tmp_dir = Path(tmp_str)
+        stage_log = tmp_dir / "log"
+        stage_fallback = tmp_dir / "fallback"
+        stage_mirror = tmp_dir / "mirror"
+        for d in (stage_log, stage_fallback, stage_mirror):
+            d.mkdir(parents=True, exist_ok=True)
+
+        sources: list[tuple[str, Path]] = [
+            (f"{remote_root.rstrip('/')}/.bth/log/", stage_log),
+            (f"~/.bth/log/fallback/{slug}/", stage_fallback),
+        ]
+        if project_id and (not project or project == config.slug):
+            sources.append((f"~/.bth/log-mirror/{project_id}/", stage_mirror))
+        else:
+            sources.append((f"~/.bth/log-mirror/_null/{slug}/", stage_mirror))
+            sources.append(("~/.bth/log-mirror/", stage_mirror))
+
+        pulled_any = False
+        pull_errors: list[str] = []
+        for src, dst in sources:
+            try:
+                pull_path(host, src, str(dst) + "/")
+                pulled_any = True
+            except Exception as exc:  # noqa: BLE001 - best-effort per subpath
+                pull_errors.append(f"{src}: {exc}")
+
+        if not pulled_any and not any(tmp_dir.rglob("*.jsonl")):
+            raise RuntimeError(
+                "Mirror fallback could not pull any remote logs: " + "; ".join(pull_errors)
+            )
+
+        events_by_eid: dict[str, dict[str, Any]] = {}
+        digests_by_eid: dict[str, str] = {}
+        for jsonl_file in sorted(tmp_dir.rglob("*.jsonl")):
+            for raw_line in jsonl_file.read_text(encoding="utf-8").splitlines():
+                if not raw_line.strip():
+                    continue
+                ev = _loads_strict(raw_line)
+                err = _validate_envelope(ev)
+                if err:
+                    raise RunBundleInvalidError(f"Invalid event in staged remote mirror: {err}")
+                eid = str(ev["eid"])
+                digest = _compute_digest_strict(ev)
+                if eid in events_by_eid:
+                    if digests_by_eid[eid] != digest:
+                        raise RunImportConflictError(
+                            f"Conflicting envelope for eid={eid} across staged remote logs"
+                        )
+                    continue
+                events_by_eid[eid] = ev
+                digests_by_eid[eid] = digest
+
+        all_events = sorted(events_by_eid.values(), key=lambda e: (e.get("ts", ""), e.get("eid", "")))
+        run_events_map: dict[str, list[dict[str, Any]]] = {}
+        for ev in all_events:
+            if ev.get("kind") in _RUN_KINDS:
+                ent = ev.get("entity")
+                if isinstance(ent, list) and len(ent) == 1 and isinstance(ent[0], str):
+                    run_events_map.setdefault(ent[0], []).append(ev)
+
+        folded_by_id: dict[str, dict[str, Any]] = {}
+        for rid, reves in run_events_map.items():
+            folded = fold_run(reves)
+            if project and folded.get("project_slug") != project:
+                continue
+            if since_dt is not None:
+                rt = _parse_event_ts(folded.get("timestamp"))
+                if rt is None or rt < since_dt:
+                    continue
+            folded_by_id[rid] = folded
+
+        if run_ids:
+            matched_ids: list[str] = []
+            for prefix in run_ids:
+                hits = sorted(rid for rid in folded_by_id if rid.startswith(prefix))
+                if not hits:
+                    raise OutputTierError(RUN_NOT_FOUND, prefix)
+                if len(hits) > 1:
+                    raise AmbiguousRunId(prefix, hits)
+                if hits[0] not in matched_ids:
+                    matched_ids.append(hits[0])
+        else:
+            matched_ids = sorted(folded_by_id)
+
+        warnings: list[str] = []
+        planned: list[dict[str, Any]] = []
+        for rid in matched_ids:
+            reves = run_events_map[rid]
+            if not any(ev.get("kind") in ("run.started", "run.imported") for ev in reves):
+                raise RunBundleInvalidError(
+                    f"Remote run {rid} in mirror lacks genesis event (run.started / run.imported)"
+                )
+            folded = folded_by_id[rid]
+            if folded.get("status") == "running":
+                warnings.append(f"Run {rid} is non-terminal (status='running') on remote mirror")
+
+            closure = _collect_staged_causal_closure(
+                all_events, rid, folded, with_campaign=with_campaign
+            )
+            ev_digests = {str(ev["eid"]): digests_by_eid[str(ev["eid"])] for ev in closure}
+            new_events, skipped_eids = _check_events_equivocation(
+                catalog_dir,
+                run_id=rid,
+                events=closure,
+                event_digests=ev_digests,
+            )
+
+            started_evs = [e for e in reves if e.get("kind") == "run.started"] or reves
+            ev_pid = next((e.get("project_id") for e in started_evs if e.get("project_id")), None)
+            local_main_root, local_worktree_root = _resolve_local_project_roots(
+                worktree_root=worktree_root,
+                bundle_project_id=ev_pid,
+                bundle_project_slug=folded.get("project_slug"),
+            )
+            sc_sha = str(folded.get("sidecar_sha256") or "")
+            sc_path = str(folded.get("sidecar_path") or "")
+            local_sc_path: Path | None = None
+            if sc_sha:
+                found_bytes, local_sc_path = _probe_sidecar_bytes(
+                    sidecar_path=sc_path,
+                    sidecar_sha256=sc_sha,
+                    run_id=rid,
+                    catalog_dir=catalog_dir,
+                    worktree_root=str(local_worktree_root) if local_worktree_root else None,
+                    main_root=str(local_main_root) if local_main_root else None,
+                    allow_raw_sidecar_path=False,
+                )
+                if found_bytes is None and not allow_missing_sidecar:
+                    raise RunBundleInvalidError(
+                        f"Mirror fallback run {rid} requires sidecar sha256={sc_sha}, which is missing locally; "
+                        "pass --allow-missing-sidecar to proceed"
+                    )
+
+            events_bytes = b"".join(_canonical_bytes_strict(ev) + b"\n" for ev in closure)
+            synth_sha = _sha256_bytes(events_bytes)
+            planned.append(
+                {
+                    "run_id": rid,
+                    "folded": folded,
+                    "closure": closure,
+                    "events_bytes": events_bytes,
+                    "bundle_sha256": synth_sha,
+                    "new_events": new_events,
+                    "skipped_eids": skipped_eids,
+                    "started": started_evs[0],
+                    "local_main_root": local_main_root,
+                    "local_worktree_root": local_worktree_root,
+                    "local_sc_path": local_sc_path,
+                    "sc_sha": sc_sha,
+                }
+            )
+
+        if dry_run:
+            return {
+                "ok": True,
+                "mode": "sync_pull_mirror_unverified",
+                "remote": remote_name,
+                "dry_run": True,
+                "matched_runs": matched_ids,
+                "imported": [
+                    {
+                        "run_id": p["run_id"],
+                        "status": "already_present" if not p["new_events"] else "would_import",
+                        "new_events": len(p["new_events"]),
+                        "skipped_existing": len(p["skipped_eids"]),
+                        "import_method": "sync_pull_mirror_unverified",
+                    }
+                    for p in planned
+                ],
+                "warnings": warnings,
+            }
+
+        imported_results: list[dict[str, Any]] = []
+        for p in planned:
+            rid = p["run_id"]
+            folded = p["folded"]
+            origin_host = str(folded.get("hostname") or remote_name or "remote")
+            safe_host = _sanitize_path_segment(origin_host, "remote")
+            safe_slug = _sanitize_path_segment(folded.get("project_slug"), "_unaffiliated")
+            local_main_root = p["local_main_root"]
+            local_worktree_root = p["local_worktree_root"]
+            if local_main_root is not None:
+                target_dir = local_main_root / ".bth" / "log" / "imported" / safe_host
+                with contextlib.suppress(Exception):
+                    register_main_root(local_main_root)
+            else:
+                target_dir = Path.home() / ".bth" / "log" / "imported" / safe_slug / safe_host
+
+            stem = f"{rid}.{p['bundle_sha256'][:12]}"
+            jsonl_path = target_dir / f"{stem}.jsonl"
+            receipt_path = target_dir / f"{stem}.receipt.json"
+
+            if not p["new_events"] and receipt_path.is_file():
+                imported_results.append(
+                    {
+                        "ok": True,
+                        "status": "already_present",
+                        "run_id": rid,
+                        "origin_host": origin_host,
+                        "bundle_sha256": p["bundle_sha256"],
+                        "new_events": 0,
+                        "skipped_existing": len(p["skipped_eids"]),
+                        "import_method": "sync_pull_mirror_unverified",
+                    }
+                )
+                continue
+
+            cid = folded.get("campaign_id") or None
+            ext_camp_ref = None if with_campaign else cid
+            git_commit_local = _check_git_commit_local(
+                str(folded.get("git_hash") or ""),
+                local_worktree_root or local_main_root,
+            )
+            receipt = {
+                "v": 1,
+                "run_id": rid,
+                "bundle_sha256": p["bundle_sha256"],
+                "origin_host": origin_host,
+                "source_main_root": str(p["started"].get("main_root") or ""),
+                "source_worktree_root": str(p["started"].get("worktree_root") or ""),
+                "imported_at": _now_utc_iso(),
+                "import_method": "sync_pull_mirror_unverified",
+                "remote_name": remote_name,
+                "local_worktree_root": str(local_worktree_root) if local_worktree_root else None,
+                "local_sidecar_path": str(p["local_sc_path"]) if p["local_sc_path"] else None,
+                "external_campaign_ref": ext_camp_ref,
+                "git_commit_local": git_commit_local,
+                "sidecar_missing_allowed": bool(
+                    allow_missing_sidecar and p["local_sc_path"] is None and p["sc_sha"]
+                ),
+            }
+            _atomic_write_bytes(jsonl_path, p["events_bytes"])
+            _atomic_write_bytes(
+                receipt_path,
+                (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            )
+            imported_results.append(
+                {
+                    "ok": True,
+                    "status": "imported",
+                    "run_id": rid,
+                    "origin_host": origin_host,
+                    "bundle_sha256": p["bundle_sha256"],
+                    "new_events": len(p["new_events"]),
+                    "skipped_existing": len(p["skipped_eids"]),
+                    "import_method": "sync_pull_mirror_unverified",
+                }
+            )
+
+        ingest_report = run_ingest(catalog_dir)
+        return {
+            "ok": True,
+            "mode": "sync_pull_mirror_unverified",
+            "remote": remote_name,
+            "dry_run": False,
+            "matched_runs": matched_ids,
+            "imported": imported_results,
+            "imported_count": sum(1 for r in imported_results if r["status"] == "imported"),
+            "already_present_count": sum(
+                1 for r in imported_results if r["status"] == "already_present"
+            ),
+            "warnings": warnings,
+            "ingest_report": {
+                "new_events": ingest_report.new_events,
+                "skipped_existing": ingest_report.skipped_existing,
+                "quarantined": ingest_report.quarantined,
+                "entities_refolded": ingest_report.entities_refolded,
+            },
+        }
+
+
+def selective_pull_runs(
+    remote_name: str,
+    config: ProjectConfig,
+    catalog_dir: Path,
+    *,
+    run_ids: list[str] | None = None,
+    project: str = "",
+    since: str = "",
+    include_outputs: bool = False,
+    with_campaign: bool = False,
+    allow_missing_sidecar: bool = False,
+    dry_run: bool = False,
+    project_root: Path | None = None,
+    worktree_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Selectively pull matching runs from ``remote_name`` via remote ``bth bundle export`` + ``pull_path``,
+    falling back to ``sync_pull_mirror_unverified`` when the remote lacks ``bth bundle``."""
+    if remote_name not in config.remotes:
+        raise ValueError(f"Remote '{remote_name}' not in config")
+
+    remote_config = config.remotes[remote_name]
+    host = remote_config["host"]
+    remote_root = remote_config["remote_root"]
+    since_dt = _parse_since_timestamp(since)
+    req_runs = [r.strip() for r in (run_ids or []) if r and r.strip()]
+
+    payload_cfg = {
+        "run_ids": req_runs,
+        "project": project or "",
+        "since_iso": since_dt.isoformat() if since_dt is not None else "",
+        "include_outputs": include_outputs,
+        "with_campaign": with_campaign,
+        "allow_missing_sidecar": allow_missing_sidecar,
+        "dry_run": dry_run,
+    }
+    remote_cmd = (
+        f"python3 -c {shlex.quote(_REMOTE_SELECTIVE_EXPORT_PY)} "
+        f"{shlex.quote(json.dumps(payload_cfg))}"
+    )
+    proc = subprocess.run(
+        [*_SSH_BASE, host, remote_cmd],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        err_msg = (proc.stderr or proc.stdout or f"ssh exit {proc.returncode}").strip()
+        # Check if remote lacked bth/python or bundle command
+        low = err_msg.lower()
+        if any(m in low for m in ("no such command", "unknown command", "unused tokens")):
+            meta = {"mode": "no_bundle_cmd"}
+        else:
+            raise RuntimeError(f"Selective pull SSH failed on {host}: {err_msg}")
+    else:
+        try:
+            meta = json.loads(proc.stdout.strip() or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Invalid JSON from selective pull SSH on {host}: {proc.stdout[:200]}"
+            ) from exc
+
+    if meta.get("mode") == "no_bundle_cmd":
+        return _mirror_fallback_selective_pull(
+            remote_name=remote_name,
+            host=host,
+            remote_root=remote_root,
+            config=config,
+            catalog_dir=catalog_dir,
+            run_ids=req_runs,
+            project=project,
+            since_dt=since_dt,
+            with_campaign=with_campaign,
+            allow_missing_sidecar=allow_missing_sidecar,
+            dry_run=dry_run,
+            project_root=project_root,
+            worktree_root=worktree_root,
+        )
+
+    matched_runs = list(meta.get("matched_runs") or [])
+    if dry_run or not matched_runs:
+        return {
+            "ok": True,
+            "mode": "selective_bundle",
+            "remote": remote_name,
+            "dry_run": dry_run,
+            "matched_runs": matched_runs,
+            "imported": [],
+            "imported_count": 0,
+            "already_present_count": 0,
+        }
+
+    from bathos.cluster import pull_path
+    from bathos.run_bundle import import_run_bundle
+
+    staged_dir = str(meta.get("staged_dir") or "")
+    staged_files = list(meta.get("staged_files") or [])
+    batch_name = str(meta.get("batch_name") or (Path(staged_dir).name if staged_dir else ""))
+
+    imported: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="bth-sync-pull-") as local_tmp_str:
+        local_tmp = Path(local_tmp_str)
+        try:
+            if staged_dir:
+                pull_path(host, staged_dir.rstrip("/") + "/", str(local_tmp) + "/")
+            bundle_files = sorted(local_tmp.glob("*.bthbundle"))
+            if not bundle_files and staged_files:
+                for sf in staged_files:
+                    pull_path(host, sf, str(local_tmp) + "/")
+                bundle_files = sorted(local_tmp.glob("*.bthbundle"))
+            if not bundle_files:
+                raise RuntimeError(
+                    f"No bundle files arrived after pull_path from {host}:{staged_dir or staged_files}"
+                )
+            for bf in bundle_files:
+                res = import_run_bundle(
+                    bf,
+                    allow_missing_sidecar=allow_missing_sidecar,
+                    catalog_dir=catalog_dir,
+                    worktree_root=worktree_root,
+                    import_method="sync_pull",
+                    remote_name=remote_name,
+                )
+                imported.append(res)
+        finally:
+            if batch_name and re.fullmatch(r"[A-Za-z0-9._-]+", batch_name):
+                with contextlib.suppress(Exception):
+                    subprocess.run(
+                        [*_SSH_BASE, host, f'rm -rf "$HOME/.bth/tmp/{batch_name}"'],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+
+    return {
+        "ok": True,
+        "mode": "selective_bundle",
+        "remote": remote_name,
+        "dry_run": False,
+        "matched_runs": matched_runs,
+        "imported": imported,
+        "imported_count": sum(1 for r in imported if r.get("status") == "imported"),
+        "already_present_count": sum(1 for r in imported if r.get("status") == "already_present"),
+    }

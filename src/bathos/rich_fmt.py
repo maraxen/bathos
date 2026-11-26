@@ -111,6 +111,17 @@ def render_run_detail(run: Run, console: Console | None = None) -> None:
         f"[bold]Agent Mode:[/bold] {run.agent_mode or '—'}\n"
         f"[bold]Parent Run ID:[/bold] {parent_id_short}"
     )
+    imported_host = getattr(run, "imported_from_host", None)
+    if imported_host:
+        imp_method = getattr(run, "import_method", None) or "imported"
+        bundle_sha = getattr(run, "bundle_sha256", None) or ""
+        sha_disp = bundle_sha[:12] if bundle_sha else "—"
+        provenance_info += (
+            f"\n[bold]Imported from:[/bold] {imported_host} ({imp_method}, bundle {sha_disp})"
+        )
+        imported_at = getattr(run, "imported_at", None)
+        if imported_at:
+            provenance_info += f"\n[bold]Imported at:[/bold] {imported_at}"
     console.print(Panel(provenance_info, title="Provenance", expand=False))
 
     # Outcome Panel
