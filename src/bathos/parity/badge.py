@@ -280,7 +280,10 @@ def _has_dirty_evidence(report_body: Mapping[str, Any]) -> bool:
     parity_meta = report_body.get("parity_metadata", {})
     tool = report_body.get("tool", {})
     ev_runs = report_body.get("environment", {}).get("evidence_runs", [])
-    any_ev_dirty = any(isinstance(er, Mapping) and bool(er.get("git_dirty")) for er in ev_runs)
+    any_ev_dirty = any(
+        isinstance(er, Mapping) and bool(er.get("git_dirty")) and not bool(er.get("is_hidden"))
+        for er in ev_runs
+    )
     return (
         bool(parity_meta.get("has_dirty_evidence_run"))
         or bool(parity_meta.get("dirty_evidence_run_ids"))

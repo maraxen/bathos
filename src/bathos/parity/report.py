@@ -373,7 +373,7 @@ def build_parity_report(
             *(
                 str(r["run_id"])
                 for r in ev_runs
-                if isinstance(r, Mapping) and r.get("git_dirty") and r.get("run_id")
+                if isinstance(r, Mapping) and r.get("git_dirty") and not r.get("is_hidden") and r.get("run_id")
             ),
             *(str(rid) for rid in result.get("dirty_evidence_run_ids", []) if rid),
         }

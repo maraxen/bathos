@@ -11,6 +11,7 @@ All MCP tools return envelopes with error_code values from this enum.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any
 
@@ -181,6 +182,7 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     BEARINGS_SHADOW_CONFIG_INVALID = "bearings_shadow_config_invalid"
     CITATION_INVALID = "citation_invalid"
     GATE_LADDER_CONFIG_INVALID = "gate_ladder_config_invalid"
+    PARITY_BACKEND_VERSION_MISMATCH = "parity_backend_version_mismatch"
 
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
@@ -308,6 +310,7 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.BEARINGS_SHADOW_CONFIG_INVALID: "Fix shadow_log_dir (BTH_SHADOW_LOG_DIR, [bearings] in .bth.toml, [tool.bathos.bearings] in pyproject.toml, or [bearings] in ~/.config/bathos/config.toml); the file must parse, the key must be a string, and the path must be outside the project work tree",
     BathosErrorCode.CITATION_INVALID: "Verify that <sources_dir>/manifest.json digests, .numbered.txt coordinates, and blockquote text match the source extracts.",
     BathosErrorCode.GATE_LADDER_CONFIG_INVALID: "Fix the WP17 gate mode-state TOML or family corpus config: ensure min_labels, min_precision_lower_bound, min_recall_lower_bound, threshold_basis, writes_isolated=true, and writes_isolated_enforced_by are present.",
+    BathosErrorCode.PARITY_BACKEND_VERSION_MISMATCH: "The comparison backend (e.g. numpy_version) differs from the recorded grade_inputs.comparison_backend. Re-verify in a matching backend environment, or re-grade locally if semantic_match=True confirms all cells, metrics, and verdicts match.",
 }
 
 
@@ -522,6 +525,7 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "ParityDeclareError": BathosErrorCode.CATALOG_ERROR,
     "ParityGradeError": BathosErrorCode.DOCUMENT_INVALID,
     "ParityVerifyError": BathosErrorCode.CATALOG_ERROR,
+    "ParityBackendVersionMismatchError": BathosErrorCode.PARITY_BACKEND_VERSION_MISMATCH,
     "ParityReportVerifyError": BathosErrorCode.DOCUMENT_INVALID,
     "CellEvidenceError": BathosErrorCode.DOCUMENT_INVALID,
     "BadgeValidationError": BathosErrorCode.DOCUMENT_INVALID,
@@ -906,3 +910,27 @@ class BearingsMapperIsReaderError(BearingsError):
 
 class CitationVerificationError(BathosError):
     """Strict citation coordinate, manifest, or source extract verification failure."""
+
+
+# ── Parity Verification Exceptions ───────────────────────────────────────────
+
+
+class ParityVerifyError(RuntimeError):
+    """Raised when ``bth parity grade --verify`` sees byte divergence on replay."""
+
+
+class ParityBackendVersionMismatchError(ParityVerifyError):
+    """Raised when ``--verify`` byte divergence coincides with a comparison_backend mismatch."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        recorded_backend: Mapping[str, Any] | None = None,
+        local_backend: Mapping[str, Any] | None = None,
+        semantic_match: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.recorded_backend: dict[str, Any] = dict(recorded_backend) if recorded_backend is not None else {}
+        self.local_backend: dict[str, Any] = dict(local_backend) if local_backend is not None else {}
+        self.semantic_match: bool = bool(semantic_match)

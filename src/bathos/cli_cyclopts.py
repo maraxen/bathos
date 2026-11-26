@@ -2741,8 +2741,16 @@ app.command(parity_app)
 
 
 def _emit_parity_cli_error(exc: Exception, *, json_out: bool) -> None:
+    from bathos.errors import BathosErrorCode, ParityBackendVersionMismatchError
+
     if json_out:
-        print(json.dumps({"ok": False, "error": str(exc)}))
+        payload: dict[str, object] = {"ok": False, "error": str(exc)}
+        if isinstance(exc, ParityBackendVersionMismatchError):
+            payload["error_code"] = BathosErrorCode.PARITY_BACKEND_VERSION_MISMATCH.value
+            payload["recorded_backend"] = exc.recorded_backend
+            payload["local_backend"] = exc.local_backend
+            payload["semantic_match"] = exc.semantic_match
+        print(json.dumps(payload))
     else:
         print(f"Error: {exc}", file=sys.stderr)
     raise SystemExit(1) from None
