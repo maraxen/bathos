@@ -69,8 +69,14 @@ from bathos.index import (
     BEARINGS_READINGS_COLUMNS,
     CHARTER_CONFIRMATIONS_COLUMNS,
     CHARTER_PIVOTS_COLUMNS,
+    IMPORT_RECEIPTS_COLUMNS,
     OBSERVATION_STATUSES_COLUMNS,
     OBSERVATIONS_COLUMNS,
+)
+from bathos.runlog.envelope import (
+    canonical_json_bytes,
+    compute_envelope_sha256,
+    extract_extra_keys,
 )
 from bathos.runlog.fold_anchors import fold_anchor
 from bathos.runlog.fold_bearings import (
@@ -370,6 +376,14 @@ def discover_roots(catalog_dir: Path | None = None) -> list[tuple[str, str, Path
                     if sub_dir.is_dir():
                         roots.append((kind, rid, sub_dir))
 
+        imported_root_dir = resolved / ".bth" / "log" / "imported"
+        if imported_root_dir.is_dir():
+            for host_entry in sorted(imported_root_dir.iterdir()):
+                if host_entry.is_dir():
+                    roots.append(
+                        ("imported", remote_root_id(resolved, host_entry.name), host_entry)
+                    )
+
     mirror_root_dir = Path.home() / ".bth" / "log-mirror"
     if mirror_root_dir.is_dir():
         for entry in sorted(mirror_root_dir.iterdir()):
@@ -391,6 +405,21 @@ def discover_roots(catalog_dir: Path | None = None) -> list[tuple[str, str, Path
     unaffiliated_dir = Path.home() / ".bth" / "log" / "unaffiliated"
     if unaffiliated_dir.is_dir():
         roots.append(("unaffiliated", "_unaffiliated", unaffiliated_dir))
+
+    global_imported_dir = Path.home() / ".bth" / "log" / "imported"
+    if global_imported_dir.is_dir():
+        for slug_entry in sorted(global_imported_dir.iterdir()):
+            if not slug_entry.is_dir():
+                continue
+            for host_entry in sorted(slug_entry.iterdir()):
+                if host_entry.is_dir():
+                    roots.append(
+                        (
+                            "imported",
+                            f"_unaffiliated::{slug_entry.name}::{host_entry.name}",
+                            host_entry,
+                        )
+                    )
 
     roots.extend(_marker_staging_roots(catalog_dir or default_catalog_dir()))
 
@@ -446,12 +475,59 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _load_existing_events(con: duckdb.DuckDBPyConnection) -> dict[str, tuple]:
-    existing: dict[str, tuple] = {}
-    for eid, kind, entity, data in con.execute(
-        "SELECT eid, kind, entity, data FROM events"
-    ).fetchall():
-        existing[eid] = (kind, json.loads(entity), json.loads(data))
+def _load_existing_events(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
+    existing: dict[str, str] = {}
+    rows = con.execute(
+        "SELECT eid, v, kind, entity, ts, project, project_id, writer, seq, "
+        "main_root, worktree_root, origin, data, envelope_sha256, extra_keys FROM events"
+    ).fetchall()
+    for (
+        eid,
+        v,
+        kind,
+        entity,
+        ts,
+        project,
+        project_id,
+        writer,
+        seq,
+        main_root,
+        worktree_root,
+        origin,
+        data,
+        envelope_sha256,
+        extra_keys,
+    ) in rows:
+        if envelope_sha256:
+            existing[eid] = envelope_sha256
+            continue
+        ev: dict[str, object] = {
+            "v": v,
+            "eid": eid,
+            "kind": kind,
+            "entity": json.loads(entity),
+            "ts": ts,
+            "project": project,
+            "project_id": project_id,
+            "writer": writer,
+            "seq": seq,
+            "main_root": main_root,
+            "worktree_root": worktree_root,
+            "origin": origin if origin is not None else "live",
+            "data": json.loads(data),
+        }
+        if extra_keys:
+            parsed_extra = json.loads(extra_keys)
+            if isinstance(parsed_extra, dict):
+                ev.update(parsed_extra)
+        try:
+            existing[eid] = compute_envelope_sha256(ev)
+        except (TypeError, ValueError):
+            import hashlib
+
+            existing[eid] = hashlib.sha256(
+                json.dumps(ev, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
     return existing
 
 
@@ -501,6 +577,8 @@ _EVENT_COLUMNS = [
     "worktree_root",
     "origin",
     "data",
+    "envelope_sha256",
+    "extra_keys",
 ]
 _EVENT_INSERT_SQL = (
     f"INSERT INTO events ({', '.join(_EVENT_COLUMNS)}) "  # noqa: S608 -- internal constant
@@ -514,9 +592,12 @@ _EVENT_ARROW_SCHEMA = pa.schema(
 
 
 def _event_row(obj: dict) -> list:
-    """The 14 `events` column values for one validated envelope, in
+    """The 16 `events` column values for one validated envelope, in
     `_EVENT_COLUMNS` order. Shared by the per-row and bulk insert paths."""
     entity_json = json.dumps(obj["entity"])
+    extra = extract_extra_keys(obj)
+    extra_json = canonical_json_bytes(extra).decode("utf-8") if extra else None
+    env_sha = compute_envelope_sha256(obj)
     return [
         obj["eid"],
         obj.get("v"),
@@ -532,6 +613,8 @@ def _event_row(obj: dict) -> list:
         obj.get("worktree_root"),
         obj.get("origin", "live"),
         json.dumps(obj["data"]),
+        env_sha,
+        extra_json,
     ]
 
 
@@ -587,8 +670,38 @@ def _insert_run_row(con: duckdb.DuckDBPyConnection, row: dict) -> None:
 
 
 def _row_to_event(r: tuple) -> dict:
+    if len(r) == 12:
+        (
+            eid,
+            kind,
+            entity,
+            ts,
+            project,
+            project_id,
+            writer,
+            seq,
+            main_root,
+            worktree_root,
+            origin,
+            data,
+        ) = r
+        return {
+            "eid": eid,
+            "kind": kind,
+            "entity": json.loads(entity),
+            "ts": ts,
+            "project": project,
+            "project_id": project_id,
+            "writer": writer,
+            "seq": seq,
+            "main_root": main_root,
+            "worktree_root": worktree_root,
+            "origin": origin,
+            "data": json.loads(data),
+        }
     (
         eid,
+        v,
         kind,
         entity,
         ts,
@@ -600,8 +713,10 @@ def _row_to_event(r: tuple) -> dict:
         worktree_root,
         origin,
         data,
+        extra_keys,
     ) = r
-    return {
+    ev: dict = {
+        "v": v,
         "eid": eid,
         "kind": kind,
         "entity": json.loads(entity),
@@ -615,11 +730,16 @@ def _row_to_event(r: tuple) -> dict:
         "origin": origin,
         "data": json.loads(data),
     }
+    if extra_keys:
+        parsed_extra = json.loads(extra_keys)
+        if isinstance(parsed_extra, dict):
+            ev.update(parsed_extra)
+    return ev
 
 
 _EVENT_SELECT = (
-    "SELECT eid, kind, entity, ts, project, project_id, writer, seq, main_root, "
-    "worktree_root, origin, data FROM events"
+    "SELECT eid, v, kind, entity, ts, project, project_id, writer, seq, main_root, "
+    "worktree_root, origin, data, extra_keys FROM events"
 )
 
 
@@ -716,8 +836,8 @@ class _FoldLookup:
             return
         wanted_list = list(wanted)
         rows = self.con.execute(
-            "SELECT entity_key, eid, kind, entity, ts, project, project_id, writer, seq, "
-            "main_root, worktree_root, origin, data FROM events "
+            "SELECT entity_key, eid, v, kind, entity, ts, project, project_id, writer, seq, "
+            "main_root, worktree_root, origin, data, extra_keys FROM events "
             "WHERE entity_key IN (SELECT unnest(?::VARCHAR[])) ORDER BY rowid",
             [wanted_list],
         ).fetchall()
@@ -941,13 +1061,34 @@ def _refold_run(
     if not events:
         return
     row = fold_run(events)
+    known_cids = lk.known_campaign_ids()
     row["campaign_id"] = resolve_run_campaign_id(
         events,
         lk.run_added_events_for_run(run_id),
-        known_campaign_ids=lk.known_campaign_ids(),
+        known_campaign_ids=known_cids,
     )
+    receipt_row = con.execute(
+        "SELECT origin_host, imported_at, import_method, bundle_sha256, external_campaign_ref "
+        "FROM import_receipts WHERE run_id = ? "
+        "ORDER BY imported_at DESC, bundle_sha256 DESC LIMIT 1",
+        [run_id],
+    ).fetchone()
+    if receipt_row is not None:
+        (
+            rec_host,
+            rec_imported_at,
+            rec_method,
+            rec_bundle_sha,
+            rec_ext_cid,
+        ) = receipt_row
+        row["imported_from_host"] = rec_host
+        row["imported_at"] = rec_imported_at
+        row["import_method"] = rec_method
+        row["bundle_sha256"] = rec_bundle_sha
+        if not row.get("campaign_id") and rec_ext_cid:
+            row["campaign_id"] = rec_ext_cid
     campaign_id = row.get("campaign_id")
-    if campaign_id:
+    if campaign_id and campaign_id in known_cids:
         with _fold_lookup_scope(lk):
             _campaign_row, campaign_runs_rows = _cached_campaign_fold(
                 con, campaign_id, campaign_fold_cache
@@ -1290,6 +1431,29 @@ def _ingest_locked(
     return report
 
 
+def _receipt_row_tuple(receipt: dict) -> tuple:
+    return tuple(receipt.get(col) for col in IMPORT_RECEIPTS_COLUMNS)
+
+
+def _load_existing_receipts(con: duckdb.DuckDBPyConnection) -> dict[tuple[str, str], tuple]:
+    cols = ", ".join(IMPORT_RECEIPTS_COLUMNS)
+    rows = con.execute(f"SELECT {cols} FROM import_receipts").fetchall()  # noqa: S608 -- internal constant
+    return {(r[0], r[1]): r for r in rows}
+
+
+def _upsert_import_receipt(con: duckdb.DuckDBPyConnection, row_tuple: tuple) -> None:
+    cols = ", ".join(IMPORT_RECEIPTS_COLUMNS)
+    placeholders = ", ".join("?" for _ in IMPORT_RECEIPTS_COLUMNS)
+    updates = ", ".join(
+        f"{c} = EXCLUDED.{c}" for c in IMPORT_RECEIPTS_COLUMNS if c not in ("run_id", "bundle_sha256")
+    )
+    con.execute(
+        f"INSERT INTO import_receipts ({cols}) VALUES ({placeholders}) "  # noqa: S608 -- internal constant
+        f"ON CONFLICT (run_id, bundle_sha256) DO UPDATE SET {updates}",
+        list(row_tuple),
+    )
+
+
 def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> IngestReport:
     """Build (or incrementally re-fold, if `db_path` already exists and is a
     valid index.db) one DuckDB file from exactly `roots` -- the common
@@ -1308,6 +1472,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     quarantined = 0
     affected_run_ids: set[str] = set()
     affected_campaign_ids: set[str] = set()
+    candidate_run_cids: set[str] = set()
     affected_edge_keys: set[tuple[str, ...]] = set()
     affected_anchor_ids: set[str] = set()
     affected_blast_radius_ids: set[str] = set()
@@ -1327,6 +1492,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
     try:
         init_index_schema(con)
         existing = _load_existing_events(con)
+        existing_receipts = _load_existing_receipts(con)
         watermarks = _load_watermarks(con)
 
         # One transaction for the whole fold (inserts, refolds, watermarks):
@@ -1342,6 +1508,25 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
         for root_kind, root_id, log_dir in roots:
             if not log_dir.is_dir():
                 continue
+            if root_kind == "imported":
+                for rec_path in sorted(log_dir.glob("*.receipt.json")):
+                    try:
+                        rec_obj = json.loads(rec_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        logger.warning("runlog: skipping unreadable import receipt %s", rec_path)
+                        continue
+                    if not isinstance(rec_obj, dict):
+                        continue
+                    rec_run_id = rec_obj.get("run_id")
+                    rec_bundle_sha = rec_obj.get("bundle_sha256")
+                    if not isinstance(rec_run_id, str) or not rec_run_id or not isinstance(rec_bundle_sha, str) or not rec_bundle_sha:
+                        continue
+                    rec_tuple = _receipt_row_tuple(rec_obj)
+                    rec_key = (rec_run_id, rec_bundle_sha)
+                    if existing_receipts.get(rec_key) != rec_tuple:
+                        _upsert_import_receipt(con, rec_tuple)
+                        existing_receipts[rec_key] = rec_tuple
+                        affected_run_ids.add(rec_run_id)
             for seg in sorted(log_dir.glob("*.jsonl")):
                 wm_key = (root_kind, root_id, seg.name)
                 prev_offset = watermarks.get(wm_key, 0)
@@ -1369,18 +1554,23 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                         _insert_quarantine(con, str(seg), byte_offset, err, raw)
                         quarantined += 1
                         continue
+                    try:
+                        candidate_sha = compute_envelope_sha256(obj)
+                    except (TypeError, ValueError):
+                        _insert_quarantine(con, str(seg), byte_offset, "invalid_json", raw)
+                        quarantined += 1
+                        continue
                     eid = obj["eid"]
-                    candidate_key = (obj["kind"], obj["entity"], obj["data"])
                     prior = existing.get(eid)
                     if prior is not None:
-                        if prior == candidate_key:
+                        if prior == candidate_sha:
                             skipped += 1
                         else:
                             _insert_quarantine(con, str(seg), byte_offset, "eid_conflict", raw)
                             quarantined += 1
                         continue
                     pending_event_rows.append(_event_row(obj))
-                    existing[eid] = candidate_key
+                    existing[eid] = candidate_sha
                     new_events += 1
 
                     kind = obj["kind"]
@@ -1390,7 +1580,7 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
                         if kind in _RUN_STARTED_KINDS:
                             cid = (obj["data"] or {}).get("campaign_id")
                             if cid:
-                                affected_campaign_ids.add(cid)
+                                candidate_run_cids.add(cid)
                     elif (kind in _CAMPAIGN_DIRECT_KINDS and len(entity) == 1) or (
                         kind in _CAMPAIGN_MEMBER_KINDS and len(entity) >= 2
                     ):
@@ -1429,6 +1619,11 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
         # writes derived tables, so one lookup cache is valid for all of it.
         _bulk_insert_events(con, pending_event_rows)
         lookup = _FoldLookup(con)
+        known_cids = lookup.known_campaign_ids()
+        for cid in candidate_run_cids:
+            resolved_cid = lookup.resolve_campaign_id(cid)
+            if resolved_cid and resolved_cid in known_cids:
+                affected_campaign_ids.add(resolved_cid)
         affected_campaign_ids = {
             lookup.resolve_campaign_id(c) or c for c in affected_campaign_ids
         }
@@ -1437,9 +1632,12 @@ def fold_roots_into(db_path: Path, roots: list[tuple[str, str, Path]]) -> Ingest
         # and symmetrically, any campaign-side change must refold every
         # current member run (so its seq_position/evalue denormalization
         # stays in sync even when the run entity itself got no new event
-        # this batch).
+        # this batch). External campaign refs (not in known_campaign_ids)
+        # are skipped so single-run imports do not trigger phantom refolds.
         for run_id in list(affected_run_ids):
-            affected_campaign_ids |= _campaign_ids_for_run(con, run_id, lookup=lookup)
+            for cid in _campaign_ids_for_run(con, run_id, lookup=lookup):
+                if cid in known_cids:
+                    affected_campaign_ids.add(cid)
         for campaign_id in list(affected_campaign_ids):
             affected_run_ids |= _campaign_member_run_ids(con, campaign_id, lookup=lookup)
 

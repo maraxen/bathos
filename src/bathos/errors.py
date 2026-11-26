@@ -184,6 +184,13 @@ class BathosErrorCode(str, Enum):  # noqa: UP042 - inheriting str preserves str(
     GATE_LADDER_CONFIG_INVALID = "gate_ladder_config_invalid"
     PARITY_BACKEND_VERSION_MISMATCH = "parity_backend_version_mismatch"
 
+    # Cross-host run bundles & remote import (spec 261125).
+    RUN_BUNDLE_INVALID = "run_bundle_invalid"
+    RUN_BUNDLE_TAMPERED = "run_bundle_tampered"
+    RUN_BUNDLE_UNSAFE_PATH = "run_bundle_unsafe_path"
+    RUN_IMPORT_CONFLICT = "run_import_conflict"
+    REMOTE_OUTPUTS_UNDECLARED = "remote_outputs_undeclared"
+
 
 # Resolution hints registry: every BathosErrorCode member must have a non-empty entry
 RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
@@ -311,6 +318,11 @@ RESOLUTION_HINTS: dict[BathosErrorCode, str] = {
     BathosErrorCode.CITATION_INVALID: "Verify that <sources_dir>/manifest.json digests, .numbered.txt coordinates, and blockquote text match the source extracts.",
     BathosErrorCode.GATE_LADDER_CONFIG_INVALID: "Fix the WP17 gate mode-state TOML or family corpus config: ensure min_labels, min_precision_lower_bound, min_recall_lower_bound, threshold_basis, writes_isolated=true, and writes_isolated_enforced_by are present.",
     BathosErrorCode.PARITY_BACKEND_VERSION_MISMATCH: "The comparison backend (e.g. numpy_version) differs from the recorded grade_inputs.comparison_backend. Re-verify in a matching backend environment, or re-grade locally if semantic_match=True confirms all cells, metrics, and verdicts match.",
+    BathosErrorCode.RUN_BUNDLE_INVALID: "Inspect the bundle archive and run metadata; re-export with `bth bundle export` (or pass `--allow-missing-sidecar` if the sidecar bytes are unavailable).",
+    BathosErrorCode.RUN_BUNDLE_TAMPERED: "Bundle digest or content check failed; do not trust or import this archive -- re-export a fresh bundle from the source host.",
+    BathosErrorCode.RUN_BUNDLE_UNSAFE_PATH: "Bundle contains an unsafe member path, link, special file, or exceeds archive limits; reject the archive and re-export from a trusted source.",
+    BathosErrorCode.RUN_IMPORT_CONFLICT: "Incoming run events conflict with existing records in the local catalog (equivocation on eid, genesis, terminal status, or run_end hashes); inspect `bth show` and resolve before retrying.",
+    BathosErrorCode.REMOTE_OUTPUTS_UNDECLARED: "Declare [outputs] roots in the sidecar, pass --output-paths, or set BTH_OUTPUT_DIR before launching remotely (or pass --bth-allow-unbound-outputs).",
 }
 
 
@@ -536,6 +548,12 @@ EXCEPTION_TO_CODE: dict[str, BathosErrorCode] = {
     "ParityStoreUnavailableError": BathosErrorCode.CATALOG_ERROR,
     # Parity Ring 1 WP17 gate ladder kit
     "GateLadderConfigError": BathosErrorCode.GATE_LADDER_CONFIG_INVALID,
+    # Cross-host run bundles & remote import (spec 261125)
+    "RunBundleInvalidError": BathosErrorCode.RUN_BUNDLE_INVALID,
+    "RunBundleTamperedError": BathosErrorCode.RUN_BUNDLE_TAMPERED,
+    "RunBundleUnsafePathError": BathosErrorCode.RUN_BUNDLE_UNSAFE_PATH,
+    "RunImportConflictError": BathosErrorCode.RUN_IMPORT_CONFLICT,
+    "RemoteOutputsUndeclaredError": BathosErrorCode.REMOTE_OUTPUTS_UNDECLARED,
 }
 
 
@@ -934,3 +952,26 @@ class ParityBackendVersionMismatchError(ParityVerifyError):
         self.recorded_backend: dict[str, Any] = dict(recorded_backend) if recorded_backend is not None else {}
         self.local_backend: dict[str, Any] = dict(local_backend) if local_backend is not None else {}
         self.semantic_match: bool = bool(semantic_match)
+
+
+# ── Cross-Host Run Bundle & Remote Import Exceptions (spec 261125) ──────────
+
+
+class RunBundleInvalidError(BathosError):
+    """Bundle is malformed, unsupported version, non-finite JSON, or missing required data."""
+
+
+class RunBundleTamperedError(BathosError):
+    """Bundle manifest, events, sidecar, or output blob failed cryptographic digest verification."""
+
+
+class RunBundleUnsafePathError(BathosError):
+    """Bundle archive contains unsafe member path, link, special file, or exceeds bomb bounds."""
+
+
+class RunImportConflictError(BathosError):
+    """Incoming run events equivocate against existing catalog events."""
+
+
+class RemoteOutputsUndeclaredError(BathosError):
+    """Remote launch lacked declared outputs or run_end output capture was refused."""
